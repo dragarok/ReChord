@@ -86,7 +86,8 @@ AP_SERVICE_SRCS := \
   firmware/services/input.c \
   firmware/services/fw_update.c \
   firmware/services/scratch.c \
-  firmware/services/fs_target.c
+  firmware/services/fs_target.c \
+  firmware/services/screenshot.c
 
 # Theme module (same set as $(THEME_SRCS) in firmware/theme/theme.mk).
 AP_THEME_SRCS := \

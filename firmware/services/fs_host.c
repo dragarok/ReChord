@@ -233,15 +233,48 @@ long fs_seek(fs_file_t *f, long offset)
     return offset;
 }
 
-void fs_close(fs_file_t *f)
+int fs_close(fs_file_t *f)
 {
+    int rc = FS_OK;
+
     if (f == NULL) {
-        return;
+        return FS_OK;
     }
-    if (f->fp != NULL) {
-        (void)fclose(f->fp);
+    if (f->fp != NULL && fclose(f->fp) != 0) {
+        rc = FS_ERR_IO;
     }
     free(f);
+    return rc;
+}
+
+int fs_remove(const char *path)
+{
+    char host[FS_HOST_PATH_MAX];
+
+    if (map_path(path, host, (unsigned long)sizeof(host)) != FS_OK) {
+        return FS_ERR_ARG;
+    }
+    return remove(host) == 0 ? FS_OK : FS_ERR_OPEN;
+}
+
+int fs_exists(const char *path)
+{
+    char host[FS_HOST_PATH_MAX];
+#if defined(FS_HOST_HAVE_DIRENT)
+    struct stat st;
+
+    return map_path(path, host, (unsigned long)sizeof(host)) == FS_OK &&
+           stat(host, &st) == 0;
+#else
+    FILE *fp;
+
+    if (map_path(path, host, (unsigned long)sizeof(host)) != FS_OK ||
+        (fp = fopen(host, "rb")) == NULL) {
+        return 0;
+    }
+    (void)fclose(fp);
+    return 1;
+#endif
 }
 
 

@@ -3,7 +3,7 @@
 # Makefile once services land in the firmware image).
 #
 # Exactly ONE fs backend is linked per image:
-#   target firmware -> fs_target.c (SDK FAT TODO stub for now)
+#   target firmware -> fs_target.c (FAT16/FAT32/exFAT; FAT32 writable)
 #   host tools/tests -> fs_host.c  (POSIX backend)
 
 SERVICES_DIR := firmware/services

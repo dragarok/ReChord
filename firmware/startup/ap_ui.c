@@ -51,7 +51,7 @@ static void emmc_probe(void)
         snprintf(s_emmc, sizeof s_emmc, "%uM u%x", (unsigned)(emmc_sectors() >> 11),
                  (unsigned)(s_user = user));
     if (s_user)
-        fs_target_mount(0, "Internal", emmc_read, s_user);
+        fs_target_mount_rw(0, "Internal", emmc_read, emmc_write, s_user);
 }
 
 static const char *emmc_text(void) { return s_emmc; }
@@ -220,7 +220,7 @@ static void usb_session(void)
     line(1, "eject on the PC or press power");
     display_flush_rows(0, DISPLAY_H - 1);
     r = usb_msc_run(luns, 2, keys_power, &rd, &wr);
-    fs_target_mount(0, "Internal", emmc_read, s_user);   /* host may have written */
+    fs_target_mount_rw(0, "Internal", emmc_read, emmc_write, s_user);   /* host may have written */
     snprintf(s_usb, sizeof s_usb, "x%d r%uM w%uM", r, (unsigned)(rd >> 11), (unsigned)(wr >> 11));
     while (keys_power())                 /* don't leak the exit press */
         cpu_wait_tick();
