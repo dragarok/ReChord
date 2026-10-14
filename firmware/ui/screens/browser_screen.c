@@ -217,22 +217,40 @@ static void browser_screen_draw(void)
     menu_draw_item(DISPLAY_H - THEME_ITEM_H, footer, NULL, false);
 }
 
+static void invalidate_row(int abs_idx)
+{
+    int y = THEME_MENU_TOP + (abs_idx - s_state.top) * THEME_ITEM_H;
+
+    ui_invalidate(0, y, DISPLAY_W - 1, y + THEME_ITEM_H - 1);
+}
+
+/* Cursor step: without a scroll only the two rows and the "n / total" footer
+ * change, so only those are flushed (a full repaint is 54400 pixels). */
+static void browser_step(int delta)
+{
+    int old_cursor = s_state.cursor, old_top = s_state.top;
+
+    s_state.cursor += delta;
+    browser_ensure_visible();
+    if (s_state.top != old_top) {
+        ui_invalidate_all();
+        return;
+    }
+    invalidate_row(old_cursor);
+    invalidate_row(s_state.cursor);
+    ui_invalidate(0, DISPLAY_H - THEME_ITEM_H, DISPLAY_W - 1, DISPLAY_H - 1);
+}
+
 static void browser_screen_handle_event(const input_event_t *ev)
 {
     switch (ev->type) {
     case KEY_UP:
-        if (s_state.cursor > 0) {
-            s_state.cursor--;
-            browser_ensure_visible();
-            ui_invalidate_all();
-        }
+        if (s_state.cursor > 0)
+            browser_step(-1);
         break;
     case KEY_DOWN:
-        if (s_state.cursor < (int)s_state.total - 1) {
-            s_state.cursor++;
-            browser_ensure_visible();
-            ui_invalidate_all();
-        }
+        if (s_state.cursor < (int)s_state.total - 1)
+            browser_step(+1);
         break;
     case KEY_SELECT: {
         uint32_t widx = (uint32_t)s_state.cursor - s_state.win_start;
