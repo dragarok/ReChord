@@ -8,6 +8,7 @@
 
 typedef struct {
     uint32_t seq, codec, rate, bits, channels, frames;
+    uint32_t index;                /* its entry in the playlist directory */
     char name[64];
 } audio_track_t;
 
@@ -29,6 +30,9 @@ int audio_status(audio_status_t *st);
 /* DAC volume in dB, clamped to -60..0 (default -40); returns the value set. */
 int audio_set_volume_db(int db);
 int audio_get_volume_db(void);
+/* +1: next track; -1: previous (or the start of this one if more than 3 s in).
+ * Returns audio_play_dir()'s result. */
+int audio_skip(int dir);
 /* 1 = pause, 0 = resume; returns the paused state. */
 int audio_pause(int on);
 int audio_paused(void);

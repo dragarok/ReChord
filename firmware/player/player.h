@@ -106,6 +106,7 @@ int   player_pause(void);
 int   player_stop(void);
 int   player_seek(long ms);
 int   player_next(void);
+int   player_prev(void);   /* previous track, or the start of this one after 3 s */
 int   player_get_state(void);
 long  player_get_position_ms(void);
 int   player_set_volume(int db);

@@ -215,6 +215,7 @@ static void usb_session(void)
         snprintf(s_usb, sizeof s_usb, "no user volume");
         return;
     }
+    player_stop();                       /* the PC may rewrite the files we stream */
     screen("USB mass storage");
     line(1, "eject on the PC or press power");
     display_flush_rows(0, DISPLAY_H - 1);
@@ -586,6 +587,8 @@ void ap_ui_loop(void)
         input_scan(adc, power);
 
         while (input_poll(&ev) > 0) {
+            if (ev.adc_value == INPUT_ADC_LONG && ui_top_screen() != &player_screen)
+                continue;                /* long presses only mean something on Now Playing */
             if (ev.type == KEY_MENU) {
                 while (ui_stack_depth() > 1)
                     ui_pop_screen();

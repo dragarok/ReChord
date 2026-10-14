@@ -69,7 +69,8 @@ int player_stop(void)
 }
 
 int player_seek(long ms) { return PLAYER_ERR_STATE; }
-int player_next(void) { return PLAYER_ERR_EMPTY; }
+int player_next(void) { return audio_skip(1) == 0 ? PLAYER_OK : PLAYER_ERR_EMPTY; }
+int player_prev(void) { return audio_skip(-1) == 0 ? PLAYER_OK : PLAYER_ERR_EMPTY; }
 
 int player_get_state(void)
 {

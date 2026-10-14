@@ -11,11 +11,15 @@
 
 #include "drivers/emmc.h"
 #include "services/fw_update.h"
+#include "services/scratch.h"
 
 #define BLK 16u                              /* sectors per block (8 KiB) */
 
 static uint32_t s_sec[128], s_fat[128], s_fat_lba;
-static uint32_t s_blk[BLK * 128u], s_chk[BLK * 128u];
+/* block + verify buffers in the shared scratch (never live during a USB session) */
+#define s_blk (g_scratch)
+#define s_chk (g_scratch + BLK * 128u)
+_Static_assert(2u * BLK * 128u <= SCRATCH_WORDS, "updater buffers exceed the scratch");
 static struct { uint32_t fat, data, spc, root, nfats, fatsz; } s_fs;
 
 static uint32_t le16(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8; }

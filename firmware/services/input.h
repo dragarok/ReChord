@@ -51,6 +51,11 @@ int input_map_adc(int adc_value);
  * hold produce nothing. Returns 1 if an event was pushed. */
 int input_scan(int adc_value, int power);
 
+/* Holding a key for INPUT_LONG_SCANS scans (10 ms each) queues a second event
+ * of the same type with adc_value == INPUT_ADC_LONG. */
+#define INPUT_LONG_SCANS 60
+#define INPUT_ADC_LONG   (-2)
+
 /* Host-mock helper: drop all queued events (also useful between test cases). */
 void input_mock_clear(void);
 

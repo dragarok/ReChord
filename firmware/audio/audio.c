@@ -216,6 +216,7 @@ static int open_next(void)
             u->channels = t.channels;
             u->frames = t.frames;
             u->codec = t.codec;
+            u->index = s_next_index - 1u;
             strncpy(u->name, ent.name, sizeof u->name - 1);
             u->name[sizeof u->name - 1] = 0;
         }
@@ -446,6 +447,27 @@ void audio_stop(void)
     halt();
 }
 
+int audio_skip(int dir)
+{
+    audio_status_t st;
+    fs_dirent_t ent;
+    uint32_t got, total, idx;
+
+    audio_status(&st);
+    if (!st.seq)
+        return -3;
+    idx = st.track.index;
+    if (dir > 0)
+        return audio_play_dir(s_dir, idx + 1u);
+    if (st.frames <= 3u * st.track.rate) {          /* near the start: the previous playable entry */
+        for (uint32_t j = idx; j-- > 0; ) {
+            if (fs_list_dir(s_dir, j, &ent, 1, &got, &total) == 0 && got && !ent.is_dir && playable(ent.name))
+                return audio_play_dir(s_dir, j);
+        }
+    }
+    return audio_play_dir(s_dir, idx);              /* restart this one */
+}
+
 /* Pause: stop the I2S transfer; the DMA then stalls on its handshake and keeps
  * its place, core B stops once the ring is full. Resume restarts I2S. */
 
@@ -485,12 +507,14 @@ void audio_poll(void)
 
 int audio_status(audio_status_t *st)
 {
-    const audio_track_t *t = &s_tracks[AS->cur_seq % AS_QUEUE];
+    /* before core B opens the first track, report that track */
+    uint32_t seq = s_b_up && AS->cur_seq ? AS->cur_seq : (s_seq ? s_seq - (uint32_t)(AS->q_wr - 1u) : 0);
+    const audio_track_t *t = &s_tracks[seq % AS_QUEUE];
 
     memset(st, 0, sizeof *st);
     st->playing = s_playing;
-    st->seq = AS->cur_seq;
-    if (s_b_up && t->seq == AS->cur_seq && AS->cur_seq) {
+    st->seq = seq;
+    if (s_b_up && seq && t->seq == seq) {
         st->track = *t;
         /* decoded minus what still waits in the ring */
         {

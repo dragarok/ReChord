@@ -10,6 +10,7 @@
  * interrupt stays off and everything is polled from usb_msc_run().
  */
 #include <stdint.h>
+#include "services/scratch.h"
 #include <string.h>
 
 #include "emmc.h"
@@ -444,7 +445,7 @@ static void put_be32(uint8_t *p, uint32_t v)
 
 static void scsi(const uint32_t *cbw, const usb_lun_t *u, uint32_t *rd, uint32_t *wr)
 {
-    static uint32_t buf[CHUNK_SECTORS * 128u];
+    uint32_t *const buf = g_scratch;     /* CHUNK_SECTORS * 128 words, shared with the updater */
     static uint32_t resp[9];
     const uint8_t *cb = (const uint8_t *)cbw + 15;
     uint8_t *r = (uint8_t *)resp, flags = ((const uint8_t *)cbw)[12];

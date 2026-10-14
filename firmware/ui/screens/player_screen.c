@@ -120,7 +120,18 @@ static void player_screen_handle_event(const input_event_t *ev)
 {
     switch (ev->type) {
     case KEY_UP:
-    case KEY_DOWN: {
+    case KEY_DOWN:
+        if (ev->adc_value == INPUT_ADC_LONG) {   /* hold: next / previous track */
+            /* the press itself already stepped the volume: take that back */
+            player_set_volume(player_get_volume() + (ev->type == KEY_UP ? -1 : 1));
+            player_screen_set_volume(player_get_volume());
+            if (ev->type == KEY_UP)
+                player_next();
+            else
+                player_prev();
+            break;
+        }
+        {
         /* volume through the player module (it clamps -60..+20 dB) */
         int db = player_get_volume() + (ev->type == KEY_UP ? 1 : -1);
         player_set_volume(db);
@@ -233,7 +244,8 @@ void player_screen_refresh(void)
         return;
     }
     /* gapless: the next track took over without an open from the browser */
-    if (ti.title[0] && strncmp(ti.title, s_title, sizeof s_title - 1))
+    if (ti.title[0] && (strncmp(ti.title, s_title, sizeof s_title - 1) ||
+                        (ti.duration_ms > 0 && (uint32_t)(ti.duration_ms / 1000) != s_duration_s)))
         player_screen_set_track(ti.title, ti.duration_ms > 0 ? (uint32_t)(ti.duration_ms / 1000) : 0);
     pos = (uint32_t)(player_get_position_ms() / 1000);
     if (pos != s_position_s)

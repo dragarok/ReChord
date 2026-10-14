@@ -84,6 +84,8 @@ int input_poll(input_event_t *ev)
     return 1;
 }
 
+static unsigned s_held_scans;        /* scans the debounced key has been held */
+
 int input_scan(int adc_value, int power)
 {
     int key = power ? KEY_POWER : input_map_adc(adc_value);
@@ -92,9 +94,14 @@ int input_scan(int adc_value, int power)
         s_scan_last = key;
         return 0;
     }
-    if (key == s_scan_held)
+    if (key == s_scan_held) {
+        /* a press fires at once; holding it on fires one more, long, event */
+        if (key != KEY_NONE && ++s_held_scans == INPUT_LONG_SCANS)
+            return input_push(key, INPUT_ADC_LONG) == INPUT_OK;
         return 0;
+    }
     s_scan_held = key;
+    s_held_scans = 0;
     if (key == KEY_NONE)
         return 0;
     return input_push(key, power ? -1 : adc_value) == INPUT_OK;

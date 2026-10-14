@@ -542,8 +542,11 @@ static void i2s1_setup(uint32_t rate, uint32_t mclk)
 
     I2S_TXCR = 0x401Fu;      /* verbatim: ch0-1 + 32-bit bus word + 16-bit */
     I2S_RXCR = 0x401Fu;      /* ref writes RXCR too (verbatim)            */
-    /* CKR verbatim: high16 = (mclk/(rate*64))-1, low16 = 0x3F3F. */
-    div = (mclk / (64u * rate)) - 1u;
+    /* CKR: high16 = mclk/(rate*64) - 1, low16 = 0x3F3F. Rounded: the table's
+     * MCLKs are what the PLL makes (44.1k: 11288960 Hz, not 256 x 44100), and
+     * truncating 3.9998 gave a bit clock of MCLK/3, a third too fast; RECHO
+     * writes 0x33F3F at 44.1k (QEMU trace). */
+    div = (mclk + 32u * rate) / (64u * rate) - 1u;
     I2S_CKR = ((div & 0xFFFFu) << 16) | 0x3F3Fu;
     /* INTCR verbatim (ref FUN_03056550 "i2s regs"): 0x01F00102 — TX
      * underrun INT enable + FIFO threshold fields. The polled path does
