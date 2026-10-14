@@ -45,6 +45,7 @@
  * v1 scope: gates + mux scan + I2C0 + DAC regs + I2S1 TX master + polled
  * FIFO feed. No DMA (ref's DMA block is at 0x03090000 — port later).
  */
+#include "board.h"
 #include <stdint.h>
 
 #include "dac_cs43131.h"
@@ -207,11 +208,16 @@ static void dac_power_sequence(void)
     dac_gpio_out(2, 14, 1);
     dac_gpio_out(2, 2, 1);
     dac_delay_ms(2);
+#if BOARD == BOARD_8G
     dac_gpio_out(2, 1, 0);
     dac_delay_ms(1);
     dac_gpio_out(2, 1, 1);
     dac_delay_ms(8);
     dac_gpio_out(2, 1, 0);
+#endif
+    /* 512 MB board: stock MINIV390 never pulses GPIO2.1; it holds it at the
+     * board_early_init() level (drivers/board_rknanoc.c). Unverified whether
+     * the DACs need another reset there -- check on hardware. */
     dac_delay_ms(2);
 }
 
@@ -448,7 +454,9 @@ void dac_output_off(void)
     dac_map_write(0x000B0000, 0x00);
     dac_delay_ms(10);
     dac_gpio_out(1, 4, 0);              /* amp off                         */
+#if BOARD == BOARD_8G
     dac_gpio_out(2, 1, 1);
+#endif
     dac_gpio_out(2, 2, 0);
     I2S_XFER = 0;                       /* FUN_030564d8 close tail         */
     I2S_DMACR = 0;

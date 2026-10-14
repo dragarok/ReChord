@@ -119,6 +119,25 @@ int keys_adc(void)
     return v;
 }
 
+/* One blocking conversion on channel ch, then channel 1 is restarted so the
+ * next keys_adc() still returns a channel-1 value. -1 on timeout. */
+int keys_adc_channel(unsigned ch)
+{
+    int v = -1;
+
+    ADC[2] &= ~0x10u;
+    ADC[2] = (ADC[2] & ~0x47u) | (ch & 7u) | 0x18u;
+    for (unsigned n = 0; n < 100000u; n++) {
+        if (ADC[2] & 0x40u) {
+            v = (int)(ADC[0] & 0x3FFu);
+            break;
+        }
+    }
+    ADC[2] &= ~0x10u;
+    ADC[2] = (ADC[2] & ~0x47u) | 1u | 0x18u;
+    return v;
+}
+
 /* Power key: GPIO2.5 input, 1 = pressed (reference 0x03051b2c). */
 int keys_power(void)
 {
@@ -131,7 +150,11 @@ int keys_power(void)
  * USB plugged in the player stays powered by VBUS. */
 void board_power_off(void)
 {
+    extern void board_power_off_pins(void);   /* board_rknanoc.c */
+
     __asm__ volatile ("cpsid i");
+    board_power_off_pins();                   /* 512 MB: GPIO0.14, GPIO2.1 low */
+    panel_io_delay_ms(5);
     iomux_gpio(2, 6);
     GPIO2->dr &= ~(1u << 6);
     GPIO2->ddr |= 1u << 6;

@@ -1,5 +1,6 @@
 /*
- * fw_update.h -- install HIFIECnn.IMG / ECHOMINI.IMG from the user volume
+ * fw_update.h -- install the board's update image (8 GB: HIFIECnn.IMG / ECHOMINI.IMG,
+ * 512 MB: MINIVnnn.IMG / MINIMINI.IMG) from the user volume
  * (FAT32) into both eMMC firmware slots (reference updater 0x03054474).
  */
 #ifndef RECHORD_FW_UPDATE_H
@@ -20,7 +21,7 @@
 #define FWU_EWRITE   (-8)    /* eMMC write failed */
 
 typedef struct {
-    char name[13];           /* "HIFIEC90.IMG" */
+    char name[13];           /* "MINIV900.IMG" */
     uint8_t raw[11];         /* 8.3 directory name */
     uint32_t lba;            /* first sector of the (contiguous) file */
     uint32_t size;           /* bytes */

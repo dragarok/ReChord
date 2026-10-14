@@ -56,7 +56,15 @@ CFW_ELF := $(CFW_BUILD_DIR)/rechord_ap.elf
 cfw-ap: $(CFW_ELF)
 	@echo "CFW AP ELF: $(CFW_ELF)"
 
-$(CFW_BUILD_DIR)/objs/%.o: %.c
+# BOARD is a compile flag the dependency files don't see: a stamp per board
+# makes switching it rebuild every object.
+CFW_BOARD_STAMP := $(CFW_BUILD_DIR)/.board-$(BOARD)
+$(CFW_BOARD_STAMP):
+	@$(MKDIR_P) $(dir $@)
+	@rm -f $(CFW_BUILD_DIR)/.board-*
+	@touch $@
+
+$(CFW_BUILD_DIR)/objs/%.o: %.c $(CFW_BOARD_STAMP)
 	@$(MKDIR_P) $(dir $@)
 	$(CC) $(AP_CFLAGS) -c $< -o $@
 
@@ -67,8 +75,14 @@ $(CFW_ELF): $(CFW_OBJS) $(AP_LDSCRIPT)
 # Our fw1 + stock section_3 (until the BB module milestone), CRC recomputed.
 # HARD GATE in tools/pack_fw1.py: no scatter row below 0x03004000 (ROM-owned
 # RAM - the 2026-08-25 brick). Debrick: docs/DEBRICK-LINUX.md.
+# The update file the board's stock updater takes (firmware/drivers/board.h):
+# 512 MB MINIVnnn.IMG, 8 GB HIFIECnn.IMG. 900/90 sort above any stock version.
+UPDATE_IMG := $(if $(filter 8g,$(BOARD)),HIFIEC90.IMG,MINIV900.IMG)
+
 cfw-img: $(CFW_ELF)
 	$(PYTHON) tools/make_fw1.py $(CFW_ELF) -o build/ReChord_AP.IMG
+	cp build/ReChord_AP5M.IMG build/$(UPDATE_IMG)
+	@echo "  update file for the $(BOARD) board: build/$(UPDATE_IMG)"
 
 # HOOK TEST: verbatim reference fw1 calling our panel driver (HANDOVER.md).
 HOOK_DIR := build/hook
@@ -149,7 +163,7 @@ COMMON_FLAGS := $(ARCH_FLAGS) -Os -Wall -Wno-unused-parameter \
                 -ffunction-sections -fdata-sections -MMD -MP -fcommon \
                 -include firmware/rockchip/include/armcc_compat.h
 BB_CFLAGS    := $(COMMON_FLAGS) -DRECHORD_BB_BUILD -D_RK_EQ_ -Ifirmware $(addprefix -I,$(BB_INCLUDE_DIRS))
-AP_CFLAGS    := $(COMMON_FLAGS) -DRECHORD_AP_BUILD -Ifirmware $(addprefix -I,$(AP_INCLUDE_DIRS))
+AP_CFLAGS    := $(COMMON_FLAGS) -DRECHORD_AP_BUILD -DBOARD=$(BOARD_ID) -Ifirmware $(addprefix -I,$(AP_INCLUDE_DIRS))
 
 BB_OBJS := $(foreach src,$(BB_SRCS),\
              $(BB_OBJ_DIR)/$(patsubst firmware/rockchip/%,%,$(src)).o)

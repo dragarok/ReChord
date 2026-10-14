@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import datetime
 import struct
 import subprocess
 import sys
@@ -202,7 +203,11 @@ def build_ref_shape_5m(img33: bytes, ref_path: Path, out_path: Path) -> Path:
 
     out = bytearray(IMG_SIZE)
     out[:0x1F8] = ref[:0x1F8]                 # outer table template (proven shape)
-    struct.pack_into("<I", out, 0x00, 0x0A0B2026)      # our build date
+    # build date as stock writes it: u16 BCD year, u8 BCD day, u8 BCD month.
+    # The boot ROM boots the slot with the newer date, so it must be valid BCD.
+    d = datetime.date.today()
+    bcd = lambda v: int(str(v), 16)
+    struct.pack_into("<HBB", out, 0x00, bcd(d.year), bcd(d.day), bcd(d.month))
     out[0x10:0x18] = b"ReChord\x00"                    # brand (scrub-clean)
     out[0x30:0x38] = b"cfwtest01"[:8]                   # build tag
 

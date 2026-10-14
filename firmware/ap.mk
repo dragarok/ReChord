@@ -74,7 +74,8 @@ AP_DRIVER_SRCS := \
   firmware/drivers/emmc_rknanoc.c \
   firmware/drivers/usb_msc_rknanoc.c \
   firmware/drivers/usb_cdc_rknanoc.c \
-  firmware/drivers/dac_cs43131.c
+  firmware/drivers/dac_cs43131.c \
+  firmware/drivers/board_rknanoc.c
 
 # Services: settings/log/input + the target fs backend (same set as
 # $(SERVICES_TARGET_SRCS) in firmware/services/services.mk).
@@ -144,13 +145,17 @@ AP_INCLUDE_DIRS := \
 # -fdata-sections / -fcommon, and the force-included armcc_compat.h.
 AP_ARCH_FLAGS := -mcpu=cortex-m3 -mthumb -mfloat-abi=soft
 
+# Board variant (firmware/drivers/board.h): make BOARD=512m (default) or 8g.
+BOARD ?= 512m
+BOARD_ID := $(if $(filter 8g,$(BOARD)),1,2)
+
 AP_CFLAGS := $(AP_ARCH_FLAGS) -Os -Wall \
   -Wno-unused-parameter -Wno-unused-variable \
   -Wno-implicit-function-declaration -Wno-implicit-int \
   -Wno-builtin-declaration-mismatch -Wno-incompatible-pointer-types \
   -Wno-return-mismatch -Wno-int-conversion -Wno-return-type \
   -ffunction-sections -fdata-sections -MMD -MP -fcommon \
-  -DRECHORD_AP_BUILD \
+  -DRECHORD_AP_BUILD -DBOARD=$(BOARD_ID) \
   $(addprefix -I,$(AP_INCLUDE_DIRS)) \
   -include firmware/rockchip/include/armcc_compat.h
 

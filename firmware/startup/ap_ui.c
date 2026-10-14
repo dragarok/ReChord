@@ -3,6 +3,7 @@
  * Main() after the splash. Keys come from the board (keys_adc/keys_power),
  * are debounced by input_scan() and dispatched to the screen stack.
  */
+#include "drivers/board.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -19,7 +20,7 @@
 #include "ui/ui.h"
 #include "ui/screens/screens.h"
 
-static int s_adc = 1023, s_power, s_cable;
+static int s_adc = 1023, s_adc2 = 1023, s_power, s_cable;
 static unsigned s_power_held;
 static int s_power_armed;    /* power key seen released since boot */
 static uint32_t s_user;              /* user volume start, 0 = unknown */
@@ -34,6 +35,11 @@ static void emmc_probe(void)
 
     if (r) {
         snprintf(s_emmc, sizeof s_emmc, "init %d", r);
+        return;
+    }
+    if (!board_check(emmc_sectors())) {          /* this build is for the other board */
+        snprintf(s_emmc, sizeof s_emmc, "%uM: not a %s unit", (unsigned)(emmc_sectors() >> 11),
+                 board_name());
         return;
     }
     r = emmc_layout(&user);
@@ -127,7 +133,7 @@ static int ask(int any_key)
 
 static void power_off(void);
 
-/* After a USB session: offer HIFIECnn.IMG / ECHOMINI.IMG if present. */
+/* After a USB session: offer an update image (fw_update.c names) if present. */
 static void update_prompt(void)
 {
     static fw_image_t img;
@@ -203,6 +209,10 @@ static void usb_session(void)
     uint32_t rd, wr;
     int r;
 
+    if (!s_user) {      /* layout unknown or wrong board: never export LBA 0.. */
+        snprintf(s_usb, sizeof s_usb, "no user volume");
+        return;
+    }
     screen("USB mass storage");
     line(1, "eject on the PC or press power");
     display_flush_rows(0, DISPLAY_H - 1);
@@ -228,7 +238,10 @@ static void open_settings(void) { settings_screen_reload(); ui_push_screen(&sett
 static const char *keys_text(void)
 {
     static char buf[24];
-    snprintf(buf, sizeof buf, "adc %d pwr %d", s_adc, s_power);
+    if (s_adc2 >= 0)
+        snprintf(buf, sizeof buf, "adc %d/%d pwr %d", s_adc, s_adc2, s_power);
+    else
+        snprintf(buf, sizeof buf, "adc %d pwr %d", s_adc, s_power);
     return buf;
 }
 
@@ -507,12 +520,15 @@ void ap_ui_loop(void)
     input_event_t ev;
 
     emmc_probe();
+    if (s_user)
+        update_prompt();  /* at boot too, as stock and RECHO check */
     player_init();       /* register wav/mp3/flac codecs (registry) */
     ui_init();
     menu_screen_bind(&k_root);
     ui_push_screen(&menu_screen);
     for (;;) {
         int adc = keys_adc(), power = keys_power(), cable = usb_cable();
+        int adc2 = board_adc_ch2();
 
         if (sd_present() != s_sd_in) {   /* card inserted / removed */
             s_sd_in = sd_present();
@@ -539,11 +555,13 @@ void ap_ui_loop(void)
             power_off();
 
         /* live "Keys" row on the root menu: hardware check without a log */
-        if ((adc - s_adc > 8 || s_adc - adc > 8 || power != s_power) &&
+        if ((adc - s_adc > 8 || s_adc - adc > 8 || power != s_power ||
+             adc2 - s_adc2 > 8 || s_adc2 - adc2 > 8) &&
             ui_stack_depth() == 1) {
             ui_invalidate_all();
         }
         s_adc = adc;
+        s_adc2 = adc2;
         s_power = power;
         input_scan(adc, power);
 

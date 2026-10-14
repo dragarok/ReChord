@@ -6,6 +6,7 @@
  * fw_end = (size + 0x104000) & ~0xFFFFF bytes covered by the trailer CRC
  * stored at fw_end. Slot 1 = firmware-area sector 0, slot 2 = half way.
  */
+#include "drivers/board.h"
 #include <string.h>
 
 #include "drivers/emmc.h"
@@ -161,13 +162,22 @@ static uint32_t clus_lba(uint32_t c)
     return s_fs.data + (c - 2u) * s_fs.spc;
 }
 
+/* The names the stock updater of this board takes (stock seg08): 8 GB
+ * HIFIECnn.IMG / ECHOMINI.IMG, 512 MB MINIVnnn.IMG / MINIMINI.IMG. The other
+ * board's names are ignored, so an image built for it is never installed. */
 static int is_update_name(const uint8_t *e)
 {
     if (memcmp(e + 8, "IMG", 3) != 0)
         return 0;
+#if BOARD == BOARD_512M
+    return memcmp(e, "MINIMINI", 8) == 0 ||
+           (memcmp(e, "MINIV", 5) == 0 && (unsigned)(e[5] - '0') < 10u &&
+            (unsigned)(e[6] - '0') < 10u && (unsigned)(e[7] - '0') < 10u);
+#else
     return memcmp(e, "ECHOMINI", 8) == 0 ||
            (memcmp(e, "HIFIEC", 6) == 0 && (unsigned)(e[6] - '0') < 10u &&
             (unsigned)(e[7] - '0') < 10u);
+#endif
 }
 
 static int validate(fw_image_t *img, uint32_t first, fwu_progress_t progress)
