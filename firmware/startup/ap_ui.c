@@ -21,6 +21,7 @@
 
 static int s_adc = 1023, s_power, s_cable;
 static unsigned s_power_held;
+static int s_power_armed;    /* power key seen released since boot */
 static uint32_t s_user;              /* user volume start, 0 = unknown */
 static char s_emmc[32], s_usb[32] = "plug in", s_sd[32];
 static int s_sd_in = -1;
@@ -530,7 +531,10 @@ void ap_ui_loop(void)
 
         /* ponytail: hold time in loop passes, calibrated on hardware
          * (2000 passes = ~6 s, so 700 = ~2 s); use a timer once there is one */
-        s_power_held = power ? s_power_held + 1u : 0u;
+        /* the press that switched us on may still be held: arm the hold-to-
+         * power-off only after the key has been released once */
+        s_power_armed |= !power;
+        s_power_held = power && s_power_armed ? s_power_held + 1u : 0u;
         if (s_power_held == 700u)
             power_off();
 
