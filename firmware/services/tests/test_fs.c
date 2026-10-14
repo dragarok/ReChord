@@ -80,7 +80,14 @@ int main(void)
     f = fs_open_read("\\HELLO.TXT");
     CHECK(f != NULL);
     CHECK(fs_file_size(f) == 9);
-    fs_close(f);
+    CHECK(fs_close(f) == FS_OK);
+
+    /* exists / remove */
+    CHECK(fs_exists("/HELLO.TXT") == 1);
+    CHECK(fs_remove("/HELLO.TXT") == FS_OK);
+    CHECK(fs_exists("/HELLO.TXT") == 0);
+    CHECK(fs_remove("/HELLO.TXT") == FS_ERR_OPEN);
+    CHECK(fs_close(NULL) == FS_OK);
 
     /* errors */
     CHECK(fs_open_read("\\MISSING.TXT") == NULL);

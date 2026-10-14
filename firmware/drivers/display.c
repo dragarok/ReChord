@@ -27,7 +27,7 @@
  * list. ~8 KiB instead of a 106 KiB (170 x 320 x 2) framebuffer. */
 #define OPS_MAX    160
 #define TEXT_BYTES 3072
-#define STRIP_ROWS 8
+#define STRIP_ROWS DISPLAY_STRIP_ROWS
 
 typedef struct {
     int16_t x0, y0, x1, y1;          /* inclusive, clipped to the screen */
@@ -39,7 +39,7 @@ static op_t s_ops[OPS_MAX];
 static unsigned s_nops;
 static char s_text[TEXT_BYTES];
 static unsigned s_text_used;
-static uint16_t s_strip[STRIP_ROWS][DISPLAY_W];
+static uint16_t s_strip[STRIP_ROWS][DISPLAY_W] __attribute__((aligned(4)));
 unsigned display_ops_dropped;        /* list overflowed (oldest op lost) */
 
 static void text_compact(void)
@@ -211,6 +211,17 @@ void display_flush_rows(int y0, int y1)
             for (x = 0; x < DISPLAY_W; x++)
                 panel_io_send_pixel(s_strip[r][x]);
     }
+}
+
+const uint16_t *display_render_rows(int y, int n)
+{
+    if (y < 0) { y = 0; }
+    if (y > DISPLAY_H - 1) { y = DISPLAY_H - 1; }
+    if (n > STRIP_ROWS) { n = STRIP_ROWS; }
+    if (n > DISPLAY_H - y) { n = DISPLAY_H - y; }
+    if (n < 1) { n = 1; }
+    render_strip(y, n);
+    return &s_strip[0][0];
 }
 
 void display_clear(uint16_t rgb565)

@@ -87,6 +87,15 @@ void display_draw_text(int x, int y, const char *s, uint16_t fg, uint16_t bg);
 void display_flush_rows(int y0, int y1);
 
 /*
+ * Screenshot seam (there is no framebuffer): render rows y..y+n-1 of what
+ * the panel shows into the driver's strip buffer and return it -- n rows of
+ * DISPLAY_W RGB565 pixels, row-major, word aligned. n is clamped to
+ * 1..DISPLAY_STRIP_ROWS and the screen; valid until the next display call.
+ */
+#define DISPLAY_STRIP_ROWS 8
+const uint16_t *display_render_rows(int y, int n);
+
+/*
  * Fill the whole framebuffer with 'rgb565'. Framebuffer only -- flush
  * to make visible.
  */

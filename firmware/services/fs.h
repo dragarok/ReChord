@@ -6,7 +6,8 @@
  * time:
  *
  *   - fs_host.c   — POSIX backend over a real filesystem (tests, tools).
- *   - fs_target.c — TODO stub for the SDK FAT backend (device firmware).
+ *   - fs_target.c — FAT16/FAT32/exFAT on the device's block devices; writes
+ *                   on FAT32 volumes mounted writable (fs_target.h).
  *
  * Exactly ONE backend is linked into any given image.
  *
@@ -80,16 +81,31 @@ long fs_seek(fs_file_t *f, long offset);
 /* Total size of the open file in bytes, or FS_ERR_*. */
 long fs_file_size(fs_file_t *f);
 
-/* Close and release a handle opened by any fs_open_* call. NULL is ignored. */
-void fs_close(fs_file_t *f);
+/* Close and release a handle opened by any fs_open_* call. For a write
+ * handle this is where the data, the cluster chain and the directory entry
+ * (size, first cluster, time) reach the disk: 0, or FS_ERR_IO when that
+ * failed (the handle is released either way). NULL is ignored (0). */
+int fs_close(fs_file_t *f);
 
-/* Open a file for writing, creating or truncating it. NULL on failure. */
+/* Open a file for writing, creating or truncating it. NULL on failure
+ * (missing directory, read-only volume, file already open, bad name). On
+ * the target, new names must be 8.3 (stored upper-case); the old content
+ * stays on disk until fs_close() switches to the new one. Write handles
+ * are write-only: fs_read / fs_seek answer FS_ERR_UNSUPPORTED. */
 fs_file_t *fs_open_write(const char *path);
 
 /* Open a file for appending, creating it if needed. NULL on failure. */
 fs_file_t *fs_open_append(const char *path);
 
-/* Write <len> bytes. Returns bytes written or FS_ERR_*. */
+/* Write <len> bytes at the end. Returns bytes written (short = disk full or
+ * I/O error part way) or FS_ERR_*. Word-aligned buffers of whole sectors
+ * go to the device without a copy. */
 long fs_write(fs_file_t *f, const void *buf, unsigned long len);
+
+/* Delete a file (not a directory, not an open file). 0 or FS_ERR_*. */
+int fs_remove(const char *path);
+
+/* 1 if the file or directory exists, else 0. */
+int fs_exists(const char *path);
 
 #endif /* RECHORD_SERVICES_FS_H */
