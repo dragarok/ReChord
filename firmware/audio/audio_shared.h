@@ -1,0 +1,93 @@
+/*
+ * audio_shared.h -- the A/B audio contract (core A = UI + files, core B = decode).
+ *
+ *   core A: reads the file, strips everything but the audio (FLAC: a synthesized
+ *           "fLaC" + STREAMINFO header, then the frames; WAV: raw PCM), appends it
+ *           to the INPUT ring and queues a track descriptor. Gapless = the next
+ *           track's bytes simply follow in the same ring.
+ *   core B: decodes into the PCM ring (I2S words: 32-bit, sample left-justified,
+ *           L then R), in blocks of AS_BLOCK_FRAMES.
+ *   DMA (core A's controller): circular LLI chain over the PCM blocks into I2S1
+ *           TXDR. Core B recycles a block when the DMA has written DONE back into
+ *           its LLI; nothing on core A runs per block.
+ *
+ * Addresses are core-A (system) addresses; core B reaches its own RAM at
+ * 0x01000000 as well as at 0. Both sides only ever poll -- every field has one
+ * writer, noted per field.
+ */
+#ifndef RECHORD_AUDIO_SHARED_H
+#define RECHORD_AUDIO_SHARED_H
+
+#include <stdint.h>
+
+#define AS_B_RAM          0x01000000u   /* core-B image runs here (B sees it at 0) */
+#define AS_B_IMAGE_MAX    0x00018000u   /* 96 KiB for code + data + bss + stack */
+#define AS_SHARED         0x01018000u   /* struct audio_shared */
+#define AS_IN_RING        0x01020000u   /* compressed input ring, in B RAM */
+#define AS_IN_SIZE        0x00010000u   /* 64 KiB */
+#define AS_ARENA          0x01030000u   /* core-B decoder heap (dr_flac state + block window) */
+#define AS_ARENA_SIZE     0x0000C000u   /* 48 KiB */
+#define AS_PCM_RING       0x03090000u   /* PCM ring, core-A SRAM (RECHO uses it too) */
+#define AS_PCM_BLOCKS     8u
+#define AS_BLOCK_FRAMES   1024u
+#define AS_BLOCK_BYTES    (AS_BLOCK_FRAMES * 8u)
+#define AS_LLI            (AS_PCM_RING - 0x100u)   /* 8 x 28 B, just below the ring (SRAM ends at 0x030A0000) */
+
+#define AS_MAGIC          0x4F445541u   /* "AUDO" */
+#define AS_VERSION        1u
+#define AS_QUEUE          4u
+
+enum { AS_CODEC_FLAC = 1, AS_CODEC_WAV = 2 };
+
+/* B state */
+enum { AS_B_BOOT = 0, AS_B_READY, AS_B_PLAYING, AS_B_DRAINED, AS_B_ERROR };
+
+/* A -> B commands (cmd field, B clears it to 0 when done) */
+enum { AS_CMD_NONE = 0, AS_CMD_STOP = 1 };
+
+typedef struct {
+    uint32_t seq;            /* A: track sequence number (1, 2, ...) */
+    uint32_t codec;          /* AS_CODEC_* */
+    uint32_t rate, bits, channels;
+    uint32_t frames;         /* total frames from the header, 0 = unknown */
+    uint32_t bytes;          /* bytes this track occupies in the input stream */
+} as_track_t;
+
+typedef struct {
+    uint32_t magic, version;
+
+    /* input ring: bytes, absolute counters (wrap at 2^32) */
+    volatile uint32_t in_wr;         /* A */
+    volatile uint32_t in_rd;         /* B */
+    volatile uint32_t in_closed;     /* A: 1 = no more tracks will follow */
+
+    /* track queue */
+    as_track_t q[AS_QUEUE];          /* A writes q[q_wr % AS_QUEUE] then bumps q_wr */
+    volatile uint32_t q_wr;          /* A */
+    volatile uint32_t q_rd;          /* B */
+
+    /* PCM ring progress, in blocks */
+    volatile uint32_t pcm_wr;        /* B: blocks written */
+    volatile uint32_t pcm_played;    /* B: blocks the DMA has finished (from LLI DONE) */
+    volatile uint32_t pcm_end;       /* B: blocks after which only silence follows, 0 = open */
+    volatile uint32_t underruns;     /* B */
+
+    /* status, B -> A */
+    volatile uint32_t state;         /* B: AS_B_* */
+    volatile uint32_t cur_seq;       /* B: track now being decoded */
+    volatile uint32_t cur_frames;    /* B: frames of cur_seq decoded so far */
+    volatile uint32_t done_seq;      /* B: last track fully decoded */
+    volatile uint32_t err;           /* B: decoder error code */
+    volatile uint32_t b_hz;          /* B: its clock; A writes the boot value */
+    volatile uint32_t b_load_pm;     /* B: busy share last second, 0..1000 */
+    volatile uint32_t b_div;         /* A: PLL divider in use (A applies it in the CRU) */
+    volatile uint32_t b_div_req;     /* B: divider B wants, from its load */
+    volatile uint32_t ticks;         /* B: heartbeat */
+
+    volatile uint32_t cmd;           /* A -> B */
+    volatile uint32_t run;           /* A: 1 = decode; 0 = B leaves every counter alone */
+} audio_shared_t;
+
+#define AS ((audio_shared_t *)AS_SHARED)
+
+#endif

@@ -50,8 +50,28 @@ include firmware/ap.mk
 # Distinct from the SDK A_CORE pipeline above (build-ap/link-ap/pack-fw1):
 # this links ONLY firmware/{startup,ui,drivers,services,theme,libc}/*.c.
 CFW_BUILD_DIR := build/cfw
-CFW_OBJS := $(patsubst %.c,$(CFW_BUILD_DIR)/objs/%.o,$(AP_SRCS))
+CFW_OBJS := $(patsubst %.c,$(CFW_BUILD_DIR)/objs/%.o,$(AP_SRCS)) $(CFW_BUILD_DIR)/objs/coreb_blob.o
 CFW_ELF := $(CFW_BUILD_DIR)/rechord_ap.elf
+
+# ---- core B (decoder) image: linked at 0, embedded in the AP image ----
+COREB_DIR  := build/coreb
+COREB_SRCS := firmware/coreb/b_startup.c firmware/coreb/b_main.c firmware/coreb/b_libc.c
+COREB_OBJS := $(patsubst firmware/coreb/%.c,$(COREB_DIR)/%.o,$(COREB_SRCS))
+COREB_CFLAGS := $(AP_ARCH_FLAGS) -O2 -Wall -Wno-unused-function -ffreestanding \
+                -fno-tree-loop-distribute-patterns -ffunction-sections -fdata-sections -MMD -MP \
+                -Ifirmware
+$(COREB_DIR)/%.o: firmware/coreb/%.c Makefile
+	@$(MKDIR_P) $(dir $@)
+	$(CC) $(COREB_CFLAGS) -c $< -o $@
+$(COREB_DIR)/coreb.elf: $(COREB_OBJS) firmware/coreb/coreb.ld
+	$(CC) $(AP_ARCH_FLAGS) -nostdlib -T firmware/coreb/coreb.ld -Wl,--gc-sections,--no-warn-rwx-segments \
+	    $(COREB_OBJS) -lgcc -o $@
+$(COREB_DIR)/coreb.bin: $(COREB_DIR)/coreb.elf
+	$(OBJCOPY) -O binary $< $@
+$(CFW_BUILD_DIR)/objs/coreb_blob.o: firmware/audio/coreb_blob.S $(COREB_DIR)/coreb.bin
+	@$(MKDIR_P) $(dir $@)
+	$(CC) $(AP_ARCH_FLAGS) -c $< -o $@
+-include $(wildcard $(COREB_DIR)/*.d)
 
 cfw-ap: $(CFW_ELF)
 	@echo "CFW AP ELF: $(CFW_ELF)"
@@ -330,7 +350,7 @@ $(BB_BUILD_DIR)/rechord_dsp_core.o: firmware/rechord_dsp_core.c \
 
 $(BB_BUILD_DIR)/entry_stubs.o: firmware/entry_stubs.S
 	@$(MKDIR_P) $(dir $@)
-	$(CC) $(ARCH_FLAGS) -c $< -o $@
+	$(CC) $(AP_ARCH_FLAGS) -c $< -o $@
 
 link-bb: $(BB_RECHORD_OBJS) $(BB_OBJS)
 	# -nostdlib: this host has no arm-none-eabi newlib (no crt0/-lc/-lm).

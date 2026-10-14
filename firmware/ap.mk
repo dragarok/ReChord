@@ -106,17 +106,8 @@ AP_LIBC_SRCS := \
 # under player/codecs/ (self-describing descriptors + registry), vendored
 # minimp3/dr_flac are header-included by their adapter TUs.
 AP_PLAYER_SRCS := \
-  firmware/player/player.c \
-  firmware/player/codec_io.c \
-  firmware/player/codec_io_fs.c \
-  firmware/player/tags.c \
-  firmware/player/rg_math.c \
-  firmware/player/codecs/codec_registry.c \
-  firmware/player/codecs/wav.c \
-  firmware/player/codecs/mp3.c \
-  firmware/player/codecs/flac.c \
-  firmware/player/ipc_b_target.c \
-  firmware/player/ringbuf.c
+  firmware/player/player_audio.c \
+  firmware/audio/audio.c
 
 # Every AP link input, milestone 2a (includes clean-road player).
 AP_SRCS := \
