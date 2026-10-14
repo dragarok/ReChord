@@ -51,6 +51,8 @@ static fs_file_t *s_file;
 static uint8_t s_hdr[42];
 static uint32_t s_hdr_len, s_hdr_pos;
 static uint32_t s_left;                    /* file bytes still to stream */
+static uint32_t s_data_off;                /* file offset of the first streamed byte */
+static uint32_t s_skip_left;               /* alignment filler still to write */
 static uint32_t s_seq;
 static int s_b_up, s_dac_up, s_dma_on, s_playing;
 static uint32_t s_rate;
@@ -116,6 +118,7 @@ static int open_flac(fs_file_t *f, as_track_t *t)
     memcpy(s_hdr + 8, si, 34);
     s_hdr_len = 42;
     s_left = (uint32_t)fs_file_size(f) - pos;
+    s_data_off = pos;
     t->bytes = s_hdr_len + s_left;
     return 0;
 }
@@ -154,6 +157,7 @@ static int open_wav(fs_file_t *f, as_track_t *t)
         return -1;
     t->codec = AS_CODEC_WAV;
     s_hdr_len = 0;
+    s_data_off = pos;
     s_left = (uint32_t)fs_file_size(f) - pos;
     {
         uint32_t len = le32(b + 4);
@@ -196,6 +200,11 @@ static int open_next(void)
             continue;
         }
         t.seq = ++s_seq;
+        /* file byte p lands at ring offset in_wr + skip + hdr + (p - start): make that
+         * congruent to p mod 4, so whole sectors can be read straight into the ring */
+        t.skip = (s_data_off - (AS->in_wr + s_hdr_len)) & 3u;
+        t.bytes += t.skip;
+        s_skip_left = t.skip;
         s_hdr_pos = 0;
         strncpy(s_name, ent.name, sizeof s_name - 1);
         {
@@ -240,6 +249,14 @@ static void refill(void)
             return;
         if (k > free)
             k = free;
+        if (s_skip_left) {
+            uint32_t n = s_skip_left < k ? s_skip_left : k;
+
+            memset(ring + off, 0, n);
+            s_skip_left -= n;
+            AS->in_wr += n;
+            continue;
+        }
         if (s_hdr_pos < s_hdr_len) {
             uint32_t n = s_hdr_len - s_hdr_pos;
 

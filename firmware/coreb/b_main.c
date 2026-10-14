@@ -197,8 +197,9 @@ static const drflac_allocation_callbacks s_alloc = { NULL, arena_malloc, arena_r
 static int track_open(void)
 {
     s_trk = AS->q[AS->q_rd % AS_QUEUE];
+    s_trk_end = AS->in_rd + s_trk.bytes;
+    AS->in_rd += s_trk.skip;                 /* alignment filler */
     s_trk_start = AS->in_rd;
-    s_trk_end = s_trk_start + s_trk.bytes;
     AS->cur_seq = s_trk.seq;
     AS->cur_frames = 0;
     s_arena_used = 0;

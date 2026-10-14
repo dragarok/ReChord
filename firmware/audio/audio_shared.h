@@ -50,7 +50,8 @@ typedef struct {
     uint32_t codec;          /* AS_CODEC_* */
     uint32_t rate, bits, channels;
     uint32_t frames;         /* total frames from the header, 0 = unknown */
-    uint32_t bytes;          /* bytes this track occupies in the input stream */
+    uint32_t bytes;          /* bytes this track occupies in the input stream, skip included */
+    uint32_t skip;           /* filler bytes before the stream (alignment for direct reads) */
 } as_track_t;
 
 typedef struct {

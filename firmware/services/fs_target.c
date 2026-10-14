@@ -5,6 +5,7 @@
  * Names are reported as UTF-8; matching is ASCII case-insensitive.
  * Written from the FAT / exFAT on-disk format, no third-party code.
  */
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -154,17 +155,34 @@ const char *fs_target_type(int idx)
 
 /* ---- clusters ---- */
 
+/* FAT sectors get their own cache: with the data path sharing one sector, a
+ * file read re-fetched the FAT sector for every 1-sector cluster. */
+static uint32_t s_fsec[128], s_fsec_lba;
+static const vol_t *s_fsec_vol;
+
+static const uint8_t *fat_sector(const vol_t *v, uint32_t lba)
+{
+    if (v != s_fsec_vol || lba != s_fsec_lba) {
+        s_fsec_vol = NULL;
+        if (v->rd(v->base + lba, 1, s_fsec))
+            return NULL;
+        s_fsec_vol = v;
+        s_fsec_lba = lba;
+    }
+    return (const uint8_t *)s_fsec;
+}
+
 /* Next cluster in the chain, 0 at the end or on error. */
 static uint32_t fat_next(const vol_t *v, uint32_t c)
 {
     const uint8_t *b;
 
     if (v->type == T_FAT16) {
-        if (!(b = sector(v, v->fat + c / 256u)))
+        if (!(b = fat_sector(v, v->fat + c / 256u)))
             return 0;
         c = le16(b + c % 256u * 2u);
     } else {
-        if (!(b = sector(v, v->fat + c / 128u)))
+        if (!(b = fat_sector(v, v->fat + c / 128u)))
             return 0;
         c = le32(b + c % 128u * 4u);
         if (v->type == T_FAT32)
@@ -519,8 +537,38 @@ long fs_read(fs_file_t *f, void *buf, unsigned long cap)
             if (!f->clus)
                 return FS_ERR_IO;
         }
-        if (f->clus < 2u ||
-            !(b = sector(f->v, clus_lba(f->v, f->clus) + f->pos % cl / 512u)))
+        if (f->clus < 2u)
+            return FS_ERR_IO;
+        /* whole sectors into a word-aligned buffer: one multi-block read per run
+         * of contiguous clusters (at most 64 KiB), no copy through the cache */
+        if (off == 0u && !((uintptr_t)(o + n) & 3u) && cap - n >= 512u && f->size - f->pos >= 512u) {
+            uint32_t want = (uint32_t)((cap - n) / 512u), left = (f->size - f->pos) / 512u;
+            uint32_t secs = (cl - f->pos % cl) / 512u, c = f->clus, adv = 0;
+
+            if (want > left)
+                want = left;
+            if (want > 128u)
+                want = 128u;
+            while (secs < want) {
+                uint32_t nc = f->contig ? c + 1u : fat_next(f->v, c);
+
+                if (nc != c + 1u)
+                    break;
+                c = nc;
+                adv++;
+                secs += f->v->spc;
+            }
+            if (secs > want)
+                secs = want;
+            if (f->v->rd(f->v->base + clus_lba(f->v, f->clus) + f->pos % cl / 512u, secs, o + n))
+                return FS_ERR_IO;
+            n += secs * 512u;
+            f->pos += secs * 512u;
+            f->clus = c;
+            f->cidx += adv;
+            continue;
+        }
+        if (!(b = sector(f->v, clus_lba(f->v, f->clus) + f->pos % cl / 512u)))
             return FS_ERR_IO;
         k = 512u - off;
         if (k > cap - n)

@@ -232,6 +232,9 @@ void player_screen_refresh(void)
             player_screen_set_playing(false);
         return;
     }
+    /* gapless: the next track took over without an open from the browser */
+    if (ti.title[0] && strncmp(ti.title, s_title, sizeof s_title - 1))
+        player_screen_set_track(ti.title, ti.duration_ms > 0 ? (uint32_t)(ti.duration_ms / 1000) : 0);
     pos = (uint32_t)(player_get_position_ms() / 1000);
     if (pos != s_position_s)
         player_screen_set_position(pos);
