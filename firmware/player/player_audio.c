@@ -12,7 +12,7 @@
 
 static char s_dir[160], s_name[FS_NAME_MAX];
 static uint32_t s_index;
-static int s_open, s_volume;
+static int s_open;
 
 /* Kept for browser_screen's error text (the core-A FLAC adapter is gone). */
 unsigned flac_diag_block, flac_diag_channels;
@@ -47,12 +47,20 @@ int player_open(const char *path)
 
 int player_play(void)
 {
+    if (audio_paused()) {
+        audio_pause(0);
+        return PLAYER_OK;
+    }
     if (!s_open)
         return PLAYER_ERR_EMPTY;
     return audio_play_dir(s_dir, s_index) == 0 ? PLAYER_OK : PLAYER_ERR;
 }
 
-int player_pause(void) { return PLAYER_ERR_STATE; }
+int player_pause(void)
+{
+    audio_pause(1);
+    return audio_paused() ? PLAYER_OK : PLAYER_ERR_STATE;
+}
 
 int player_stop(void)
 {
@@ -68,7 +76,8 @@ int player_get_state(void)
     audio_status_t st;
 
     audio_status(&st);
-    return st.err ? PLAYER_ERROR : st.playing ? PLAYER_PLAYING : PLAYER_STOPPED;
+    return st.err ? PLAYER_ERROR : audio_paused() ? PLAYER_PAUSED : st.playing ? PLAYER_PLAYING
+                                                                              : PLAYER_STOPPED;
 }
 
 long player_get_position_ms(void)
@@ -79,8 +88,8 @@ long player_get_position_ms(void)
     return st.track.rate ? (long)((uint64_t)st.frames * 1000u / st.track.rate) : 0;
 }
 
-int player_set_volume(int db) { s_volume = db; return PLAYER_OK; }
-int player_get_volume(void) { return s_volume; }
+int player_set_volume(int db) { audio_set_volume_db(db); return PLAYER_OK; }
+int player_get_volume(void) { return audio_get_volume_db(); }
 
 int player_get_track(track_info_t *out)
 {

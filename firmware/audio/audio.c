@@ -54,7 +54,7 @@ static uint32_t s_left;                    /* file bytes still to stream */
 static uint32_t s_data_off;                /* file offset of the first streamed byte */
 static uint32_t s_skip_left;               /* alignment filler still to write */
 static uint32_t s_seq;
-static int s_b_up, s_dac_up, s_dma_on, s_playing;
+static int s_b_up, s_dac_up, s_dma_on, s_playing, s_paused;
 static uint32_t s_rate;
 static audio_track_t s_tracks[AS_QUEUE];   /* titles/durations by seq, for the UI */
 
@@ -360,6 +360,36 @@ static void dma_stop(void)
     s_dma_on = 0;
 }
 
+/* ---- volume: CS43131 PCM volume A/B (MAP 0x090001/0x090002), 0.5 dB steps,
+ * both chips; -40 dB at power-on like RECHO (the chip's own default is 0 dB,
+ * full scale into the headphones). ------------------------------------------ */
+
+#define VOL_MIN_DB (-60)
+static int s_vol_db = -40;
+
+static void dac_volume(void)
+{
+    uint8_t v = (uint8_t)(-s_vol_db * 2);
+
+    for (int chan = 0; chan < 2; chan++) {
+        dac_write_reg(chan, 0x090001u, v);
+        dac_write_reg(chan, 0x090002u, v);
+    }
+}
+
+int audio_set_volume_db(int db)
+{
+    s_vol_db = db < VOL_MIN_DB ? VOL_MIN_DB : db > 0 ? 0 : db;
+    if (s_dac_up)
+        dac_volume();
+    return s_vol_db;
+}
+
+int audio_get_volume_db(void)
+{
+    return s_vol_db;
+}
+
 /* ---- API ---------------------------------------------------------------- */
 
 static void halt(void)
@@ -377,6 +407,7 @@ static void halt(void)
             cpu_wait_tick();
     }
     s_playing = 0;
+    s_paused = 0;
 }
 
 int audio_play_dir(const char *dir, uint32_t index)
@@ -404,6 +435,7 @@ int audio_play_dir(const char *dir, uint32_t index)
             return -4;
         s_dac_up = 1;
     }
+    dac_volume();                            /* before the first sample reaches the DAC */
     AS->run = 1;
     s_playing = 1;
     return 0;
@@ -412,6 +444,26 @@ int audio_play_dir(const char *dir, uint32_t index)
 void audio_stop(void)
 {
     halt();
+}
+
+/* Pause: stop the I2S transfer; the DMA then stalls on its handshake and keeps
+ * its place, core B stops once the ring is full. Resume restarts I2S. */
+
+int audio_pause(int on)
+{
+    if (!s_playing || !s_dma_on || on == s_paused)
+        return s_paused;
+    if (on)
+        dac_i2s_stop();
+    else
+        dac_i2s_start();
+    s_paused = on;
+    return s_paused;
+}
+
+int audio_paused(void)
+{
+    return s_playing && s_paused;
 }
 
 void audio_poll(void)

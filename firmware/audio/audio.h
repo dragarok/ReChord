@@ -26,5 +26,11 @@ void audio_stop(void);
 /* Call once per tick (10 ms): file -> input ring, output start/stop, B clock. */
 void audio_poll(void);
 int audio_status(audio_status_t *st);
+/* DAC volume in dB, clamped to -60..0 (default -40); returns the value set. */
+int audio_set_volume_db(int db);
+int audio_get_volume_db(void);
+/* 1 = pause, 0 = resume; returns the paused state. */
+int audio_pause(int on);
+int audio_paused(void);
 
 #endif

@@ -598,7 +598,8 @@ void ap_ui_loop(void)
 
         /* audio pump + Now Playing sync (no-ops without a playing track) */
         (void)player_process();
-        player_screen_refresh();
+        if (ui_top_screen() == &player_screen)
+            player_screen_refresh();     /* only while it is on screen */
 
         ui_render();
         cpu_wait_tick();                 /* sleep (WFI) until the next 10 ms tick */

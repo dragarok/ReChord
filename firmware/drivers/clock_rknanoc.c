@@ -80,14 +80,25 @@ static uint32_t now_parts(uint32_t *el)
     return t;
 }
 
+/* The counter can reload a moment before PENDSTSET shows; a read in that gap
+ * lands a whole tick in the past. Time never goes backwards, so a step back of
+ * more than half a tick is that race: count the tick. */
+static uint64_t s_last_us;
+
 uint64_t time_us(void)
 {
     uint32_t el, t;
+    uint64_t r;
 
     if (!s_reload)
         return 0;
     t = now_parts(&el);
-    return s_base_us + (uint64_t)t * TICK_US + (uint32_t)(((uint64_t)el * s_us_frac) >> 32);
+    r = s_base_us + (uint64_t)t * TICK_US + (uint32_t)(((uint64_t)el * s_us_frac) >> 32);
+    if (r + TICK_US / 2u < s_last_us)
+        r += TICK_US;
+    if (r > s_last_us)
+        s_last_us = r;
+    return r;
 }
 
 uint32_t time_ms(void)
