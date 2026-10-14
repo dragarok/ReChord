@@ -825,6 +825,25 @@ int dac_init(uint32_t rate_hz)
     return DAC_OK;
 }
 
+/* Another sample rate with the DAC up and the I2S stopped: muted, re-clock the
+ * ACODEC PLL and the I2S1 divider, set the per-rate speed byte, unmute. */
+int dac_set_rate(uint32_t rate_hz)
+{
+    const dac_rate_t *rt = 0;
+
+    for (int i = 0; i < 13; i++)
+        if (dac_rates[i].rate == rate_hz)
+            rt = &dac_rates[i];
+    if (!rt)
+        return DAC_ERR_ARG;
+    dac_map_write(0x00010009, 0xFF);
+    acodec_mux(rt->mux[0], rt->mux[1], rt->mux[2], rt->mux[3]);
+    i2s1_setup(rt->rate, rt->mclk);
+    dac_map_write(0x0001000B, rt->dac);
+    dac_map_write(0x00010009, 0x00);
+    return DAC_OK;
+}
+
 /* ---- polled I2S feed -------------------------------------------------------- */
 
 /* Diag: TX FIFO level extremes seen since dac_i2s_start(). If the TXDR

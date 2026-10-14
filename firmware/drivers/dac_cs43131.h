@@ -43,6 +43,9 @@ enum {
  * Returns DAC_OK or the failure code; dac_last_step() gives the breadcrumb. */
 int dac_init(uint32_t rate_hz);
 
+/* Re-clock for another sample rate (DAC already up, I2S stopped). */
+int dac_set_rate(uint32_t rate_hz);
+
 /* Queue `frames` interleaved int16 STEREO frames into I2S1 TX (polled
  * FIFO). DAC_ERR_TIMEOUT if the FIFO stops draining (clock not running). */
 int dac_i2s_feed(const int16_t *pcm, int frames);

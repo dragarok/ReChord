@@ -9,7 +9,7 @@ ENTRY(b_reset)
 
 MEMORY
 {
-    BRAM (rwx) : ORIGIN = 0x00000000, LENGTH = 0x00018000   /* AS_B_IMAGE_MAX */
+    BRAM (rwx) : ORIGIN = 0x00000000, LENGTH = 0x0001E000   /* AS_B_IMAGE_MAX */
 }
 
 SECTIONS
@@ -28,6 +28,6 @@ SECTIONS
         _b_bss_end = .;
     } > BRAM
     _b_stack_top = ORIGIN(BRAM) + LENGTH(BRAM);
-    ASSERT(_b_bss_end + 0x1000 <= _b_stack_top, "core-B image leaves less than 4 KiB of stack")
+    ASSERT(_b_bss_end + 0x3000 <= _b_stack_top, "core-B image leaves less than 12 KiB of stack (libmad needs ~6)")
     /DISCARD/ : { *(.comment) *(.note*) *(.ARM.exidx*) *(.ARM.attributes) }
 }

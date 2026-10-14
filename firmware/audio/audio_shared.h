@@ -21,8 +21,8 @@
 #include <stdint.h>
 
 #define AS_B_RAM          0x01000000u   /* core-B image runs here (B sees it at 0) */
-#define AS_B_IMAGE_MAX    0x00018000u   /* 96 KiB for code + data + bss + stack */
-#define AS_SHARED         0x01018000u   /* struct audio_shared */
+#define AS_B_IMAGE_MAX    0x0001E000u   /* 120 KiB for code + data + bss + stack */
+#define AS_SHARED         0x0101E000u   /* struct audio_shared (8 KiB, up to the ring) */
 #define AS_IN_RING        0x01020000u   /* compressed input ring, in B RAM */
 #define AS_IN_SIZE        0x00010000u   /* 64 KiB */
 #define AS_ARENA          0x01030000u   /* core-B decoder heap (dr_flac state + block window) */
@@ -34,16 +34,19 @@
 #define AS_LLI            (AS_PCM_RING - 0x100u)   /* 8 x 28 B, just below the ring (SRAM ends at 0x030A0000) */
 
 #define AS_MAGIC          0x4F445541u   /* "AUDO" */
-#define AS_VERSION        1u
+#define AS_VERSION        3u
 #define AS_QUEUE          4u
 
-enum { AS_CODEC_FLAC = 1, AS_CODEC_WAV = 2 };
+enum { AS_CODEC_FLAC = 1, AS_CODEC_WAV = 2, AS_CODEC_MP3 = 3 };
 
-/* B state */
-enum { AS_B_BOOT = 0, AS_B_READY, AS_B_PLAYING, AS_B_DRAINED, AS_B_ERROR };
+/* B state. ENDED and RATE: B has ended the DMA chain after the last block it wrote
+ * (that LLI has no successor), so the DMA stops by itself once it has played it.
+ * ENDED = the stream is over; RATE = the next track needs another sample rate:
+ * A re-clocks, then sends AS_CMD_RESTART. */
+enum { AS_B_BOOT = 0, AS_B_READY, AS_B_PLAYING, AS_B_ENDED, AS_B_ERROR, AS_B_RATE };
 
 /* A -> B commands (cmd field, B clears it to 0 when done) */
-enum { AS_CMD_NONE = 0, AS_CMD_STOP = 1 };
+enum { AS_CMD_NONE = 0, AS_CMD_STOP = 1, AS_CMD_RESTART = 2 };
 
 typedef struct {
     uint32_t seq;            /* A: track sequence number (1, 2, ...) */
@@ -52,6 +55,7 @@ typedef struct {
     uint32_t frames;         /* total frames from the header, 0 = unknown */
     uint32_t bytes;          /* bytes this track occupies in the input stream, skip included */
     uint32_t skip;           /* filler bytes before the stream (alignment for direct reads) */
+    uint32_t trim;           /* decoded frames to drop at the start (MP3: encoder + decoder delay) */
 } as_track_t;
 
 typedef struct {
@@ -85,6 +89,7 @@ typedef struct {
     volatile uint32_t b_div_req;     /* B: divider B wants, from its load */
     volatile uint32_t ticks;         /* B: heartbeat */
 
+    volatile uint32_t rate;          /* A: sample rate the output runs at */
     volatile uint32_t cmd;           /* A -> B */
     volatile uint32_t run;           /* A: 1 = decode; 0 = B leaves every counter alone */
 } audio_shared_t;

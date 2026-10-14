@@ -55,11 +55,13 @@ CFW_ELF := $(CFW_BUILD_DIR)/rechord_ap.elf
 
 # ---- core B (decoder) image: linked at 0, embedded in the AP image ----
 COREB_DIR  := build/coreb
-COREB_SRCS := firmware/coreb/b_startup.c firmware/coreb/b_main.c firmware/coreb/b_libc.c
+COREB_MAD  := bit fixed frame huffman layer12 layer3 stream synth timer
+COREB_SRCS := firmware/coreb/b_startup.c firmware/coreb/b_main.c firmware/coreb/b_libc.c \
+              $(patsubst %,firmware/coreb/libmad/%.c,$(COREB_MAD))
 COREB_OBJS := $(patsubst firmware/coreb/%.c,$(COREB_DIR)/%.o,$(COREB_SRCS))
 COREB_CFLAGS := $(AP_ARCH_FLAGS) -O2 -Wall -Wno-unused-function -ffreestanding \
                 -fno-tree-loop-distribute-patterns -ffunction-sections -fdata-sections -MMD -MP \
-                -Ifirmware
+                -Ifirmware -Ifirmware/coreb/libmad -DOPT_ACCURACY -DNDEBUG
 $(COREB_DIR)/%.o: firmware/coreb/%.c Makefile
 	@$(MKDIR_P) $(dir $@)
 	$(CC) $(COREB_CFLAGS) -c $< -o $@
@@ -71,7 +73,7 @@ $(COREB_DIR)/coreb.bin: $(COREB_DIR)/coreb.elf
 $(CFW_BUILD_DIR)/objs/coreb_blob.o: firmware/audio/coreb_blob.S $(COREB_DIR)/coreb.bin
 	@$(MKDIR_P) $(dir $@)
 	$(CC) $(AP_ARCH_FLAGS) -c $< -o $@
--include $(wildcard $(COREB_DIR)/*.d)
+-include $(wildcard $(COREB_DIR)/*.d $(COREB_DIR)/libmad/*.d)
 
 cfw-ap: $(CFW_ELF)
 	@echo "CFW AP ELF: $(CFW_ELF)"
@@ -100,7 +102,7 @@ $(CFW_ELF): $(CFW_OBJS) $(AP_LDSCRIPT)
 UPDATE_IMG := $(if $(filter 8g,$(BOARD)),HIFIEC90.IMG,MINIV900.IMG)
 
 cfw-img: $(CFW_ELF)
-	$(PYTHON) tools/make_fw1.py $(CFW_ELF) -o build/ReChord_AP.IMG
+	$(PYTHON) tools/make_fw1.py $(CFW_ELF) -o build/ReChord_AP.IMG $(if $(FONT_IMG),--fonts $(FONT_IMG))
 	cp build/ReChord_AP5M.IMG build/$(UPDATE_IMG)
 	@echo "  update file for the $(BOARD) board: build/$(UPDATE_IMG)"
 

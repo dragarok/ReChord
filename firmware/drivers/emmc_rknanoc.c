@@ -271,7 +271,7 @@ uint32_t emmc_sectors(void)
 }
 
 /* CMD17/CMD18 (+CMD12) on the selected instance; arg = card address. */
-static int block_read(uint32_t arg, uint32_t count, void *buf)
+static int block_read_once(uint32_t arg, uint32_t count, void *buf)
 {
     int ret, stop;
 
@@ -285,6 +285,20 @@ static int block_read(uint32_t arg, uint32_t count, void *buf)
             ret = stop;
     }
     clk_gate(CARD_GATE, 0);
+    return ret;
+}
+
+/* A failed read is retried twice after a FIFO reset: one transient error must not
+ * end the track (or the playlist) being streamed. */
+static int block_read(uint32_t arg, uint32_t count, void *buf)
+{
+    int ret = block_read_once(arg, count, buf);
+
+    for (int i = 0; ret && i < 2; i++) {
+        MMC[CTRL] |= 2u;                    /* FIFO reset */
+        wait_clear(CTRL, 2u, 1000);
+        ret = block_read_once(arg, count, buf);
+    }
     return ret;
 }
 

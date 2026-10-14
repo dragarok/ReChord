@@ -187,7 +187,35 @@ def fmt_rows(rows) -> None:
 
 
 
-def build_ref_shape_5m(img33: bytes, ref_path: Path, out_path: Path) -> Path:
+# Fonts: the stock bitmap fonts (Snowsky's, so never in this repo) are copied from
+# a stock image at build time, as RECHO carries them too. Both are indexed by BMP
+# code point from their start: SMALL 12 px glyph = 32 bytes, LARGE 16 px = 33 bytes
+# (rows u16 big-endian, MSB left; the byte after the rows = 0x80 | advance).
+# The firmware reads them from its slot on the eMMC (firmware/drivers/font_res.c
+# has the same offsets): LARGE whole at the end of the slot, SMALL for U+0000..07FF.
+FONT_SLOT_END = 0x44C000
+FONT_LARGE_LEN = 0x10000 * 33
+FONT_LARGE_OFF = (FONT_SLOT_END - FONT_LARGE_LEN) & ~3
+FONT_SMALL_GLYPHS = 0x800
+FONT_SMALL_OFF = FONT_LARGE_OFF - FONT_SMALL_GLYPHS * 32
+
+
+def add_fonts(out: bytearray, fw1_end: int, font_img: Path) -> None:
+    src = font_img.read_bytes()
+    n = struct.unpack_from("<I", src, 0x74)[0]
+    blobs = [struct.unpack_from("<II", src, 0x78 + 8 * i) for i in range(n)]
+    small = next((o for o, l in blobs if l == 0x201C06), None)
+    large = next((o for o, l in blobs if l == 0x211C06), None)
+    if small is None or large is None:
+        raise SystemExit(f"{font_img}: no stock font blobs (0x201c06 / 0x211c06)")
+    if fw1_end > FONT_SMALL_OFF:
+        raise SystemExit(f"fw1 ends at 0x{fw1_end:X}, past the fonts at 0x{FONT_SMALL_OFF:X}")
+    out[FONT_SMALL_OFF:FONT_SMALL_OFF + FONT_SMALL_GLYPHS * 32] = src[small:small + FONT_SMALL_GLYPHS * 32]
+    out[FONT_LARGE_OFF:FONT_LARGE_OFF + FONT_LARGE_LEN] = src[large:large + FONT_LARGE_LEN]
+    print(f"      fonts from {font_img.name}: small @0x{FONT_SMALL_OFF:X}, large @0x{FONT_LARGE_OFF:X}")
+
+
+def build_ref_shape_5m(img33: bytes, ref_path: Path, out_path: Path, font_img: Path = None) -> Path:
     """Test #9: a 5MB fw1-ONLY image with the reference's outer-table shape.
 
     The reference image (5,242,884 B) is the only fw1-only image proven to
@@ -239,6 +267,9 @@ def build_ref_shape_5m(img33: bytes, ref_path: Path, out_path: Path) -> Path:
     # empty marker container (the reference's trailing RKnanoFW + zeros)
     out[MARKER_HDR:MARKER_HDR + 16] = ref[MARKER_HDR:MARKER_HDR + 16]
 
+    if font_img:
+        add_fonts(out, fw1_end, font_img)
+
     # self-consistency copy (the -3 check) at fw_end from the template header
     fw_end2 = struct.unpack_from("<I", out, 0x1F4)[0]
     out[fw_end2:fw_end2 + 0x200] = out[0:0x200]
@@ -271,6 +302,8 @@ def main() -> int:
     ap.add_argument("--bb", type=Path, default=None,
                     help="optional custom section_3 (BB) bin; default keeps the "
                          "stock section_3 bytes untouched")
+    ap.add_argument("--fonts", type=Path, default=None,
+                    help="stock IMG to copy the bitmap fonts from (into the 5MB image)")
     ap.add_argument("--placeholder", action="store_true",
                     help="build a tiny placeholder ELF (vector table + reset "
                          "loop at 0x03050000) and run the chain on it")
@@ -549,7 +582,7 @@ def main() -> int:
     # Test #9 companion output: the 5MB ref-shape image
     ref_img = Path("community/refcfw/HIFIEC90.IMG")
     if ref_img.exists():
-        build_ref_shape_5m(bytes(img), ref_img, args.output.with_name("ReChord_AP5M.IMG"))
+        build_ref_shape_5m(bytes(img), ref_img, args.output.with_name("ReChord_AP5M.IMG"), args.fonts)
     else:
         print("RESULT: FAIL - see checks above", file=sys.stderr)
         return 1

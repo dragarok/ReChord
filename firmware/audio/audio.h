@@ -8,6 +8,7 @@
 
 typedef struct {
     uint32_t seq, codec, rate, bits, channels, frames;
+    uint32_t kbps;                 /* MP3 bit rate of the first frame, 0 otherwise */
     uint32_t index;                /* its entry in the playlist directory */
     char name[64];
 } audio_track_t;

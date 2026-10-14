@@ -108,7 +108,8 @@ AP_LIBC_SRCS := \
 # minimp3/dr_flac are header-included by their adapter TUs.
 AP_PLAYER_SRCS := \
   firmware/player/player_audio.c \
-  firmware/audio/audio.c
+  firmware/audio/audio.c \
+  firmware/audio/mp3_info.c
 
 # Every AP link input, milestone 2a (includes clean-road player).
 AP_SRCS := \

@@ -16,6 +16,7 @@
 
 #include "audio.h"
 #include "audio_shared.h"
+#include "mp3_info.h"
 #include "drivers/clock.h"
 #include "drivers/dac_cs43131.h"
 #include "services/fs.h"
@@ -55,7 +56,7 @@ static uint32_t s_data_off;                /* file offset of the first streamed 
 static uint32_t s_skip_left;               /* alignment filler still to write */
 static uint32_t s_seq;
 static int s_b_up, s_dac_up, s_dma_on, s_playing, s_paused;
-static uint32_t s_rate;
+static uint32_t s_rate, s_rate_changes;
 static audio_track_t s_tracks[AS_QUEUE];   /* titles/durations by seq, for the UI */
 
 static uint32_t be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
@@ -76,7 +77,7 @@ static int ext_is(const char *name, const char *ext)
 
 static int playable(const char *name)
 {
-    return ext_is(name, "flac") || ext_is(name, "wav");
+    return ext_is(name, "flac") || ext_is(name, "wav") || ext_is(name, "mp3") || ext_is(name, "mp2");
 }
 
 /* FLAC: STREAMINFO -> track, synthesized header in s_hdr, file left at the first frame. */
@@ -169,6 +170,40 @@ static int open_wav(fs_file_t *f, as_track_t *t)
     return 0;
 }
 
+/* MP3: only the MPEG frames are streamed (tags and the Xing/Info frame never leave
+ * the eMMC); the LAME delay/padding become the trim and the frame count. */
+static uint32_t mp3_rd(void *u, uint32_t off, void *buf, uint32_t n)
+{
+    long r;
+
+    if (fs_seek((fs_file_t *)u, (long)off) < 0)
+        return 0;
+    r = fs_read((fs_file_t *)u, buf, n);
+    return r < 0 ? 0u : (uint32_t)r;
+}
+
+static uint32_t s_kbps;
+
+static int open_mp3(fs_file_t *f, as_track_t *t)
+{
+    mp3_info_t mi;
+
+    if (mp3_info(mp3_rd, f, (uint32_t)fs_file_size(f), &mi) != 0 || fs_seek(f, (long)mi.data_off) < 0)
+        return -1;
+    t->codec = AS_CODEC_MP3;
+    t->rate = mi.rate;
+    t->channels = mi.channels;
+    t->bits = 16;
+    t->frames = mi.frames;
+    t->trim = mi.skip;
+    s_kbps = mi.bitrate;
+    s_hdr_len = 0;
+    s_data_off = mi.data_off;
+    s_left = mi.data_end - mi.data_off;
+    t->bytes = s_left;
+    return 0;
+}
+
 /* Open the next playable entry of the playlist directory and queue it for B. */
 static int open_next(void)
 {
@@ -194,7 +229,9 @@ static int open_next(void)
         if (!s_file)
             continue;
         memset(&t, 0, sizeof t);
-        if ((ext_is(ent.name, "flac") ? open_flac(s_file, &t) : open_wav(s_file, &t)) != 0) {
+        s_kbps = 0;
+        if ((ext_is(ent.name, "flac") ? open_flac(s_file, &t) :
+             ext_is(ent.name, "wav") ? open_wav(s_file, &t) : open_mp3(s_file, &t)) != 0) {
             fs_close(s_file);
             s_file = NULL;
             continue;
@@ -216,6 +253,7 @@ static int open_next(void)
             u->channels = t.channels;
             u->frames = t.frames;
             u->codec = t.codec;
+            u->kbps = s_kbps;
             u->index = s_next_index - 1u;
             strncpy(u->name, ent.name, sizeof u->name - 1);
             u->name[sizeof u->name - 1] = 0;
@@ -437,6 +475,7 @@ int audio_play_dir(const char *dir, uint32_t index)
         s_dac_up = 1;
     }
     dac_volume();                            /* before the first sample reaches the DAC */
+    AS->rate = s_rate;
     AS->run = 1;
     s_playing = 1;
     return 0;
@@ -488,6 +527,8 @@ int audio_paused(void)
     return s_playing && s_paused;
 }
 
+static void rate_change(void);
+
 void audio_poll(void)
 {
     if (!s_playing)
@@ -499,10 +540,36 @@ void audio_poll(void)
     }
     refill();
     /* start output once B has filled the ring (or the whole stream is shorter) */
-    if (!s_dma_on && (AS->pcm_wr >= AS_PCM_BLOCKS || (AS->pcm_end && AS->pcm_wr >= AS->pcm_end)))
+    if (!s_dma_on && !AS->cmd &&
+        (AS->pcm_wr >= AS_PCM_BLOCKS || (AS->pcm_end && AS->pcm_wr >= AS->pcm_end)))
         dma_start();
-    if (AS->state == AS_B_DRAINED || AS->state == AS_B_ERROR)
+    /* B ended the DMA chain: once the last block has played and been recycled,
+     * either the stream is over, or the next track needs another sample rate */
+    if (s_dma_on && !(DMA_CHEN & (1u << DMA_CH)) && AS->pcm_played == AS->pcm_wr) {
+        if (AS->state == AS_B_RATE)
+            rate_change();
+        else if (AS->state == AS_B_ENDED)
+            halt();
+    }
+}
+
+/* Gapless across a sample-rate change: the old rate's last sample has played, so
+ * only the clocks change (ACODEC PLL, I2S divider, the DAC's speed byte); then
+ * B refills the ring and the DMA starts again as at PLAY. */
+static void rate_change(void)
+{
+    uint32_t rate = AS->q[AS->q_rd % AS_QUEUE].rate;
+
+    dma_stop();
+    if (dac_set_rate(rate) != 0) {
         halt();
+        return;
+    }
+    dma_prepare();
+    s_rate = rate;
+    AS->rate = rate;
+    s_rate_changes++;
+    AS->cmd = AS_CMD_RESTART;
 }
 
 int audio_status(audio_status_t *st)

@@ -24,6 +24,7 @@
 #define DRFLAC_REALLOC(p, sz)  ((void *)0)
 #define DRFLAC_FREE(p)         ((void)0)
 #include "player/codecs/dr_flac/dr_flac.h"
+#include "mad.h"
 
 #define SYST_CSR  (*(volatile uint32_t *)0xE000E010u)
 #define SYST_RVR  (*(volatile uint32_t *)0xE000E014u)
@@ -192,6 +193,127 @@ static void arena_free(void *p, void *u) { }
 
 static const drflac_allocation_callbacks s_alloc = { NULL, arena_malloc, arena_realloc, arena_free };
 
+/* libmad's two allocations (main data, IMDCT overlap) come from the arena as well */
+void *malloc(size_t n) { return arena_malloc(n, NULL); }
+void *calloc(size_t k, size_t n)
+{
+    void *p = arena_malloc(k * n, NULL);
+
+    if (p)
+        memset(p, 0, k * n);
+    return p;
+}
+void free(void *p) { }
+
+/* ---- MP3 (libmad, fixed point) -------------------------------------------- */
+
+#define MP3_BUF 4096u                    /* > 2 frames of 320 kbit/s; refilled as frames are used */
+
+typedef struct {
+    struct mad_stream st;
+    struct mad_frame fr;
+    struct mad_synth sy;
+    uint32_t pos;                        /* next sample of sy.pcm to hand out */
+    uint32_t trim;                       /* decoded samples still to drop */
+    int final;                           /* the buffer holds the end of the track (+ guard) */
+    uint8_t buf[MP3_BUF + MAD_BUFFER_GUARD];
+} mp3_t;
+
+static mp3_t *s_mp3;
+
+static int mp3_open(void)
+{
+    s_mp3 = arena_malloc(sizeof *s_mp3, NULL);
+    if (!s_mp3)
+        return -1;
+    mad_stream_init(&s_mp3->st);
+    mad_frame_init(&s_mp3->fr);
+    mad_synth_init(&s_mp3->sy);
+    s_mp3->pos = s_mp3->sy.pcm.length = 0;
+    s_mp3->trim = s_trk.trim;
+    s_mp3->final = 0;
+    return 0;
+}
+
+/* Keep the undecoded tail, append what the ring has of this track. */
+static void mp3_fill(void)
+{
+    mp3_t *m = s_mp3;
+    uint32_t keep = 0, n;
+
+    if (m->st.buffer && m->st.next_frame) {
+        keep = (uint32_t)(m->st.bufend - m->st.next_frame);
+        memmove(m->buf, m->st.next_frame, keep);
+    }
+    n = in_avail();
+    if (n > MP3_BUF - keep)
+        n = MP3_BUF - keep;
+    in_copy(m->buf + keep, n);
+    keep += n;
+    if (AS->in_rd == s_trk_end) {        /* the end: libmad wants zero guard bytes after it */
+        memset(m->buf + keep, 0, MAD_BUFFER_GUARD);
+        keep += MAD_BUFFER_GUARD;
+        m->final = 1;
+    }
+    mad_stream_buffer(&m->st, m->buf, keep);
+}
+
+static int32_t mp3_word(mad_fixed_t v)
+{
+    if (v >= MAD_F_ONE)
+        v = MAD_F_ONE - 1;
+    else if (v < -MAD_F_ONE)
+        v = -MAD_F_ONE;
+    return (int32_t)((uint32_t)v << 3);  /* Q28 -> left-justified 32-bit word */
+}
+
+static uint32_t mp3_read(int32_t *dst, uint32_t want)
+{
+    mp3_t *m = s_mp3;
+    uint32_t got = 0, ch = s_trk.channels;
+
+    while (got < want) {
+        struct mad_pcm *pcm = &m->sy.pcm;
+
+        if (m->pos < pcm->length) {
+            uint32_t n = pcm->length - m->pos, r = pcm->channels > 1;
+
+            if (m->trim) {
+                if (n > m->trim)
+                    n = m->trim;
+                m->trim -= n;
+                m->pos += n;
+                continue;
+            }
+            if (n > want - got)
+                n = want - got;
+            for (uint32_t i = 0; i < n; i++, m->pos++) {
+                dst[(got + i) * ch] = mp3_word(pcm->samples[0][m->pos]);
+                if (ch > 1)
+                    dst[(got + i) * ch + 1] = mp3_word(pcm->samples[r][m->pos]);
+            }
+            got += n;
+            continue;
+        }
+        if (!m->st.buffer || m->st.error == MAD_ERROR_BUFLEN) {
+            if (m->final)
+                break;                   /* decoded everything */
+            mp3_fill();
+            m->st.error = MAD_ERROR_NONE;
+        }
+        if (mad_frame_decode(&m->fr, &m->st)) {
+            if (MAD_RECOVERABLE(m->st.error) || m->st.error == MAD_ERROR_BUFLEN)
+                continue;
+            m->final = 1;                /* unrecoverable: end the track */
+            m->st.error = MAD_ERROR_BUFLEN;
+            continue;
+        }
+        mad_synth_frame(&m->sy, &m->fr);
+        m->pos = 0;
+    }
+    return got;
+}
+
 /* ---- tracks ------------------------------------------------------------- */
 
 static int track_open(void)
@@ -208,6 +330,11 @@ static int track_open(void)
         s_flac = drflac_open(flac_read, flac_seek, flac_tell, NULL, &s_alloc);
         if (!s_flac || s_flac->channels > 2) {
             AS->err = 1;
+            return -1;
+        }
+    } else if (s_trk.codec == AS_CODEC_MP3) {
+        if (mp3_open() != 0 || s_trk.channels < 1 || s_trk.channels > 2) {
+            AS->err = 3;
             return -1;
         }
     } else if (s_trk.codec != AS_CODEC_WAV || (s_trk.bits != 16 && s_trk.bits != 24) ||
@@ -266,12 +393,22 @@ static void block_done(void)
     AS->pcm_wr++;
 }
 
-static void pad_silence(void)
+/* End the DMA chain after the block being written: shorten it to what it holds
+ * (one silent frame if it is empty, as a block cannot be empty) and give its LLI no
+ * successor. The DMA plays it and stops; nothing stale or padded is ever heard. */
+static void end_chain(void)
 {
-    int32_t *b = cur_block();
+    volatile uint32_t *l = (volatile uint32_t *)AS_LLI + (AS->pcm_wr % AS_PCM_BLOCKS) * LLI_WORDS;
 
-    memset(b + 2 * s_fill, 0, (AS_BLOCK_FRAMES - s_fill) * 8u);
+    if (!s_fill) {
+        cur_block()[0] = cur_block()[1] = 0;
+        s_fill = 1;
+    }
+    l[2] = 0;                                        /* LLP */
+    l[3] &= ~(3u << 27);                             /* LLP_DST_EN, LLP_SRC_EN */
+    l[4] = s_fill * 2u;                              /* block size in words, DONE clear */
     block_done();
+    AS->pcm_end = AS->pcm_wr;
 }
 
 /* Enough input to decode without stalling mid-frame: the rest of the track,
@@ -292,26 +429,26 @@ static int produce(void)
     if (!AS->run || AS->pcm_wr - AS->pcm_played >= AS_PCM_BLOCKS)
         return 0;                                    /* stopped, or ring full */
     if (!s_open) {
+        if (AS->state == AS_B_ENDED || AS->state == AS_B_RATE)
+            return 0;                                /* waiting for A */
         if (AS->q_rd != AS->q_wr) {
+            if (AS->rate && AS->q[AS->q_rd % AS_QUEUE].rate != AS->rate) {
+                end_chain();                         /* rate change: A drains and re-clocks */
+                AS->state = AS_B_RATE;
+                return 1;
+            }
             if (AS->in_wr - AS->in_rd < 64u && AS->q[AS->q_rd % AS_QUEUE].bytes > 64u)
                 return 0;                            /* header not there yet */
-            if (track_open() != 0) {
-                AS->state = AS_B_ERROR;
+            if (track_open() != 0) {                 /* unplayable: skip it, keep the stream */
                 AS->q_rd++;
                 AS->in_rd = s_trk_end;
+                AS->done_seq = s_trk.seq;
                 return 1;
             }
             AS->state = AS_B_PLAYING;
         } else if (AS->in_closed) {
-            if (s_fill || !AS->pcm_end) {            /* end of stream: finish the block */
-                pad_silence();
-                if (!AS->pcm_end)
-                    AS->pcm_end = AS->pcm_wr;
-                return 1;
-            }
-            pad_silence();                           /* keep the ring silent until A stops */
-            if (AS->pcm_played >= AS->pcm_end)
-                AS->state = AS_B_DRAINED;
+            end_chain();                             /* end of stream */
+            AS->state = AS_B_ENDED;
             return 1;
         } else {
             return 0;
@@ -325,6 +462,8 @@ static int produce(void)
         want = s_trk.frames - AS->cur_frames;
     if (s_trk.codec == AS_CODEC_FLAC) {
         got = (uint32_t)drflac_read_pcm_frames_s32(s_flac, want, (drflac_int32 *)dst);
+    } else if (s_trk.codec == AS_CODEC_MP3) {
+        got = mp3_read(dst, want);
     } else {
         got = wav_read(dst, want);
     }
@@ -360,6 +499,11 @@ int b_main(void)
     for (;;) {
         if (AS->cmd == AS_CMD_STOP) {
             stop_all();
+            AS->cmd = AS_CMD_NONE;
+        } else if (AS->cmd == AS_CMD_RESTART) {        /* A re-clocked and re-armed the DMA */
+            AS->pcm_wr = AS->pcm_played = AS->pcm_end = 0;
+            s_fill = 0;
+            AS->state = AS_B_PLAYING;
             AS->cmd = AS_CMD_NONE;
         }
         if (AS->b_div != div_seen) {                 /* core A changed our clock */
