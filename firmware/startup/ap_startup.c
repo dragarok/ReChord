@@ -24,7 +24,7 @@
  * ap_vectors is a hard error in every C mode.  Fixed by using stdint's
  * uint32_t throughout and declaring ap_vectors up front. */
 
-extern const uint32_t ap_vectors[16];   /* defined at the bottom of this file */
+extern const uint32_t ap_vectors[];   /* defined at the bottom of this file */
 
 extern uint32_t Main(void);
 extern uint32_t _bss_start, _bss_end;
@@ -101,23 +101,58 @@ const uint32_t ap_ram_vectors[2]
     (uint32_t)&PowerOn_Reset,
 };
 
-/* Cortex-M3 vector table (aligned 256 for VTOR). [0]=initial MSP, [1]=reset.
- * Byte-identical word 0/word 1 roles to the reference image's table at
- * IMG 0xD68: word 0 = 0x03004000 (the stack TOP; the stack is the 16 KiB
- * below it), word 1 = the reset entry. */
-const uint32_t ap_vectors[16]
+/* Handlers: weak aliases of Default_Handler, overridden by the drivers.
+ * IRQ numbers are the SDK's (rockchip/system/os/interrupt.h). */
+#define WEAK_HANDLER(name) void name(void) __attribute__((weak, alias("Default_Handler")))
+WEAK_HANDLER(HardFault_Handler);
+WEAK_HANDLER(SysTick_Handler);
+WEAK_HANDLER(DMA_IRQHandler);          /* 6 */
+WEAK_HANDLER(MAILBOX0_IRQHandler);     /* 9..12 */
+WEAK_HANDLER(MAILBOX1_IRQHandler);
+WEAK_HANDLER(MAILBOX2_IRQHandler);
+WEAK_HANDLER(MAILBOX3_IRQHandler);
+WEAK_HANDLER(TIMER1_IRQHandler);       /* 18 */
+WEAK_HANDLER(TIMER0_IRQHandler);       /* 19 */
+WEAK_HANDLER(SARADC_IRQHandler);       /* 20 */
+WEAK_HANDLER(I2S1_IRQHandler);         /* 32 */
+WEAK_HANDLER(GPIO2_IRQHandler);        /* 36 */
+WEAK_HANDLER(GPIO0_IRQHandler);        /* 38 */
+
+#define D (uint32_t)&Default_Handler
+#define AP_IRQS 41
+
+/* Cortex-M3 vector table (aligned 256 for VTOR). [0]=initial MSP, [1]=reset,
+ * then the 41 SoC interrupts. Word 0 = 0x03004000 (the stack TOP; the stack
+ * is the 16 KiB below it), word 1 = the reset entry, as in the reference. */
+const uint32_t ap_vectors[16 + AP_IRQS]
     __attribute__((section(".vectors"), used, aligned(256))) = {
     AP_INITIAL_MSP,                         /* 0x00 initial MSP = 0x03004000 */
     (uint32_t)&PowerOn_Reset,               /* 0x04 Reset_Handler             */
-    (uint32_t)&Default_Handler,         /* 0x08 NMI                      */
-    (uint32_t)&Default_Handler,         /* 0x0C HardFault                */
-    (uint32_t)&Default_Handler,         /* 0x10 MemManage                */
-    (uint32_t)&Default_Handler,         /* 0x14 BusFault                 */
-    (uint32_t)&Default_Handler,         /* 0x18 UsageFault               */
-    0, 0, 0, 0,                        /* 0x1C-0x28 reserved            */
-    (uint32_t)&Default_Handler,         /* 0x2C SVCall                   */
-    (uint32_t)&Default_Handler,         /* 0x30 DebugMon                 */
-    0,                                  /* 0x34 reserved                 */
-    (uint32_t)&Default_Handler,         /* 0x38 PendSV                   */
-    (uint32_t)&Default_Handler,         /* 0x3C SysTick                  */
+    D,                                      /* 0x08 NMI                      */
+    (uint32_t)&HardFault_Handler,           /* 0x0C HardFault                */
+    D, D, D,                                /* MemManage, BusFault, UsageFault */
+    0, 0, 0, 0,                             /* reserved                      */
+    D, D, 0,                                /* SVCall, DebugMon, reserved    */
+    D,                                      /* PendSV                        */
+    (uint32_t)&SysTick_Handler,             /* 0x3C SysTick                  */
+    /* IRQ 0..40 */
+    D, D, D, D, D, D,                       /* SFC SYNTH EBC EMMC SDMMC USBC */
+    (uint32_t)&DMA_IRQHandler,              /* 6  DMA                        */
+    D, D,                                   /* IMDCT WDT                     */
+    (uint32_t)&MAILBOX0_IRQHandler,         /* 9                             */
+    (uint32_t)&MAILBOX1_IRQHandler,
+    (uint32_t)&MAILBOX2_IRQHandler,
+    (uint32_t)&MAILBOX3_IRQHandler,         /* 12                            */
+    D, D, D, D, D,                          /* 13..15 rsvd, PWM1, PWM0       */
+    (uint32_t)&TIMER1_IRQHandler,           /* 18                            */
+    (uint32_t)&TIMER0_IRQHandler,           /* 19                            */
+    (uint32_t)&SARADC_IRQHandler,           /* 20                            */
+    D, D, D, D, D, D,                       /* UART5..UART0                  */
+    D, D, D, D, D,                          /* SPI1 SPI0 I2C2 I2C1 I2C0      */
+    (uint32_t)&I2S1_IRQHandler,             /* 32                            */
+    D, D, D,                                /* I2S0 HIFI PMU                 */
+    (uint32_t)&GPIO2_IRQHandler,            /* 36                            */
+    D,                                      /* GPIO1                         */
+    (uint32_t)&GPIO0_IRQHandler,            /* 38                            */
+    D, D,                                   /* VOP DMA2                      */
 };

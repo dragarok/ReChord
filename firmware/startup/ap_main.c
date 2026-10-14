@@ -22,6 +22,7 @@
 #include "drivers/panel_io.h"
 #include "drivers/display.h"
 #include "drivers/board.h"
+#include "drivers/clock.h"
 #include "ui/theme.h"       /* THEME_* geometry + palette (theme module) */
 
 void ap_ui_loop(void);   /* ap_ui.c */
@@ -33,6 +34,7 @@ uint32_t Main(void)
     const theme_t *th = theme_get();
 
     board_early_init();       /* board pins first, as the stock reset handler */
+    clock_init();             /* PLL 400 MHz, core A 200 MHz, SysTick time base */
     display_init();
 
     /* Fill the whole screen (inclusive coordinates per display.h). */

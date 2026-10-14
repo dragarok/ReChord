@@ -75,7 +75,8 @@ AP_DRIVER_SRCS := \
   firmware/drivers/usb_msc_rknanoc.c \
   firmware/drivers/usb_cdc_rknanoc.c \
   firmware/drivers/dac_cs43131.c \
-  firmware/drivers/board_rknanoc.c
+  firmware/drivers/board_rknanoc.c \
+  firmware/drivers/clock_rknanoc.c
 
 # Services: settings/log/input + the target fs backend (same set as
 # $(SERVICES_TARGET_SRCS) in firmware/services/services.mk).

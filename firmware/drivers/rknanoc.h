@@ -7,6 +7,8 @@
 
 #include <stdint.h>
 
+#include "clock.h"
+
 #define RK_CRU ((volatile uint32_t *)0x40180000u)
 #define RK_GRF ((volatile uint32_t *)0x50010000u)
 
@@ -24,12 +26,10 @@ static inline void cru_reset(unsigned id, int assert)
     RK_CRU[0x30 + (id >> 4)] = (1u << (bit + 16)) | ((assert ? 1u : 0u) << bit);
 }
 
-/* ponytail: uncalibrated busy loop (>= 1 us at the 24 MHz boot clock);
- * callers use it for timeouts/settling, where longer is safe. */
+/* time-based (clock.h), right at any CPU clock */
 static inline void rk_delay_us(uint32_t us)
 {
-    volatile uint32_t n = us * 8u;
-    while (n--) { }
+    delay_us(us);
 }
 
 #endif

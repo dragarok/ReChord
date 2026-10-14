@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "drivers/clock.h"
 #include "drivers/display.h"
 #include "drivers/emmc.h"
 #include "drivers/panel_io.h"
@@ -21,11 +22,12 @@
 #include "ui/screens/screens.h"
 
 static int s_adc = 1023, s_adc2 = 1023, s_power, s_cable;
-static unsigned s_power_held;
+static uint32_t s_power_down_ms;     /* time_ms() when the power key went down */
 static int s_power_armed;    /* power key seen released since boot */
 static uint32_t s_user;              /* user volume start, 0 = unknown */
 static char s_emmc[32], s_usb[32] = "plug in", s_sd[32];
 static int s_sd_in = -1;
+static uint32_t s_cpu_shown_ms;
 
 /* Read-only eMMC probe for the root menu: size and user volume start. */
 static void emmc_probe(void)
@@ -117,7 +119,7 @@ static int ask(int any_key)
     input_event_t ev;
 
     while (keys_power())
-        panel_io_delay_ms(1);
+        cpu_wait_tick();
     input_mock_clear();
     for (;;) {
         input_scan(keys_adc(), keys_power());
@@ -127,7 +129,7 @@ static int ask(int any_key)
             if (ev.type == KEY_BACK || ev.type == KEY_POWER)
                 return 0;
         }
-        panel_io_delay_ms(5);
+        cpu_wait_tick();
     }
 }
 
@@ -191,7 +193,7 @@ static void power_off(void)
 {
     screen("Powering off");
     while (keys_power())
-        panel_io_delay_ms(1);
+        cpu_wait_tick();
     display_clear(0x0000);
     display_flush_rows(0, DISPLAY_H - 1);
     board_power_off();
@@ -220,7 +222,7 @@ static void usb_session(void)
     fs_target_mount(0, "Internal", emmc_read, s_user);   /* host may have written */
     snprintf(s_usb, sizeof s_usb, "x%d r%uM w%uM", r, (unsigned)(rd >> 11), (unsigned)(wr >> 11));
     while (keys_power())                 /* don't leak the exit press */
-        panel_io_delay_ms(1);
+        cpu_wait_tick();
     /* Scan for an update on ANY session exit the screen advertises:
      * eject (LoEj), unplug (VBUS gone), AND the power key — the screen
      * says "eject on the PC or press power", and the reference updater
@@ -234,6 +236,16 @@ static void usb_session(void)
 static void open_files(void)    { browser_screen_set_root("/"); ui_push_screen(&browser_screen); }
 static void open_player(void)   { ui_push_screen(&player_screen); }
 static void open_settings(void) { settings_screen_reload(); ui_push_screen(&settings_screen); }
+
+/* "200M 1.5%": core A clock and its busy share over the last second */
+static const char *cpu_text(void)
+{
+    static char buf[24];
+    unsigned pm = cpu_load_permille();
+
+    snprintf(buf, sizeof buf, "%uM %u.%u%%", (unsigned)(clock_core_hz() / 1000000u), pm / 10u, pm % 10u);
+    return buf;
+}
 
 static const char *keys_text(void)
 {
@@ -506,14 +518,17 @@ static const menu_item_t k_root_items[] = {
     { "Files",       NULL,      open_files },
     { "Now Playing", NULL,      open_player },
     { "Settings",    NULL,      open_settings },
+    { "CPU",         cpu_text,  NULL },
     { "Keys",        keys_text, NULL },
     { "eMMC",        emmc_text, NULL },
     { "SD",          sd_text,   NULL },
     { "USB",         usb_text,  NULL },
     { "USB diag",    usbd_text, NULL },
 };
+#define ROOT_CPU_ROW 6               /* index of "CPU" in k_root_items */
 #define RC_BUILD "m7a"
-static const menu_model_t k_root = { "ReChord " RC_BUILD, k_root_items, 11 };
+static const menu_model_t k_root = { "ReChord " RC_BUILD, k_root_items,
+                                      sizeof k_root_items / sizeof k_root_items[0] };
 
 void ap_ui_loop(void)
 {
@@ -545,13 +560,14 @@ void ap_ui_loop(void)
             usb_console_run();
         s_cable = cable;
 
-        /* ponytail: hold time in loop passes, calibrated on hardware
-         * (2000 passes = ~6 s, so 700 = ~2 s); use a timer once there is one */
-        /* the press that switched us on may still be held: arm the hold-to-
-         * power-off only after the key has been released once */
+        /* hold power 2 s to switch off; the press that switched us on may
+         * still be held, so arm only after the key has been released once */
         s_power_armed |= !power;
-        s_power_held = power && s_power_armed ? s_power_held + 1u : 0u;
-        if (s_power_held == 700u)
+        if (!power || !s_power_armed)
+            s_power_down_ms = 0;
+        else if (!s_power_down_ms)
+            s_power_down_ms = time_ms() | 1u;
+        else if (time_ms() - s_power_down_ms >= 2000u)
             power_off();
 
         /* live "Keys" row on the root menu: hardware check without a log */
@@ -559,6 +575,10 @@ void ap_ui_loop(void)
              adc2 - s_adc2 > 8 || s_adc2 - adc2 > 8) &&
             ui_stack_depth() == 1) {
             ui_invalidate_all();
+        }
+        if (time_ms() - s_cpu_shown_ms >= 1000u) {
+            s_cpu_shown_ms = time_ms();  /* CPU row: once a second */
+            menu_screen_invalidate_item(ROOT_CPU_ROW);
         }
         s_adc = adc;
         s_adc2 = adc2;
@@ -581,8 +601,6 @@ void ap_ui_loop(void)
         player_screen_refresh();
 
         ui_render();
-        /* ponytail: busy-wait scan period (~5 ms at the 24 MHz boot clock);
-         * move to SysTick once the clock tree is set up. */
-        panel_io_delay_ms(1);
+        cpu_wait_tick();                 /* sleep (WFI) until the next 10 ms tick */
     }
 }

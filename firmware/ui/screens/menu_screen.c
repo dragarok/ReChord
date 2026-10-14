@@ -130,6 +130,38 @@ static void menu_screen_draw(void)
         menu_draw(s_model, &s_view);
 }
 
+/* Mark one item's row dirty if it is on the visible page. */
+static void invalidate_item(const menu_view_t *v, int idx)
+{
+    int row = idx - v->top, y;
+
+    if (row < 0 || row >= menu_page_size())
+        return;
+    y = THEME_MENU_TOP + row * THEME_ITEM_H;
+    ui_invalidate(0, y, DISPLAY_W - 1, y + THEME_ITEM_H - 1);
+}
+
+/* Cursor move: without a scroll only the old and new rows change on the
+ * panel, so only those two bands are flushed. */
+void menu_view_step(menu_view_t *v, int delta, int count)
+{
+    menu_view_t old = *v;
+
+    menu_view_move(v, delta, count, menu_page_size());
+    if (v->top != old.top) {
+        ui_invalidate_all();
+    } else if (v->cursor != old.cursor) {
+        invalidate_item(v, old.cursor);
+        invalidate_item(v, v->cursor);
+    }
+}
+
+void menu_screen_invalidate_item(int idx)
+{
+    if (s_model && ui_top_screen() == &menu_screen)
+        invalidate_item(&s_view, idx);
+}
+
 static void menu_screen_handle_event(const input_event_t *ev)
 {
     if (s_model == NULL)
@@ -137,12 +169,10 @@ static void menu_screen_handle_event(const input_event_t *ev)
 
     switch (ev->type) {
     case KEY_UP:
-        menu_view_move(&s_view, -1, s_model->item_count, menu_page_size());
-        ui_invalidate_all();
+        menu_view_step(&s_view, -1, s_model->item_count);
         break;
     case KEY_DOWN:
-        menu_view_move(&s_view, +1, s_model->item_count, menu_page_size());
-        ui_invalidate_all();
+        menu_view_step(&s_view, +1, s_model->item_count);
         break;
     case KEY_SELECT:
         if (s_view.cursor >= 0 && s_view.cursor < s_model->item_count &&

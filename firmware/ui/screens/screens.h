@@ -62,6 +62,10 @@ void menu_view_init(menu_view_t *v);
 /* Move cursor by delta, clamp at both ends, scroll minimally to keep the
  * cursor inside a window of `page` visible rows. */
 void menu_view_move(menu_view_t *v, int delta, int count, int page);
+/* menu_view_move + invalidate just the rows that changed (two, without a scroll) */
+void menu_view_step(menu_view_t *v, int delta, int count);
+/* root-menu value refresh: mark one item row dirty if visible */
+void menu_screen_invalidate_item(int idx);
 int  menu_page_size(void);   /* visible rows below the title bar            */
 
 /* Rendering helpers (shared with settings_screen / browser_screen). */

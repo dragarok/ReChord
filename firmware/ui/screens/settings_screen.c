@@ -128,12 +128,10 @@ static void settings_screen_handle_event(const input_event_t *ev)
 {
     switch (ev->type) {
     case KEY_UP:
-        menu_view_move(&s_view, -1, SETTING_KEY_COUNT, menu_page_size());
-        ui_invalidate_all();
+        menu_view_step(&s_view, -1, SETTING_KEY_COUNT);
         break;
     case KEY_DOWN:
-        menu_view_move(&s_view, +1, SETTING_KEY_COUNT, menu_page_size());
-        ui_invalidate_all();
+        menu_view_step(&s_view, +1, SETTING_KEY_COUNT);
         break;
     case KEY_SELECT:
         if (s_view.cursor >= 0 && s_view.cursor < SETTING_KEY_COUNT)

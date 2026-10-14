@@ -49,6 +49,7 @@
 #include <stdint.h>
 
 #include "dac_cs43131.h"
+#include "clock.h"
 
 /* ---- MMIO primitives ----------------------------------------------------- */
 
@@ -104,17 +105,9 @@
  * tone sample into a void -> the FIFO never saw data -> no audio. */
 #define I2S_TXDR    REG32(I2S1_BASE + 0x24u)
 
-static void delay_loops(volatile unsigned n)
-{
-    while (n--)
-        ;
-}
-
 void dac_delay_ms(unsigned ms)
 {
-    /* ~24 MHz boot CPU: ~24k loops is ~1 ms (over-shoot is safe). */
-    while (ms--)
-        delay_loops(24000);
+    delay_ms(ms);
 }
 
 /* ---- CRU gates (active-low, upper-halfword write-enable, SDK style) ------ */
@@ -156,7 +149,7 @@ static void cru_rst(int rst_id, int assert)
     unsigned bit = 1u << ((unsigned)rst_id & 0xFu);
     /* SDK ScuSoftResetCtr: bit+16 = write-enable, bit = reset value. */
     CRU_RST(rst_id >> 4) = (bit << 16) | (assert ? bit : 0u);
-    delay_loops(4800);                      /* SDK: DelayUs(5) ~          */
+    delay_us(5);                            /* SDK: DelayUs(5)            */
 }
 
 /* ---- GPIO power/reset sequence (ref FUN_03056550 entry) -------------------- */
@@ -543,9 +536,9 @@ static void i2s1_setup(uint32_t rate, uint32_t mclk)
 
     I2S_XFER = 0;
     I2S_CLR = 1;
-    delay_loops(48000);
-    while (I2S_CLR)
-        delay_loops(100);
+    delay_ms(2);                           /* ~48k loops at 24 MHz */
+    for (unsigned n = 0; I2S_CLR && n < 1000u; n++)
+        delay_us(5);
 
     I2S_TXCR = 0x401Fu;      /* verbatim: ch0-1 + 32-bit bus word + 16-bit */
     I2S_RXCR = 0x401Fu;      /* ref writes RXCR too (verbatim)            */
@@ -657,8 +650,9 @@ static int dac_probe(uint8_t addr_w)
     return i2c_write(addr_w, frame, 5);
 }
 
-/* Boot pclk for I2C0 at this point (24 MHz XIN; GetI2CFreq in the SDK). */
-#define DAC_PCLK_HZ 24000000u
+/* I2C0 runs on pclk_logic (GetI2CFreq in the SDK): 50 MHz once clock_init()
+ * has run, 24 MHz before. */
+#define DAC_PCLK_HZ clock_pclk_hz()
 
 static int i2c0_scan(void)
 {

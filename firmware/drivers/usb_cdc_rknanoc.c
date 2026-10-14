@@ -14,6 +14,7 @@
  */
 
 #include <stdint.h>
+#include "clock.h"
 #include "usb_cdc.h"
 #include "usb_msc.h"                 /* usb_dwc2_init() shared bring-up     */
 
@@ -63,8 +64,7 @@ const struct usb_cdc_diag_t *usb_cdc_diag(void) { return &s_diag; }
 /* ---- small helpers ----------------------------------------------------- */
 static void rk_delay_us(unsigned us)
 {
-    volatile unsigned n = us * 8u;
-    while (n--) __asm__ volatile("nop");
+    delay_us(us);
 }
 
 /* usb_cable() comes from usb_msc.h (real VBUS detect via GRF). */

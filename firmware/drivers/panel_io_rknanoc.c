@@ -45,6 +45,7 @@
 #include <stdint.h>
 
 #include "panel_io.h"
+#include "clock.h"
 
 /* GPIO port register block (see file header). */
 typedef struct {
@@ -227,10 +228,5 @@ void panel_io_send_pixel(uint16_t rgb565)
 
 void panel_io_delay_ms(uint16_t ms)
 {
-    /* TODO: replace with a calibrated timer/SysTick delay at bring-up.
-     * Busy loop scaled crudely for the 200 MHz boot clock. */
-    volatile uint32_t count = (uint32_t)ms * 20000u;
-    while (count-- > 0u) {
-        /* spin */
-    }
+    delay_ms(ms);
 }
