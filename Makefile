@@ -241,7 +241,7 @@ AP_CODEC_LIBS := \
   $(SDK_LIB)/Audio/SSRC/RKNanoD_SSRC_20160718.lib \
   $(SDK_LIB)/Audio/Wav/RkNanoD_BWAV_20151223.lib
 
-.PHONY: all bb ap build-bb build-ap link-bb link-ap build-sdk link-firmware \
+.PHONY: test-tags all bb ap build-bb build-ap link-bb link-ap build-sdk link-firmware \
         toolchain manifests compile-check pack-img pack-bb-img pack-bb-stub-img \
         bb-stub release pack-full apbb-experimental test-dsp extract-section3 clean
 
@@ -253,6 +253,11 @@ HOSTCC ?= cc
 test-dsp: firmware/rechord_dsp_core.c firmware/rechord_dsp_core.h firmware/test_dsp_core.c
 	$(HOSTCC) -O2 -o $(BUILD_DIR)/test_dsp_core firmware/test_dsp_core.c firmware/rechord_dsp_core.c -lm
 	$(BUILD_DIR)/test_dsp_core
+
+# Tag reader (firmware/services/tags.c): fixtures, expected fields, rd() cost,
+# fuzz under ASan/UBSan. FUZZ=<iterations> SEED=<n> GAPLESS=<dir> optional.
+test-tags:
+	CC=$(HOSTCC) firmware/services/tests/run_tags.sh $(FUZZ) $(SEED)
 
 # Single-command SAFE product build: custom BB (audio/DSP) + STOCK AP (UI),
 # packed into one flashable IMG. This combination is hardware-verified to

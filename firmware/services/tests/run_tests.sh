@@ -18,4 +18,5 @@ $CC $CFLAGS -I.. -o .work/test_fs      test_fs.c      ../fs_host.c
 .work/test_log
 .work/test_input
 .work/test_fs
+./run_tags.sh
 echo "ALL SERVICES TESTS PASSED"
