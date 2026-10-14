@@ -20,6 +20,7 @@
 #include "drivers/clock.h"
 #include "drivers/dac_cs43131.h"
 #include "services/fs.h"
+#include "services/log.h"
 
 extern const uint8_t coreb_image[], coreb_image_end[];
 
@@ -215,8 +216,13 @@ static int open_next(void)
         as_track_t t;
         size_t dl;
 
-        if (fs_list_dir(s_dir, s_next_index, &ent, 1, &got, &total) != 0 || got == 0)
+        int r = fs_list_dir(s_dir, s_next_index, &ent, 1, &got, &total);
+
+        if (r != 0 || got == 0) {
+            if (r)
+                log_printf("audio: list %s #%u: %d", s_dir, (unsigned)s_next_index, r);
             return -1;
+        }
         s_next_index++;
         if (ent.is_dir || !playable(ent.name))
             continue;
@@ -226,12 +232,15 @@ static int open_next(void)
             path[dl++] = '/';
         strcpy(path + dl, ent.name);
         s_file = fs_open_read(path);
-        if (!s_file)
+        if (!s_file) {
+            log_printf("audio: cannot open %s", ent.name);
             continue;
+        }
         memset(&t, 0, sizeof t);
         s_kbps = 0;
         if ((ext_is(ent.name, "flac") ? open_flac(s_file, &t) :
              ext_is(ent.name, "wav") ? open_wav(s_file, &t) : open_mp3(s_file, &t)) != 0) {
+            log_printf("audio: %s: not a playable stream (size %ld)", ent.name, fs_file_size(s_file));
             fs_close(s_file);
             s_file = NULL;
             continue;
@@ -259,7 +268,11 @@ static int open_next(void)
             u->name[sizeof u->name - 1] = 0;
         }
         AS->q[AS->q_wr % AS_QUEUE] = t;
+        __asm__ volatile ("dmb" ::: "memory");   /* the entry before the count that publishes it */
         AS->q_wr++;
+        log_printf("audio: queued %u '%s' codec %u %u Hz %u bit %u ch, %u frames, %u bytes",
+                   (unsigned)t.seq, ent.name, (unsigned)t.codec, (unsigned)t.rate, (unsigned)t.bits,
+                   (unsigned)t.channels, (unsigned)t.frames, (unsigned)t.bytes);
         if (!s_rate)
             s_rate = t.rate;
         return 0;
@@ -279,6 +292,7 @@ static void refill(void)
             if (AS->in_closed || AS->q_wr - AS->q_rd >= AS_QUEUE - 1u)
                 return;
             if (open_next() != 0) {
+                log_printf("audio: end of the playlist after %u tracks", (unsigned)s_seq);
                 AS->in_closed = 1;           /* end of the playlist */
                 return;
             }
@@ -315,6 +329,7 @@ static void refill(void)
                 k = 16384u;                 /* bound the time spent per tick */
             n = fs_read(s_file, ring + off, k);
             if (n <= 0) {                   /* read error: B was promised the bytes, */
+                log_printf("audio: read error %ld, %u bytes left of track %u", n, (unsigned)s_left, (unsigned)s_seq);
                 memset(ring + off, 0, k);   /* so the rest of the track reads as zeros */
                 n = (long)k;
             }
@@ -548,8 +563,10 @@ void audio_poll(void)
     if (s_dma_on && !(DMA_CHEN & (1u << DMA_CH)) && AS->pcm_played == AS->pcm_wr) {
         if (AS->state == AS_B_RATE)
             rate_change();
-        else if (AS->state == AS_B_ENDED)
+        else if (AS->state == AS_B_ENDED) {
+            log_printf("audio: end of stream, %u tracks, B err %u", (unsigned)AS->done_seq, (unsigned)AS->err);
             halt();
+        }
     }
 }
 
@@ -561,6 +578,7 @@ static void rate_change(void)
     uint32_t rate = AS->q[AS->q_rd % AS_QUEUE].rate;
 
     dma_stop();
+    log_printf("audio: rate %u -> %u Hz", (unsigned)s_rate, (unsigned)rate);
     if (dac_set_rate(rate) != 0) {
         halt();
         return;

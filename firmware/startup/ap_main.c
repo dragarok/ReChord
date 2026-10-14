@@ -17,6 +17,7 @@
  *
  * After painting (the splash), Main() runs the key-driven UI loop forever.
  */
+#include "services/log.h"
 #include <stdint.h>
 
 #include "drivers/panel_io.h"
@@ -27,6 +28,8 @@
 
 void ap_ui_loop(void);   /* ap_ui.c */
 
+static unsigned long log_clock(void) { return time_ms(); }
+
 uint32_t Main(void)
 {
     uint16_t bg = THEME_COLOR_BG;
@@ -35,6 +38,7 @@ uint32_t Main(void)
 
     board_early_init();       /* board pins first, as the stock reset handler */
     clock_init();             /* PLL 400 MHz, core A 200 MHz, SysTick time base */
+    log_init(log_clock);
     display_init();
 
     /* Fill the whole screen (inclusive coordinates per display.h). */

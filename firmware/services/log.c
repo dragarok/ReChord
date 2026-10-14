@@ -1,20 +1,22 @@
 /*
- * log.c — ring-buffered logger (see log.h for the contract).
- *
- * Written from documented format facts only (the on-device log line format
- * and the flush-with-tag convention); no third-party code is used.
+ * log.c -- the log (log.h): lines go into a 4 KiB byte ring in RAM; log_flush()
+ * appends them to the log file in one write. When the ring is full the oldest
+ * unflushed lines are kept and new ones are dropped (and counted), so a flush
+ * always shows what led up to the overflow.
  */
 #include "log.h"
 #include "fs.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
-static char s_lines[LOG_BUFFER_LINES][LOG_LINE_MAX];
-static unsigned s_head;          /* index of the oldest buffered line */
-static unsigned s_count;         /* lines currently buffered */
-static unsigned long s_dropped;  /* lines dropped since last good flush */
-static log_clock_fn s_clock;     /* ms tick source; NULL = frozen at 0 */
+#define RING 4096u
+
+char log_ring[RING];                     /* not static: a debugger/QEMU can read it */
+uint32_t log_ring_head, log_ring_len;    /* oldest byte, bytes buffered */
+static unsigned long s_dropped, s_lines;
+static log_clock_fn s_clock;
 
 void log_init(log_clock_fn clock_ms)
 {
@@ -28,114 +30,73 @@ unsigned long log_dropped(void)
 
 unsigned log_pending(void)
 {
-    return s_count;
-}
-
-static unsigned long now_ms(void)
-{
-    return (s_clock != NULL) ? s_clock() : 0UL;
-}
-
-/* Copy one finished line into the ring, or count it as dropped. */
-static void append_line(const char *line)
-{
-    char *slot;
-    unsigned long n;
-
-    if (s_count >= (unsigned)LOG_BUFFER_LINES) {
-        s_dropped++;
-        return;
-    }
-    slot = s_lines[(s_head + s_count) % (unsigned)LOG_BUFFER_LINES];
-    /* log_printf guarantees the line fits; this copy is bounded anyway. */
-    n = (unsigned long)strlen(line);
-    if (n > (unsigned long)LOG_LINE_MAX - 1) {
-        n = (unsigned long)LOG_LINE_MAX - 1;
-    }
-    memcpy(slot, line, n);
-    slot[n] = '\0';
-    s_count++;
+    return (unsigned)s_lines;
 }
 
 void log_printf(const char *fmt, ...)
 {
     char line[LOG_LINE_MAX];
-    unsigned long ms;
-    va_list ap;
+    unsigned long ms = s_clock ? s_clock() : 0ul;
     int n;
+    va_list ap;
 
-    if (fmt == NULL) {
-        return;
-    }
-    ms = now_ms();
-    n = snprintf(line, sizeof(line), "%lu.%03lu ",
-                 ms / 1000UL, ms % 1000UL);
-    if (n < 0) {
-        return;
-    }
-    if ((unsigned)n >= (unsigned)sizeof(line)) {
-        n = (int)sizeof(line) - 1;
-    }
+    n = snprintf(line, sizeof line, "%lu.%03lu ", ms / 1000ul, ms % 1000ul);
     va_start(ap, fmt);
-    (void)vsnprintf(line + n, sizeof(line) - (unsigned)n, fmt, ap);
+    n += vsnprintf(line + n, sizeof line - (unsigned)n - 1u, fmt, ap);
     va_end(ap);
-    line[sizeof(line) - 1] = '\0';
-    append_line(line);
+    if (n > (int)sizeof line - 2)
+        n = (int)sizeof line - 2;
+    line[n++] = '\n';
+    if (log_ring_len + (unsigned)n > RING) {
+        s_dropped++;
+        return;
+    }
+    for (int i = 0; i < n; i++)
+        log_ring[(log_ring_head + log_ring_len + (unsigned)i) % RING] = line[i];
+    log_ring_len += (unsigned)n;
+    s_lines++;
 }
 
-/* Write one NUL-terminated line plus '\n'. Returns 0 or FS_ERR_*. */
-static int write_line(fs_file_t *f, const char *line)
-{
-    unsigned long n = (unsigned long)strlen(line);
-
-    if (fs_write(f, line, n) != (long)n) {
-        return FS_ERR_IO;
-    }
-    if (fs_write(f, "\n", 1) != 1) {
-        return FS_ERR_IO;
-    }
-    return FS_OK;
-}
+static int write_ring(void);
 
 int log_flush(const char *tag)
 {
-    fs_file_t *f;
-    unsigned i;
-    int rc = LOG_OK;
+    unsigned long dropped = s_dropped;
+    int r;
 
-    if (tag != NULL) {
-        /* Flush markers follow the same line format as everything else. */
+    if (tag)
         log_printf("log flush (%s)", tag);
-    }
+    if ((r = write_ring()) != LOG_OK || !dropped)
+        return r;
+    log_printf("... %lu log lines dropped (buffer full)", dropped);
+    return write_ring();
+}
 
+static int write_ring(void)
+{
+    fs_file_t *f;
+    int ok = 1;
+
+    if (!log_ring_len)
+        return LOG_OK;
     f = fs_open_append(LOG_PATH);
-    if (f == NULL) {
-        return LOG_ERR_OPEN;    /* keep the buffer; retry at next flush */
-    }
-    for (i = 0; i < s_count; i++) {
-        const char *ln = s_lines[(s_head + i) % (unsigned)LOG_BUFFER_LINES];
-        if (write_line(f, ln) != FS_OK) {
-            rc = LOG_ERR_IO;
-            break;
-        }
-    }
-    if (rc == LOG_OK && s_dropped > 0) {
-        /* Report the overflow at the point where it is recovered. */
-        char drop_line[LOG_LINE_MAX];
-        unsigned long ms = now_ms();
-        (void)snprintf(drop_line, sizeof(drop_line),
-                       "%lu.%03lu log: %lu lines dropped (buffer full)",
-                       ms / 1000UL, ms % 1000UL, s_dropped);
-        if (write_line(f, drop_line) != FS_OK) {
-            rc = LOG_ERR_IO;
-        }
-    }
-    fs_close(f);
+    if (!f)
+        return LOG_ERR_OPEN;
+    while (ok && log_ring_len) {
+        uint32_t k = RING - log_ring_head < log_ring_len ? RING - log_ring_head : log_ring_len;
 
-    if (rc == LOG_OK) {
-        s_head = 0;
-        s_count = 0;
-        s_dropped = 0;
+        ok = fs_write(f, log_ring + log_ring_head, k) == (long)k;
+        if (ok) {
+            log_ring_head = (log_ring_head + k) % RING;
+            log_ring_len -= k;
+        }
     }
-    return rc;
+    if (fs_close(f) != 0)
+        ok = 0;
+    if (!ok)
+        return LOG_ERR_IO;
+    log_ring_head = 0;
+    s_lines = 0;
+    s_dropped = 0;
+    return LOG_OK;
 }

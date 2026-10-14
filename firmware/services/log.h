@@ -22,7 +22,7 @@
 /* Log file location: root of the user volume (drop-in name for tooling that
  * pulls the device log). Override at compile time if needed. */
 #ifndef LOG_PATH
-#define LOG_PATH "\\ECHOLOG.TXT"
+#define LOG_PATH "/Internal/ECHOLOG.TXT"
 #endif
 
 /* Ring capacity (lines). Tune per build; keep small for the 64 KiB-class RAM
