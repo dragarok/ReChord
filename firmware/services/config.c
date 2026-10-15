@@ -20,6 +20,7 @@ static const uint8_t k_auto_off[] = { 5, 15, 30, 0 };
 static const char *const k_usb[] = { "ask", "disk", "dac", "charge" };
 static const char *const k_resume[] = { "off", "folder", "track" };
 static const char *const k_off_on[] = { "off", "on" };
+static const char *const k_dac_charge[] = { "off", "on", "power" };   /* CFG_DAC_* */
 static const char *const k_cpu[] = { "auto", "max" };
 
 static uint32_t s_hash, s_save_at;
@@ -35,8 +36,8 @@ void config_defaults(void)
     g_cfg.strip = 0;
     g_cfg.tags = 1;
     g_cfg.cpu = 0;
-    g_cfg.dac_mhz = 50;
-    g_cfg.dac_charge = 0;                    /* a phone's battery is not the player's charger */                      /* the DAC needs ~7-12 % of it (QEMU profile) */
+    g_cfg.dac_mhz = 50;                      /* the DAC needs ~7-12 % of it (QEMU profile) */
+    g_cfg.dac_charge = CFG_DAC_BATTERY;      /* stock's default: the phone's battery is not the player's charger */
 }
 
 void config_reset(void)
@@ -87,7 +88,7 @@ static void set(const char *k, const char *v)
         g_cfg.tags = (uint8_t)i;
     else if (!strcmp(k, "cpu") && (i = pick(v, k_cpu, 2)) >= 0)
         g_cfg.cpu = (uint8_t)i;
-    else if (!strcmp(k, "dac_charge") && (i = pick(v, k_off_on, 2)) >= 0)
+    else if (!strcmp(k, "dac_charge") && (i = pick(v, k_dac_charge, 3)) >= 0)
         g_cfg.dac_charge = (uint8_t)i;
     else if (!strcmp(k, "dac_mhz") && ((i = atoi(v)) == 50 || i == 100 || i == 200))
         g_cfg.dac_mhz = (uint8_t)i;
@@ -169,7 +170,7 @@ static int text_of(char *t, unsigned long cap)
                     "# where the browser and the player were\nbrowse=%s\ncursor=%u\n%s%s%s",
                     k_play[g_cfg.play % 4u], g_cfg.brightness, so, ao, k_usb[g_cfg.usb % 4u],
                     k_resume[g_cfg.resume % 3u], k_off_on[g_cfg.strip & 1u], k_off_on[g_cfg.tags & 1u],
-                    k_cpu[g_cfg.cpu & 1u], g_cfg.dac_mhz, k_off_on[g_cfg.dac_charge & 1u], vol, g_cfg.browse, g_cfg.cursor,
+                    k_cpu[g_cfg.cpu & 1u], g_cfg.dac_mhz, k_dac_charge[g_cfg.dac_charge % 3u], vol, g_cfg.browse, g_cfg.cursor,
                     g_cfg.track[0] ? "track=" : "", g_cfg.track, g_cfg.track[0] ? "\n" : "");
 }
 

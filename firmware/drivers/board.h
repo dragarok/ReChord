@@ -39,10 +39,12 @@ int board_adc_ch2(void);
  *   NORMAL:  GPIO0.14 = 1 (charge enable), GPIO2.1 = !strap (the boot state);
  *   BATTERY: GPIO0.14 = 0, GPIO2.1 = 0: no charging and no supply path from VBUS --
  *            the player runs on its battery (stock's default "Turn off charging
- *            power supply" for its USB DAC).
+ *            power supply" for its USB DAC);
+ *   VBUS:    GPIO0.14 = 0, GPIO2.1 = 1: the player runs from VBUS, not charging (stock's
+ *            "Power only, no charging", which it uses below 4000 mV of battery).
  * 0, or -1 where the board cannot (the 0x66666666 board, GPIO2.9 strap low: stock
  * keeps both pins high there; the 8 GB board). */
-enum { BOARD_SUPPLY_NORMAL = 0, BOARD_SUPPLY_BATTERY = 1 };
+enum { BOARD_SUPPLY_NORMAL = 0, BOARD_SUPPLY_BATTERY = 1, BOARD_SUPPLY_VBUS = 2 };
 int board_usb_supply(int mode);
 
 /* With USB power in: 1 = the battery is charged, 0 = charging (GPIO2.3). */

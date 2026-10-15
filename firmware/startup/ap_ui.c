@@ -744,6 +744,27 @@ static void uac_status(const usb_uac_status_t *st)
     uac_draw(0);
 }
 
+/* The DAC session's supply (Settings > DAC power): s_dac_sw = the pins were switched
+ * (not the 0x66666666 board); s_dac_vbus = power only, now running from VBUS. */
+static int s_dac_sw, s_dac_vbus;
+
+/* Power only (stock's "Power only, no charging"): from VBUS while the battery is below
+ * 3.95 V, from the battery again above 4.05 V (stock: 4.0 V both ways, no hysteresis). */
+static void dac_power_only(void)
+{
+    unsigned mv = power_battery()->mv;
+
+    if (!s_dac_sw || g_cfg.dac_charge != CFG_DAC_POWER_ONLY || !mv)
+        return;
+    if (!s_dac_vbus && mv < 3950u) {
+        s_dac_vbus = board_usb_supply(BOARD_SUPPLY_VBUS) == 0;
+        log_printf("power: DAC power only: %u mV, from USB", mv);
+    } else if (s_dac_vbus && mv > 4050u) {
+        s_dac_vbus = !(board_usb_supply(BOARD_SUPPLY_BATTERY) == 0);
+        log_printf("power: DAC power only: %u mV, from the battery", mv);
+    }
+}
+
 /* Every tick of the DAC session, keys as on Now Playing: VOL+/VOL- the player's
  * volume (on top of the host's); PLAY play/pause on the host, held: next track;
  * BACK previous track; MENU leaves; power toggles the screen. Volume and PLAY
@@ -779,12 +800,13 @@ static int uac_tick(void)
     }
     if (power_poll(1, POWER_SESSION_DAC) == POWER_OFF_BATTERY)   /* (no auto power off: the cable is in) */
         leave = 1;
+    dac_power_only();
     return leave;
 }
 
 static void usb_dac_session(void)
 {
-    int r, bat;
+    int r;
 
     player_stop();
     save_state("usb dac");
@@ -793,18 +815,24 @@ static void usb_dac_session(void)
         cpu_wait_tick();
     input_mock_clear();
     memset(&s_uac, 0, sizeof s_uac);
-    /* dac_charge=off: no charging, no supply from VBUS (stock's default): the phone or
-     * computer gives the player nothing but the audio. Before the USB core connects. */
-    bat = !g_cfg.dac_charge && board_usb_supply(BOARD_SUPPLY_BATTERY) == 0;
-    usb_uac_self_powered(bat);
-    power_usb_supply_off(bat);
-    log_printf("power: DAC supply %s", bat ? "battery (not charging, nothing drawn from USB)" :
-               g_cfg.dac_charge ? "USB (charging)" : "USB (charging: this board cannot switch it off)");
+    /* Settings > DAC power, before the USB core connects. battery (stock's default): no
+     * charging, no supply from VBUS, the phone or computer gives the player nothing but the
+     * audio; power only: no charging, VBUS runs the player while its battery is low
+     * (dac_power_only()); charge: as with any cable. */
+    s_dac_vbus = 0;
+    s_dac_sw = g_cfg.dac_charge != CFG_DAC_CHARGE && board_usb_supply(BOARD_SUPPLY_BATTERY) == 0;
+    usb_uac_self_powered(s_dac_sw && g_cfg.dac_charge == CFG_DAC_BATTERY);
+    power_usb_supply_off(s_dac_sw);
+    log_printf("power: DAC supply %s", !s_dac_sw ? (g_cfg.dac_charge == CFG_DAC_CHARGE ? "USB (charging)" :
+               "USB (charging: this board cannot switch it off)") : g_cfg.dac_charge == CFG_DAC_BATTERY ?
+               "battery (not charging, nothing drawn from USB)" : "power only (not charging, USB below 3.95 V)");
     (void)power_poll(1, POWER_SESSION_DAC);  /* its clock before the USB core runs on it */
+    dac_power_only();
     uac_draw(1);
     r = usb_uac_run(uac_tick, uac_status);
     log_printf("ui: USB DAC ended (%d)", r);
-    if (bat) {
+    if (s_dac_sw) {
+        s_dac_sw = s_dac_vbus = 0;
         board_usb_supply(BOARD_SUPPLY_NORMAL);   /* charging again */
         power_usb_supply_off(0);
         log_printf("power: USB supply normal");

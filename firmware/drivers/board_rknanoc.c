@@ -61,8 +61,8 @@ int board_usb_supply(int mode)
 #if BOARD == BOARD_512M
     if (s_strap != 1)                    /* the 0x66666666 board: what the pins do there is unknown */
         return -1;
-    panel_io_gpio0_pin(14, mode != BOARD_SUPPLY_BATTERY);   /* (GPIO0 goes through the panel's shadow) */
-    out(GPIO2, 2, 1, 0);                 /* !strap = 0 in both modes on this board */
+    panel_io_gpio0_pin(14, mode == BOARD_SUPPLY_NORMAL);   /* (GPIO0 goes through the panel's shadow) */
+    out(GPIO2, 2, 1, mode == BOARD_SUPPLY_VBUS);           /* (NORMAL: !strap = 0 on this board) */
     return 0;
 #else
     (void)mode;

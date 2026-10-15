@@ -13,6 +13,8 @@
 
 enum { CFG_USB_ASK = 0, CFG_USB_DISK, CFG_USB_DAC, CFG_USB_CHARGE };
 enum { CFG_RESUME_OFF = 0, CFG_RESUME_FOLDER, CFG_RESUME_TRACK };
+/* USB DAC power (dac_charge=off|on|power), stock MINIV390's "UAC charging" modes */
+enum { CFG_DAC_BATTERY = 0, CFG_DAC_CHARGE = 1, CFG_DAC_POWER_ONLY = 2 };
 #define CFG_VOLUME_MUTE (-128)
 
 typedef struct {
@@ -22,7 +24,7 @@ typedef struct {
     uint8_t auto_off;            /* index: 5, 15, 30 min, never */
     uint8_t usb, resume, strip, tags, cpu;   /* cpu: 0 auto, 1 max */
     uint8_t dac_mhz;             /* core A in USB DAC mode: 50, 100 or 200 (MHz) */
-    uint8_t dac_charge;          /* USB DAC mode: 0 = run on the battery, draw nothing from the host; 1 = charge */
+    uint8_t dac_charge;          /* USB DAC mode: CFG_DAC_BATTERY (draw nothing from the host), _CHARGE, _POWER_ONLY */
     int16_t volume;              /* dB, -90..0, or CFG_VOLUME_MUTE */
     char browse[128];            /* the browser's folder */
     uint16_t cursor;             /* its highlighted row */
