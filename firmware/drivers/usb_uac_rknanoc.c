@@ -85,6 +85,7 @@ static struct {
     volatile int configured, alt, primed;
     volatile uint32_t rate, rate_req; /* rate_req: SET CUR waiting for usb_uac_run() */
     volatile int vol_req;             /* volume/mute changed: usb_uac_run() writes the DAC */
+    int local_db;                     /* the player's own volume (its keys), on top of the host's */
     volatile int32_t vol;             /* 1/256 dB */
     volatile uint8_t mute;
     uint32_t w, wt;                   /* next ring frame to write; frames written in all */
@@ -690,9 +691,13 @@ void USBC_IRQHandler(void)
 
 /* ---- the session ---------------------------------------------------------------- */
 
+/* The DAC's attenuation in 0.5 dB steps: the host's volume plus the player's own
+ * (its keys work here too: a host that leaves its USB volume at full scale and
+ * attenuates in software would otherwise play at full scale). */
 static void dac_apply_volume(void)
 {
-    uint8_t v = s.mute ? 0xFFu : (uint8_t)(-s.vol / 128);   /* 0.5 dB steps of attenuation */
+    uint32_t att = (uint32_t)(-s.vol / 128) + (uint32_t)(-s.local_db * 2);
+    uint8_t v = s.mute ? 0xFFu : att > 0xFEu ? 0xFEu : (uint8_t)att;
 
     for (int chan = 0; chan < 2; chan++) {
         dac_write_reg(chan, 0x090001u, v);
@@ -707,7 +712,7 @@ int usb_uac_run(int (*tick)(void), void (*status)(const usb_uac_status_t *))
 
     memset(&s, 0, sizeof s);
     s.rate = 48000;
-    s.vol = audio_get_volume_db() * 256;     /* where the player was: not full scale */
+    s.local_db = audio_get_volume_db();      /* the host's volume starts at 0 dB (until it sets one) */
     if (audio_ext_start(s.rate) != 0)
         return USB_EXIT_IO;
     dac_apply_volume();
@@ -743,8 +748,9 @@ int usb_uac_run(int (*tick)(void), void (*status)(const usb_uac_status_t *))
             }
             NVIC_ISER0 = 1u << USB_IRQ;
         }
-        if (s.vol_req) {
+        if (s.vol_req || audio_get_volume_db() != s.local_db) {   /* the host's, or the keys' */
             s.vol_req = 0;
+            s.local_db = audio_get_volume_db();
             dac_apply_volume();
         }
         NVIC_ICER0 = 1u << USB_IRQ;
@@ -760,6 +766,7 @@ int usb_uac_run(int (*tick)(void), void (*status)(const usb_uac_status_t *))
             t_status = now;
             s.st.rate = s.rate;
             s.st.volume_256db = s.vol;
+            s.st.local_db = s.local_db;
             s.st.mute = s.mute;
             s.st.fill = s.primed && ring_fill() > 0 ? (uint32_t)ring_fill() : 0;
             if (status)

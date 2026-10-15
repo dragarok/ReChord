@@ -869,6 +869,7 @@ static void dma_stop(void)
 
 #define VOL_MIN_DB (-60)
 static int s_vol_db = -40;
+static int s_ext;                    /* an external source plays (the USB DAC): it owns the DAC volume */
 
 static void dac_volume(void)
 {
@@ -883,7 +884,7 @@ static void dac_volume(void)
 int audio_set_volume_db(int db)
 {
     s_vol_db = db < VOL_MIN_DB ? VOL_MIN_DB : db > 0 ? 0 : db;
-    if (s_dac_up)
+    if (s_dac_up && !s_ext)
         dac_volume();
     return s_vol_db;
 }
@@ -897,8 +898,6 @@ int audio_get_volume_db(void)
  * The DMA plays a short ring that someone else fills (I2S words, L then R):
  * AUDIO_EXT_BLOCKS blocks of AUDIO_EXT_FRAMES frames at AS_PCM_RING. The player
  * stops and core B is held in reset: nothing decodes. */
-
-static int s_ext;
 
 static void ext_prepare(void)
 {
@@ -982,6 +981,8 @@ void audio_ext_stop(void)
         return;
     dma_stop();
     s_ext = 0;
+    if (s_dac_up)
+        dac_volume();                        /* the player's volume alone again */
     log_printf("audio: external source off");
 }
 

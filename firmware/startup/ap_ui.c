@@ -702,39 +702,49 @@ static int shortcut_key(const input_event_t *ev)
     return 1;
 }
 
-/* The USB DAC's screen, refreshed by usb_uac_run() about once a second (not
- * while the screen is off). */
-static void uac_status(const usb_uac_status_t *st)
+/* The USB DAC's screen. usb_uac_run() reports about once a second; it is drawn
+ * only when what it shows changed (and not while the screen is off). */
+static usb_uac_status_t s_uac;
+static char s_uac_shown[4][40];
+
+static void uac_draw(int force)
 {
-    char b[40];
+    char t[4][40];
+    const usb_uac_status_t *st = &s_uac;
 
     if (!power_screen_on())
         return;
-    screen("USB DAC");
-    if (!st->configured) {
-        line(1, "waiting for the host");
-    } else if (!st->bits) {
-        snprintf(b, sizeof b, "%s speed, idle", st->high_speed ? "high" : "full");
-        line(1, b);
-    } else {
-        snprintf(b, sizeof b, "%u Hz  %u-bit", (unsigned)st->rate, (unsigned)st->bits);
-        line(1, b);
-    }
+    if (!st->configured)
+        snprintf(t[0], sizeof t[0], "waiting for the host");
+    else if (!st->bits)
+        snprintf(t[0], sizeof t[0], "%s speed, idle", st->high_speed ? "high" : "full");
+    else
+        snprintf(t[0], sizeof t[0], "%u Hz  %u-bit", (unsigned)st->rate, (unsigned)st->bits);
     if (st->mute)
-        line(2, "muted");
-    else {
-        snprintf(b, sizeof b, "volume %d.%d dB", (int)(st->volume_256db / 256),
+        snprintf(t[1], sizeof t[1], "host: muted");
+    else
+        snprintf(t[1], sizeof t[1], "host volume %d.%d dB", (int)(st->volume_256db / 256),
                  (int)((st->volume_256db < 0 ? -st->volume_256db : st->volume_256db) % 256 * 10 / 256));
-        line(2, b);
-    }
-    snprintf(b, sizeof b, "buffer %u  late %u  lost %u", (unsigned)st->fill, (unsigned)st->underruns,
-             (unsigned)(st->dropped + st->missed));
-    line(3, b);
-    line(5, "BACK: leave  power: screen");
+    snprintf(t[2], sizeof t[2], "player volume %d dB", audio_get_volume_db());
+    snprintf(t[3], sizeof t[3], "late %u  lost %u", (unsigned)st->underruns, (unsigned)(st->dropped + st->missed));
+    if (!force && !memcmp(t, s_uac_shown, sizeof t))
+        return;
+    memcpy(s_uac_shown, t, sizeof t);
+    screen("USB DAC");
+    for (int i = 0; i < 4; i++)
+        line(1 + i, t[i]);
+    line(6, "VOL keys  BACK: leave  power: screen");
     display_flush_rows(0, DISPLAY_H - 1);
 }
 
-/* Every tick of the DAC session: keys (power toggles the screen, BACK leaves),
+static void uac_status(const usb_uac_status_t *st)
+{
+    s_uac = *st;
+    uac_draw(0);
+}
+
+/* Every tick of the DAC session: keys (VOL+/VOL- the player's volume, on top of
+ * the host's, also with the screen off; power toggles the screen; BACK leaves),
  * the screen-off timer, the battery. Nonzero = leave. */
 static int uac_tick(void)
 {
@@ -748,10 +758,16 @@ static int uac_tick(void)
         power_activity();
         if (ev.type == KEY_POWER && ev.adc_value != INPUT_ADC_LONG) {
             power_screen(!was_on);
+            if (!was_on)
+                uac_draw(1);
+        } else if (ev.type == KEY_UP || ev.type == KEY_DOWN) {
+            player_set_volume(player_get_volume() + (ev.type == KEY_UP ? 1 : -1));
+            uac_draw(0);
         } else if (ev.type == KEY_BACK && ev.adc_value != INPUT_ADC_LONG && was_on) {
             leave = 1;
         } else if (!was_on) {
             power_screen(1);             /* any other key just lights it */
+            uac_draw(1);
         }
     }
     if (power_poll(1, 1) == POWER_OFF_BATTERY)   /* (no auto power off: the cable is in) */
@@ -769,6 +785,8 @@ static void usb_dac_session(void)
     while (keys_power())                 /* the press that got us here (or switched us on) */
         cpu_wait_tick();
     input_mock_clear();
+    memset(&s_uac, 0, sizeof s_uac);
+    uac_draw(1);
     r = usb_uac_run(uac_tick, uac_status);
     log_printf("ui: USB DAC ended (%d)", r);
     while (keys_power())                 /* don't leak the exit press */
