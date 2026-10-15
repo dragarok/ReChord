@@ -29,7 +29,6 @@ static uint32_t s_pll_hz = OSC_HZ, s_a_hz = OSC_HZ, s_b_hz = OSC_HZ, s_pclk_hz =
 /* time base: time = base + ticks * TICK_US + partial tick from the SysTick counter */
 static volatile uint32_t s_ticks;
 static uint64_t s_base_us;
-static uint32_t s_base_ms;
 static uint32_t s_reload;          /* SysTick reload (cycles per tick - 1), 0 = not running */
 static uint32_t s_us_frac;         /* TICK_US * 2^32 / cycles per tick */
 static uint32_t s_cyc_per_us_q8;   /* core cycles per us, 24.8 fixed point */
@@ -101,14 +100,12 @@ uint64_t time_us(void)
     return r;
 }
 
+/* From time_us(), so it shares its never-backwards correction: a millisecond
+ * clock of its own read the reload race a tick in the past, and timers comparing
+ * "now - then" saw ~49 days elapsed (screen off and auto power off at boot). */
 uint32_t time_ms(void)
 {
-    uint32_t el, t;
-
-    if (!s_reload)
-        return 0;
-    t = now_parts(&el);
-    return s_base_ms + t * (TICK_US / 1000u) + (uint32_t)(((uint64_t)el * s_us_frac) >> 32) / 1000u;
+    return (uint32_t)(time_us() / 1000u);
 }
 
 /* Counts SysTick cycles directly, so it also works with interrupts off
@@ -196,7 +193,6 @@ static void apply_dividers(unsigned a_div, unsigned b_div)
 static void retime(void)
 {
     s_base_us = time_us();
-    s_base_ms = time_ms();
     systick_start();
 }
 
@@ -237,7 +233,6 @@ void clock_set_core_a_div(unsigned div)
         return;
     __asm__ volatile ("cpsid i" ::: "memory");
     s_base_us = time_us();
-    s_base_ms = time_ms();
     apply_dividers(div, s_pll_hz / s_b_hz);
     systick_start();
     __asm__ volatile ("cpsie i" ::: "memory");
