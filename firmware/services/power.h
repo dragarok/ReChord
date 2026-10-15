@@ -30,7 +30,10 @@ typedef struct {
 enum { POWER_NONE = 0, POWER_OFF_IDLE, POWER_OFF_BATTERY };
 
 void power_init(void);           /* after config_load(): the backlight at g_cfg.brightness */
-/* Every main-loop pass. Returns POWER_OFF_* when the player should switch off. */
+/* Every main-loop pass. Returns POWER_OFF_* when the player should switch off.
+ * usb_session: 0, 1 (USB disk / console: core A at 200 MHz) or POWER_SESSION_DAC
+ * (the USB DAC: core A at g_cfg.dac_mhz). */
+#define POWER_SESSION_DAC 2
 int power_poll(int playing, int usb_session);
 void power_activity(void);       /* a key: restarts the screen-off and idle timers */
 int power_screen_on(void);

@@ -20,8 +20,8 @@
 static const uint8_t k_duty[8] = { 99, 98, 96, 93, 88, 75, 50, 100 };
 static const uint16_t k_level_mv[4] = { 3480, 3550, 3650, 3830 };
 static const uint16_t k_pct_mv[11] = { 3450, 3580, 3660, 3710, 3750, 3800, 3850, 3920, 4000, 4100, 4200 };
-static const char *const k_state[] = { "UI", "DARK", "IDLE", "USB", "MAX" };
-enum { ST_UI, ST_DARK, ST_IDLE, ST_USB, ST_MAX };
+static const char *const k_state[] = { "UI", "DARK", "IDLE", "USB", "MAX", "DAC" };
+enum { ST_UI, ST_DARK, ST_IDLE, ST_USB, ST_MAX, ST_DAC };
 
 static power_battery_t s_bat;
 static uint16_t s_ring[RING];
@@ -134,7 +134,13 @@ static void set_state(int st)
     if (st == s_state)
         return;
     s_state = st;
-    clock_set_core_a_div(st == ST_DARK || st == ST_IDLE ? 8u : 2u);
+    if (st == ST_DAC) {                      /* RECHORD.CFG dac_mhz: 50 (default), 100, 200 */
+        uint32_t mhz = g_cfg.dac_mhz ? g_cfg.dac_mhz : 50u, div = clock_pll_hz() / (mhz * 1000000u);
+
+        clock_set_core_a_div(div < 2u ? 2u : div > 8u ? 8u : div);
+    } else {
+        clock_set_core_a_div(st == ST_DARK || st == ST_IDLE ? 8u : 2u);
+    }
     log_printf("power: %s, A %u MHz", k_state[st], (unsigned)(clock_core_hz() / 1000000u));
 }
 
@@ -195,7 +201,8 @@ int power_poll(int playing, int usb_session)
     }
     if (s_screen && screen_s && now - s_key_ms >= screen_s * 1000u)
         power_screen(0);
-    set_state(usb_session ? ST_USB : g_cfg.cpu ? ST_MAX : s_screen ? ST_UI : playing ? ST_DARK : ST_IDLE);
+    set_state(usb_session == POWER_SESSION_DAC ? ST_DAC : usb_session ? ST_USB : g_cfg.cpu ? ST_MAX :
+              s_screen ? ST_UI : playing ? ST_DARK : ST_IDLE);
     if (low) {
         log_printf("bat: %u mV, below %u mV %u times: power off", s_bat.mv, LOW_MV, LOW_COUNT);
         return POWER_OFF_BATTERY;

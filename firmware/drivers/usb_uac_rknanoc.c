@@ -97,7 +97,7 @@ static struct {
     uint32_t z, zt;                   /* next ring frame to zero (the DMA's last position); passed in all */
     volatile int wake;                /* the interrupt has work for usb_uac_run() */
     volatile int rate_ack;            /* SET CUR's status stage waits for the re-clock */
-    volatile uint32_t last_pkt_ms;
+    uint32_t seen_pkts, seen_ms;      /* the loop's view: packets at seen_ms (the host stopped?) */
     uint32_t drop_fill, drop_pos;     /* where the last drop happened (diagnostics) */
     uint8_t fb_odd;                   /* parity the feedback EP is armed for */
     uint8_t hid_q[8];                 /* HID reports waiting for the endpoint (keys: press, release) */
@@ -283,13 +283,19 @@ static void iso_out_arm(void)
  * lap in between (2048 frames: 10.7 ms at 192 kHz). */
 static void zero_played(void)
 {
-    int32_t *ring = audio_ext_ring();
-    uint32_t pos = audio_ext_pos();
+    uint32_t pos = audio_ext_pos(), z = s.z, n = (pos - z) % RING_FRAMES;
 
-    while (s.z != pos) {
-        ring[2u * s.z] = ring[2u * s.z + 1u] = 0;
-        s.z = (s.z + 1u) % RING_FRAMES;
-        s.zt++;
+    if (!n)
+        return;
+    {
+        uint64_t *ring = (uint64_t *)audio_ext_ring();   /* a frame: two I2S words */
+
+        s.zt += n;
+        while (n--) {
+            ring[z] = 0;
+            z = (z + 1u) % RING_FRAMES;
+        }
+        s.z = z;
     }
 }
 
@@ -369,8 +375,7 @@ static void pcm_in(uint32_t n)
     int32_t *ring = audio_ext_ring(), fill;
     const uint8_t *b = (const uint8_t *)s_pkt;
 
-    s.last_pkt_ms = time_ms();
-    s.st.packets++;
+    s.st.packets++;                             /* (no clock read here: 8000 packets a second) */
     zero_played();
     fill = ring_fill();
     if (fill < 32) {                            /* start, or the DMA caught up: begin FILL_TARGET */
@@ -387,24 +392,30 @@ static void pcm_in(uint32_t n)
         s.drop_pos = audio_ext_pos();
         return;
     }
-    for (uint32_t f = 0; f < frames; f++) {
-        int32_t *o = ring + s.w * 2u;
-
+    {
+        uint32_t w = s.w;                           /* (locals: the stores to the ring would make */
+                                                    /* the compiler reload s.w every frame) */
         if (sub == 4u) {
-            o[0] = (int32_t)s_pkt[2u * f];
-            o[1] = (int32_t)s_pkt[2u * f + 1u];
+            for (uint32_t f = 0; f < frames; f++, w = (w + 1u) % RING_FRAMES) {
+                ring[2u * w] = (int32_t)s_pkt[2u * f];
+                ring[2u * w + 1u] = (int32_t)s_pkt[2u * f + 1u];
+            }
         } else if (sub == 3u) {
-            const uint8_t *q = b + 6u * f;
+            for (uint32_t f = 0; f < frames; f++, w = (w + 1u) % RING_FRAMES) {
+                const uint8_t *q = b + 6u * f;
 
-            o[0] = (int32_t)((uint32_t)q[0] << 8 | (uint32_t)q[1] << 16 | (uint32_t)q[2] << 24);
-            o[1] = (int32_t)((uint32_t)q[3] << 8 | (uint32_t)q[4] << 16 | (uint32_t)q[5] << 24);
+                ring[2u * w] = (int32_t)((uint32_t)q[0] << 8 | (uint32_t)q[1] << 16 | (uint32_t)q[2] << 24);
+                ring[2u * w + 1u] = (int32_t)((uint32_t)q[3] << 8 | (uint32_t)q[4] << 16 | (uint32_t)q[5] << 24);
+            }
         } else {
-            uint32_t v = s_pkt[f];
+            for (uint32_t f = 0; f < frames; f++, w = (w + 1u) % RING_FRAMES) {
+                uint32_t v = s_pkt[f];
 
-            o[0] = (int32_t)(v << 16);
-            o[1] = (int32_t)(v & 0xFFFF0000u);
+                ring[2u * w] = (int32_t)(v << 16);
+                ring[2u * w + 1u] = (int32_t)(v & 0xFFFF0000u);
+            }
         }
-        s.w = (s.w + 1u) % RING_FRAMES;
+        s.w = w;
     }
     s.wt += frames;
 }
@@ -864,7 +875,10 @@ int usb_uac_run(int (*tick)(void), void (*status)(const usb_uac_status_t *))
         NVIC_ICER0 = 1u << USB_IRQ;
         zero_played();                               /* (also while no packets come) */
         NVIC_ISER0 = 1u << USB_IRQ;
-        if (s.primed && now - s.last_pkt_ms > 50u) { /* the host stopped: what was buffered plays */
+        if (*(volatile uint32_t *)&s.st.packets != s.seen_pkts) {   /* packets come: the host streams */
+            s.seen_pkts = s.st.packets;
+            s.seen_ms = now;
+        } else if (s.primed && now - s.seen_ms > 50u) {  /* the host stopped: what was buffered plays */
             s.primed = 0;                            /* out, then the zeroed ring: silence */
             log_printf("uac: idle: packets %u, dropped %u (fill %u at %u), underruns %u, missed %u",
                        (unsigned)s.st.packets, (unsigned)s.st.dropped, (unsigned)s.drop_fill,

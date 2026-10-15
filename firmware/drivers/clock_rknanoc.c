@@ -34,7 +34,7 @@ static uint32_t s_us_frac;         /* TICK_US * 2^32 / cycles per tick */
 static uint32_t s_cyc_per_us_q8;   /* core cycles per us, 24.8 fixed point */
 
 /* idle accounting, per one-second window */
-static volatile uint32_t s_idle_us, s_win_ticks, s_load_pm;
+static volatile uint32_t s_idle_cyc, s_win_ticks, s_load_pm;   /* idle SysTick cycles this window */
 
 static void systick_start(void)
 {
@@ -54,12 +54,12 @@ static void systick_start(void)
 void SysTick_Handler(void)
 {
     s_ticks++;
-    if (++s_win_ticks == CLOCK_TICK_HZ) {
-        uint32_t idle = s_idle_us;
+    if (++s_win_ticks == CLOCK_TICK_HZ) {    /* a second: idle cycles per mille of it */
+        uint32_t idle = s_idle_cyc, pm = (s_reload + 1u) * CLOCK_TICK_HZ / 1000u;
 
-        s_idle_us = 0;
+        s_idle_cyc = 0;
         s_win_ticks = 0;
-        s_load_pm = idle >= 1000000u ? 0u : 1000u - idle / 1000u;
+        s_load_pm = !pm || idle / pm >= 1000u ? 0u : 1000u - idle / pm;
     }
 }
 
@@ -152,14 +152,19 @@ void delay_ms(uint32_t ms)
         delay_us(1000u);
 }
 
+/* Sleeps until an interrupt is pending, counting the time asleep for
+ * cpu_load_permille() in SysTick cycles: two counter reads, no clock math (the
+ * USB DAC wakes it some 16000 times a second). Interrupts are masked while it
+ * sleeps, so the counter wraps at most once: a SysTick wakes it. */
 void cpu_idle(void)
 {
-    uint64_t t0;
+    uint32_t v0, v1;
 
     __asm__ volatile ("cpsid i" ::: "memory");
-    t0 = time_us();
+    v0 = SYST_CVR;
     __asm__ volatile ("dsb\n wfi" ::: "memory");   /* wakes on a pending IRQ even when masked */
-    s_idle_us += (uint32_t)(time_us() - t0);
+    v1 = SYST_CVR;
+    s_idle_cyc += v0 >= v1 ? v0 - v1 : v0 + s_reload + 1u - v1;
     __asm__ volatile ("cpsie i" ::: "memory");     /* now the IRQ runs */
 }
 

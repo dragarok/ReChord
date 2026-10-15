@@ -714,6 +714,7 @@ static void uac_draw(int force)
 
     if (!power_screen_on())
         return;
+    memset(t, 0, sizeof t);              /* (compared whole below: no stack bytes after the text) */
     if (!st->configured)
         snprintf(t[0], sizeof t[0], "waiting for the host");
     else if (!st->bits)
@@ -776,7 +777,7 @@ static int uac_tick(void)
             leave = 1;
         }
     }
-    if (power_poll(1, 1) == POWER_OFF_BATTERY)   /* (no auto power off: the cable is in) */
+    if (power_poll(1, POWER_SESSION_DAC) == POWER_OFF_BATTERY)   /* (no auto power off: the cable is in) */
         leave = 1;
     return leave;
 }
@@ -792,6 +793,7 @@ static void usb_dac_session(void)
         cpu_wait_tick();
     input_mock_clear();
     memset(&s_uac, 0, sizeof s_uac);
+    (void)power_poll(1, POWER_SESSION_DAC);  /* its clock before the USB core runs on it */
     uac_draw(1);
     r = usb_uac_run(uac_tick, uac_status);
     log_printf("ui: USB DAC ended (%d)", r);

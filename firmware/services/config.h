@@ -21,6 +21,7 @@ typedef struct {
     uint8_t screen_off;          /* index: 10 s, 30 s, 1 min, 5 min, never */
     uint8_t auto_off;            /* index: 5, 15, 30 min, never */
     uint8_t usb, resume, strip, tags, cpu;   /* cpu: 0 auto, 1 max */
+    uint8_t dac_mhz;             /* core A in USB DAC mode: 50, 100 or 200 (MHz) */
     int16_t volume;              /* dB, -90..0, or CFG_VOLUME_MUTE */
     char browse[128];            /* the browser's folder */
     uint16_t cursor;             /* its highlighted row */
