@@ -819,7 +819,7 @@ static void dac_apply_volume(void)
 
 int usb_uac_run(int (*tick)(void), void (*status)(const usb_uac_status_t *))
 {
-    uint32_t t_status = 0, t_log = 0;
+    uint32_t t_status = 0, t_log = 0, drain_ms = 0;
     int ret = 0;
 
     memset(&s, 0, sizeof s);
@@ -848,9 +848,15 @@ int usb_uac_run(int (*tick)(void), void (*status)(const usb_uac_status_t *))
         else if (tick && tick())
             ret = USB_EXIT_USER;
         s.wake = 0;
-        if (s.rate_req) {                            /* SET CUR: re-clock outside the interrupt; */
-            uint32_t r;                              /* the host waits for its status stage */
-
+        if (s.rate_req && s.rate_req != s.rate && !s.alt && ring_fill() > 0 && (!drain_ms || now - drain_ms < 100u)) {
+            if (!drain_ms)                           /* the next track's rate: the last of this */
+                drain_ms = now;                      /* one plays out first (the re-clock restarts */
+        } else if (s.rate_req) {                     /* the ring silent), up to 100 ms */
+            uint32_t r;                              /* SET CUR: re-clock outside the interrupt; */
+                                                     /* the host waits for its status stage */
+            if (drain_ms)
+                delay_us(1000);                      /* (and the I2S FIFO: < 0.4 ms of it) */
+            drain_ms = 0;
             NVIC_ICER0 = 1u << USB_IRQ;
             r = s.rate_req;
             s.rate_req = 0;
