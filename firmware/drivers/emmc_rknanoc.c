@@ -42,6 +42,11 @@ enum {                       /* DW-MMC word offsets */
 #define RCA_ARG      0x20000u        /* RCA 2 */
 
 static uint32_t s_sectors, s_fifo_words = 16u;
+static uint32_t s_rca = RCA_ARG;     /* the internal part's RCA (an SD NAND publishes its own) */
+static uint32_t s_shift;             /* card address = LBA << s_shift: 9 = byte addressed */
+static uint32_t s_blksz = 512u;      /* data block size (the bus test uses 4 or 8) */
+static int s_width = 1;              /* data lines in use */
+static const char *s_kind = "none";
 static uint32_t s_write_floor = 0xFFFFFFFFu;   /* set by emmc_layout() */
 static uint32_t s_fw_sectors;                   /* ditto, 0 = no fw writes */
 
@@ -130,7 +135,7 @@ static int xfer_data(uint32_t idx, uint32_t arg, uint32_t *buf, uint32_t len, in
         MMC[CTRL] |= 2u;                    /* FIFO reset */
         wait_clear(CTRL, 2u, 5000);
     }
-    MMC[BLKSIZ] = 512u;
+    MMC[BLKSIZ] = s_blksz;
     MMC[BYTCNT] = len;
     MMC[RINTSTS] = 0xFFFFFFFFu;
     MMC[CMDARG] = arg;
@@ -179,7 +184,7 @@ static int wait_tran(void)
     for (uint32_t i = 0; i < 100000u; i++) {
         uint32_t r;
 
-        if (send_cmd(13, RCA_ARG, F_RESP | F_CRC, 0))
+        if (send_cmd(13, s_rca, F_RESP | F_CRC, 0))
             return -1;
         r = MMC[RESP0];
         if ((r & 0x100u) && ((r & 0x1FFFu) >> 9) == 4u)   /* ready, tran */
@@ -189,10 +194,130 @@ static int wait_tran(void)
     return -2;
 }
 
+/* CSD 1.x capacity: (C_SIZE + 1) << (C_SIZE_MULT + 2) blocks of 2^READ_BL_LEN bytes. */
+static uint32_t csd_v1_sectors(const uint32_t *csd)
+{
+    uint32_t c_size = ((csd[2] & 0x3FFu) << 2 | csd[1] >> 30) + 1u;
+    uint32_t mult = (csd[1] >> 15) & 7u, bl = (csd[2] >> 16) & 15u;
+
+    return (uint32_t)(((uint64_t)c_size << (mult + 2u) << bl) >> 9);
+}
+
+static uint32_t s_idb1[128], s_idbw[128];   /* sector 0x40 at 1 bit, then at the new width */
+
+static int block_read(uint32_t arg, uint32_t count, void *buf);
+
+/* Read sector 0x40 (the IDB) at the bus width now set; the card clock stays on (init). */
+static int read_idb(uint32_t *buf)
+{
+    int r = block_read(0x40u << s_shift, 1, buf);
+
+    clk_gate(CARD_GATE, 1);
+    return r;
+}
+
+/* JEDEC bus test: CMD19 sends a pattern, CMD14 reads it back inverted; a data line
+ * the part does not have reads as 1 and spoils it. */
+static int bus_test(int width)
+{
+    uint32_t out[2] = { 0, 0 }, in[2] = { 0, 0 }, n = width == 8 ? 8u : 4u;
+    uint8_t *o = (uint8_t *)out, *q = (uint8_t *)in;
+    int r;
+
+    if (width == 8) {
+        o[0] = 0x55;
+        o[1] = 0xAA;
+    } else {
+        o[0] = 0x5A;
+    }
+    MMC[CTYPE] = width == 8 ? 0x10000u : 1u;
+    s_blksz = n;
+    r = xfer_data(19, 0, out, n, 1);
+    if (!r)
+        r = xfer_data(14, 0, in, n, 0);
+    s_blksz = 512u;
+    MMC[CTYPE] = 0;
+    if (r)
+        return -1;
+    return (uint8_t)(q[0] ^ o[0]) == 0xFFu && (width != 8 || (uint8_t)(q[1] ^ o[1]) == 0xFFu) ? 0 : -1;
+}
+
+/* Switch an eMMC to width (8 or 4) if the bus test passes and the IDB reads back the
+ * same as at 1 bit; otherwise stay at 1 bit. 0 = switched. */
+static int set_width(int width)
+{
+    if (read_idb(s_idb1) || bus_test(width) ||
+        send_cmd(6, width == 8 ? 0x03B70200u : 0x03B70100u, F_RESP | F_CRC, 1) || wait_tran())
+        return -1;
+    MMC[CTYPE] = width == 8 ? 0x10000u : 1u;
+    if (read_idb(s_idbw) == 0 && !memcmp(s_idb1, s_idbw, sizeof s_idbw)) {
+        s_width = width;
+        return 0;
+    }
+    MMC[CTYPE] = 0;                         /* back to 1 bit, on both ends */
+    send_cmd(6, 0x03B70000u, F_RESP | F_CRC, 1);
+    wait_tran();
+    return -1;
+}
+
+/* SD-protocol NAND on the internal port (stock handles these too): SDSC parts are
+ * byte addressed. 4-bit if a read-back agrees, else 1 bit. */
+static int sdnand_init(void)
+{
+    uint32_t i, csd[4];
+    int hc;
+
+    for (i = 0; ; i++) {
+        if (send_cmd(55, 0, F_RESP | F_CRC, 0))
+            return -20;
+        if (send_cmd(41, 0x40FF8000u, F_RESP, 0) == 0 && (MMC[RESP0] & 0x80000000u))
+            break;
+        if (i == 1000u)
+            return -21;
+        delay_us(1000);
+    }
+    hc = (MMC[RESP0] & 0x40000000u) != 0;
+    s_shift = hc ? 0u : 9u;
+    if (send_cmd(2, 0, F_RESP | F_LONG | F_CRC, 0) || send_cmd(3, 0, F_RESP | F_CRC, 0))
+        return -22;
+    s_rca = MMC[RESP0] & 0xFFFF0000u;
+    if (!s_rca || send_cmd(9, s_rca, F_RESP | F_LONG | F_CRC, 0))
+        return -23;
+    for (i = 0; i < 4u; i++)
+        csd[i] = MMC[RESP0 + i];
+    if (csd[3] >> 30 == 0u)
+        s_sectors = csd_v1_sectors(csd);
+    else
+        s_sectors = (((csd[2] & 0x3Fu) << 16 | csd[1] >> 16) + 1u) << 10;
+    if (s_sectors < 0x20000u)
+        return -24;
+    if (set_clock(24000) || send_cmd(7, s_rca, F_RESP | F_CRC, 1))
+        return -25;
+    if (!hc && send_cmd(16, 512, F_RESP | F_CRC, 0))
+        return -26;
+    s_kind = hc ? "SD NAND (SDHC)" : "SD NAND (SDSC)";
+    if (read_idb(s_idb1) == 0 && send_cmd(55, s_rca, F_RESP | F_CRC, 0) == 0 &&
+        send_cmd(6, 2, F_RESP | F_CRC, 0) == 0) {           /* ACMD6: 4-bit */
+        MMC[CTYPE] = 1u;
+        if (read_idb(s_idbw) == 0 && !memcmp(s_idb1, s_idbw, sizeof s_idbw)) {
+            s_width = 4;
+        } else {
+            MMC[CTYPE] = 0;
+            send_cmd(55, s_rca, F_RESP | F_CRC, 0);
+            send_cmd(6, 0, F_RESP | F_CRC, 0);
+        }
+    }
+    clk_gate(0x6C, 0);
+    return 0;
+}
+
+const char *emmc_kind(void) { return s_kind; }
+int emmc_width(void)        { return s_width; }
+
 int emmc_init(void)
 {
     static uint32_t ext_csd[128];
-    uint32_t i;
+    uint32_t i, csd[4];
 
     select_mmc(0);
     clk_gate(0x19, 1);
@@ -225,6 +350,11 @@ int emmc_init(void)
 
     send_cmd(0, 0, F_INIT, 0);
     delay_us(100);
+    /* an SD-protocol NAND answers CMD8, an eMMC does not (stock probes in this order too) */
+    if (send_cmd(8, 0x1AAu, F_RESP | F_CRC, 0) == 0 && (MMC[RESP0] & 0xFFFu) == 0x1AAu)
+        return sdnand_init();
+    send_cmd(0, 0, F_INIT, 0);
+    delay_us(100);
     for (i = 0; ; i++) {
         int r;
 
@@ -237,14 +367,16 @@ int emmc_init(void)
             return -15;
         delay_us(1000);
     }
-    if (!(MMC[RESP0] & 0x40000000u))        /* sector addressing required */
-        return -4;
+    s_shift = (MMC[RESP0] & 0x40000000u) ? 0u : 9u;   /* 2 GB and less: byte addressed */
+    s_rca = RCA_ARG;
     if (send_cmd(2, 0, F_RESP | F_LONG | F_CRC, 0))
         return -5;
     if (send_cmd(3, RCA_ARG, F_RESP | F_CRC, 0))
         return -6;
     if (send_cmd(9, RCA_ARG, F_RESP | F_LONG | F_CRC, 0))
         return -7;
+    for (i = 0; i < 4u; i++)
+        csd[i] = MMC[RESP0 + i];
     if (set_clock(24000))
         return -8;
     if (send_cmd(7, RCA_ARG, F_RESP | F_CRC, 1))
@@ -253,14 +385,14 @@ int emmc_init(void)
         return -10;
     if (xfer_data(8, 0, ext_csd, 512, 0))   /* EXT_CSD */
         return -11;
-    s_sectors = ext_csd[212 / 4];           /* SEC_COUNT */
-    if (s_sectors < 0x100000u)
+    s_sectors = ext_csd[212 / 4];           /* SEC_COUNT, 0 on parts of 2 GB and less */
+    if (s_shift || !s_sectors)
+        s_sectors = csd_v1_sectors(csd);
+    if (s_sectors < 0x20000u)               /* under 64 MiB: not this player's storage */
         return -12;
-    if (send_cmd(6, 0x03B70200u, F_RESP | F_CRC, 1))   /* BUS_WIDTH = 8 */
-        return -13;
-    if (wait_tran())
-        return -14;
-    MMC[CTYPE] = 0x10000u;
+    s_kind = s_shift ? "eMMC, byte addressed" : "eMMC";
+    if (set_width(8))                       /* the widest the bus test and a read-back agree on */
+        set_width(4);
     clk_gate(0x6C, 0);
     return 0;
 }
@@ -280,7 +412,7 @@ static int block_read_once(uint32_t arg, uint32_t count, void *buf)
         ret = xfer_data(17, arg, buf, 512, 0);
     } else {
         ret = xfer_data(18, arg, buf, count << 9, 0);
-        stop = send_cmd(12, RCA_ARG, F_RESP | F_CRC | F_STOP, 1);
+        stop = send_cmd(12, s_rca, F_RESP | F_CRC | F_STOP, 1);
         if (!ret)
             ret = stop;
     }
@@ -309,7 +441,7 @@ int emmc_read(uint32_t lba, uint32_t count, void *buf)
     if (lba + count < lba || lba + count > s_sectors)
         return -30;
     select_mmc(0);
-    return block_read(lba, count, buf);
+    return block_read(lba << s_shift, count, buf);
 }
 
 static int raw_write(uint32_t lba, uint32_t count, const void *buf)
@@ -319,10 +451,10 @@ static int raw_write(uint32_t lba, uint32_t count, const void *buf)
     select_mmc(0);
     clk_gate(0x6C, 1);
     if (count == 1u) {
-        ret = xfer_data(24, lba, (uint32_t *)buf, 512, 1);
+        ret = xfer_data(24, lba << s_shift, (uint32_t *)buf, 512, 1);
     } else {
-        ret = xfer_data(25, lba, (uint32_t *)buf, count << 9, 1);
-        r = send_cmd(12, RCA_ARG, F_RESP | F_CRC | F_STOP, 1);
+        ret = xfer_data(25, lba << s_shift, (uint32_t *)buf, count << 9, 1);
+        r = send_cmd(12, s_rca, F_RESP | F_CRC | F_STOP, 1);
         if (!ret)
             ret = r;
     }

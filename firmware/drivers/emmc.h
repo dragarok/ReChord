@@ -9,6 +9,9 @@
 
 /* 0 on success, negative = failing init step (see emmc_rknanoc.c). */
 int emmc_init(void);
+/* What emmc_init() found: "eMMC", "eMMC, byte addressed", "SD NAND (SDHC|SDSC)"; data lines used. */
+const char *emmc_kind(void);
+int emmc_width(void);
 uint32_t emmc_sectors(void);
 int emmc_read(uint32_t lba, uint32_t count, void *buf);
 /* Only LBAs >= the user volume start found by emmc_layout(); -30 otherwise. */

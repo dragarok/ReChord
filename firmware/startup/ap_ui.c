@@ -48,8 +48,10 @@ static void emmc_probe(void)
 
     if (r) {
         snprintf(s_emmc, sizeof s_emmc, "init %d", r);
+        log_printf("emmc: init failed (%d)", r);
         return;
     }
+    log_printf("emmc: %s, %d-bit, %u sectors", emmc_kind(), emmc_width(), (unsigned)emmc_sectors());
     if (!board_check(emmc_sectors())) {          /* this build is for the other board */
         snprintf(s_emmc, sizeof s_emmc, "%uM: not a %s unit", (unsigned)(emmc_sectors() >> 11),
                  board_name());
