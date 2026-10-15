@@ -112,7 +112,8 @@ AP_LIBC_SRCS := \
 AP_PLAYER_SRCS := \
   firmware/player/player_audio.c \
   firmware/audio/audio.c \
-  firmware/audio/mp3_info.c
+  firmware/audio/mp3_info.c \
+  firmware/audio/mp4.c
 
 # Every AP link input, milestone 2a (includes clean-road player).
 AP_SRCS := \

@@ -6,6 +6,7 @@ int b_pcm_open(void)
 {
     uint32_t b = b_trk.bits;
 
+    b_in_need = 0x400u;
     return (b == 8 || b == 16 || b == 24 || b == 32) && b_trk.channels >= 1 && b_trk.channels <= 2 ? 0 : -1;
 }
 

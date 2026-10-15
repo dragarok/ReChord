@@ -61,6 +61,7 @@ typedef struct {                     /* a directory entry or the root */
 struct fs_file {
     const vol_t *v;
     uint32_t first, clus, cidx, size, pos;
+    uint32_t mark_clus, mark_cidx;   /* fs_mark(): where backward walks restart (0: the start) */
     uint32_t dlba;                   /* 8.3 entry sector (FAT) */
     uint16_t doff;
     uint8_t used, contig, wr, sum;   /* wr: write handle; sum: 8.3 checksum */
@@ -877,8 +878,13 @@ long fs_read(fs_file_t *f, void *buf, unsigned long cap)
         const uint8_t *b;
 
         if (want < f->cidx || f->clus < 2u) {
-            f->clus = f->first;
-            f->cidx = 0;
+            if (f->mark_clus && want >= f->mark_cidx) {
+                f->clus = f->mark_clus;
+                f->cidx = f->mark_cidx;
+            } else {
+                f->clus = f->first;
+                f->cidx = 0;
+            }
         }
         while (f->cidx < want) {
             f->clus = f->contig ? f->clus + 1u : fat_next(f->v, f->clus);
@@ -946,15 +952,23 @@ long fs_seek(fs_file_t *f, long offset)
         return FS_ERR_UNSUPPORTED;
     if (offset > (long)f->size)
         offset = (long)f->size;   /* legal; reads past end report EOF */
+    /* the cluster cursor stays: fs_read walks on from it, or restarts (from the
+     * mark, else the first cluster) when the new position is behind it */
     f->pos = (uint32_t)offset;
-    /* Reset the cluster walk to the file's FIRST cluster so the next fs_read
-     * re-derives from (first, pos). Setting clus=0 here (old bug) made the
-     * walk start at cluster 0 instead of first, so any read after a seek
-     * pulled the wrong clusters (garbage) -> every FLAC failed with FORMAT
-     * (its metadata walk seeks constantly). */
-    f->cidx = 0;
-    f->clus = f->first;
     return offset;
+}
+
+int fs_mark(fs_file_t *f)
+{
+    uint8_t b;
+
+    if (f == NULL || !f->used || f->wr)
+        return FS_ERR_ARG;
+    if (f->pos < f->size && fs_read(f, &b, 1) == 1)   /* walks the cursor to pos */
+        f->pos--;
+    f->mark_clus = f->clus;
+    f->mark_cidx = f->cidx;
+    return 0;
 }
 
 /* Data, new chain, link, entry, old chain, FSInfo -- see the file header. */

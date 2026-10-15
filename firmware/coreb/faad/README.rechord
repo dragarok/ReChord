@@ -1,0 +1,6 @@
+FAAD2 2.11.4 (https://github.com/knik0/faad2, GPL-2.0-or-later), libfaad/ only.
+Built for core B as fixed point, LC + SBR + PS (Makefile COREB_FAAD_DEFS).
+Local changes: fprintf(stderr, ...) -> FAAD_LOG(...) (common.h: no-op) in
+decoder.c and ps_dec.c; faad_malloc/faad_free come from b_aac.c (common.c is
+compiled with them renamed away).
+- fixed.h: RC_ARM_SEMANTICS_C, a C copy of the ARM inline-asm multiplies (host reference builds).

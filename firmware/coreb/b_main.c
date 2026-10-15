@@ -31,6 +31,7 @@
 /* ---- time base, idle accounting, clock choice ---------------------------- */
 
 static uint32_t s_reload;
+static void stack_check(void);
 static volatile uint32_t s_idle_cyc, s_win;
 
 static void systick_start(void)
@@ -73,6 +74,7 @@ void SysTick_Handler(void)
     AS->ticks++;
     recycle_blocks();
     if (++s_win == TICK_HZ) {
+        stack_check();
         uint32_t cyc = (s_reload + 1u) * TICK_HZ, idle = s_idle_cyc;
 
         s_win = 0;
@@ -101,6 +103,7 @@ static void cpu_idle(void)
 
 as_track_t b_trk;
 uint32_t b_trk_start, b_trk_end;
+uint32_t b_in_need;
 static const b_codec_t *s_dec;           /* NULL: no track open */
 
 uint32_t b_in_avail(void)
@@ -140,18 +143,87 @@ uint32_t b_in_pos(void)
     return AS->in_rd - b_trk_start;
 }
 
-/* Decoders allocate when a track opens; a bump arena emptied at the next open. */
-static uint32_t s_arena_used;
+/* Decoder heap: the arena from the end of .bss to the stack reserve (coreb.ld),
+ * emptied when a track opens. First fit over an implicit list of blocks (8-byte
+ * header: size incl. header, bit 0 = used); adjacent free blocks merge while
+ * malloc walks. Decoders allocate a few dozen blocks, so the walk is short. */
+extern uint8_t _b_heap[], _b_stack_limit[];
+static uint32_t s_heap_used;
+
+static void heap_reset(void)
+{
+    uint32_t *h = (uint32_t *)_b_heap;
+
+    h[0] = (uint32_t)(_b_stack_limit - _b_heap) & ~7u;     /* one free block */
+    s_heap_used = 0;
+}
 
 void *b_alloc(size_t n)
 {
-    void *p = (void *)(AS_ARENA + s_arena_used);
+    uint8_t *p = _b_heap, *end = _b_heap + ((uint32_t)(_b_stack_limit - _b_heap) & ~7u);
+    uint32_t need = ((uint32_t)n + 8u + 7u) & ~7u;
 
-    n = (n + 7u) & ~7u;
-    if (s_arena_used + n > AS_ARENA_SIZE)
-        return NULL;
-    s_arena_used += n;
-    return p;
+    while (p < end) {
+        uint32_t *h = (uint32_t *)p, sz = h[0] & ~7u;
+
+        if (!(h[0] & 1u)) {
+            while (p + sz < end && !(*(uint32_t *)(p + sz) & 1u))   /* merge free neighbours */
+                sz += *(uint32_t *)(p + sz) & ~7u;
+            h[0] = sz;
+            if (sz >= need) {
+                if (sz - need >= 16u) {                              /* split */
+                    *(uint32_t *)(p + need) = sz - need;
+                    sz = need;
+                }
+                h[0] = sz | 1u;
+                s_heap_used += sz;
+                if (s_heap_used > AS->b_heap_peak)
+                    AS->b_heap_peak = s_heap_used;
+                return p + 8;
+            }
+        }
+        p += sz;
+    }
+    AS->err = 0xA110Cu;                          /* out of heap: the decoder fails */
+    return NULL;
+}
+
+void b_free(void *q)
+{
+    if (q) {
+        uint32_t *h = (uint32_t *)((uint8_t *)q - 8);
+
+        s_heap_used -= h[0] & ~7u;
+        h[0] &= ~1u;
+    }
+}
+
+void *b_realloc(void *q, size_t n)
+{
+    uint32_t have = q ? (((uint32_t *)((uint8_t *)q - 8))[0] & ~7u) - 8u : 0u;
+    void *r;
+
+    if (q && n <= have)
+        return q;
+    r = b_alloc(n);
+    if (r && q) {
+        memcpy(r, q, have);
+        b_free(q);
+    }
+    return r;
+}
+
+/* Stack low-water mark: b_reset painted the reserve; count untouched words. */
+#define STACK_PAINT 0x5A5A5A5Au
+
+static void stack_check(void)
+{
+    const uint32_t *p = (const uint32_t *)_b_stack_limit;
+    uint32_t n = 0;
+
+    while (p[n] == STACK_PAINT)
+        n++;
+    AS->b_stack_free = n * 4u;
 }
 
 void *b_calloc(size_t n)
@@ -181,8 +253,9 @@ static int track_open(void)
     b_trk_start = AS->in_rd;
     AS->cur_seq = b_trk.seq;
     AS->cur_frames = 0;
-    s_arena_used = 0;
+    heap_reset();
     s_dec = codec_find(b_trk.codec);
+    b_in_need = 0x8000u;
     if (!s_dec || b_trk.channels < 1 || b_trk.channels > 2 || s_dec->open() != 0) {
         AS->err = b_trk.codec;
         s_dec = NULL;
@@ -232,13 +305,13 @@ static void end_chain(void)
     AS->pcm_end = AS->pcm_wr;
 }
 
-/* Enough input to decode without stalling mid-frame: the rest of the track,
- * or 32 KiB (more than a 4096-frame 24-bit stereo FLAC frame). */
+/* Enough input to decode without stalling mid-frame: the rest of the track, or
+ * what the decoder said one step needs (32 KiB: a 4096-frame 24-bit FLAC frame). */
 static int input_ready(void)
 {
     uint32_t want = b_trk_end - AS->in_rd;
 
-    return b_in_avail() >= (want < 0x8000u ? want : 0x8000u);
+    return b_in_avail() >= (want < b_in_need ? want : b_in_need);
 }
 
 /* One step of work; 0 = nothing to do now. */
@@ -311,12 +384,20 @@ int b_main(void)
 {
     unsigned div_seen = AS->b_div;
 
+    heap_reset();
     systick_start();
     AS->state = AS_B_READY;
     for (;;) {
         if (AS->cmd == AS_CMD_STOP) {
             stop_all();
             AS->cmd = AS_CMD_NONE;
+        } else if (AS->cmd == AS_CMD_PARK) {
+            SYST_CSR = 0;
+            __asm__ volatile ("cpsid i" ::: "memory");
+            AS->state = AS_B_PARKED;
+            AS->cmd = AS_CMD_NONE;
+            for (;;)
+                __asm__ volatile ("wfi");            /* until core A resets us */
         } else if (AS->cmd == AS_CMD_RESTART) {        /* A re-clocked / swapped images, DMA re-armed */
             AS->pcm_wr = AS->pcm_played = AS->pcm_end = 0;
             s_fill = 0;

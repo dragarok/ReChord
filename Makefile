@@ -58,17 +58,31 @@ CFW_ELF := $(CFW_BUILD_DIR)/rechord_ap.elf
 COREB_DIR  := build/coreb
 COREB_RT   := b_startup b_main b_libc
 COREB_MAD  := $(patsubst %,libmad/%,bit fixed frame huffman layer12 layer3 stream synth timer)
-COREB_FAMILIES := main
-COREB_FAM_main := b_codecs_main b_flac b_pcm b_mp3 $(COREB_MAD)
+COREB_ALAC := $(patsubst %,alac/%,ag_dec dp_dec ALACBitUtilities alac_dec)
+COREB_FAAD := $(patsubst firmware/coreb/%.c,%,$(wildcard firmware/coreb/faad/*.c))
+COREB_FAMILIES := main aac
+COREB_FAM_main := b_codecs_main b_flac b_pcm b_mp3 b_alac $(COREB_MAD) $(COREB_ALAC)
+COREB_FAM_aac  := b_codecs_aac b_aac $(COREB_FAAD)
+# stack reserve per image (bytes): FAAD2 nests up to ~93 KiB of locals (HE-AAC v2)
+COREB_STACK_main := 0x5000
+COREB_STACK_aac  := 0x18000
 COREB_CFLAGS := $(AP_ARCH_FLAGS) -O2 -Wall -Wno-unused-function -ffreestanding \
                 -fno-tree-loop-distribute-patterns -ffunction-sections -fdata-sections -MMD -MP \
                 -Ifirmware -Ifirmware/coreb -Ifirmware/coreb/libmad -DOPT_ACCURACY -DNDEBUG
+COREB_FAAD_DEFS := -DFIXED_POINT -DLC_ONLY_DECODER -DHAVE_STRING_H=1 -DHAVE_STDINT_H=1 -DSTDC_HEADERS=1 \
+                   -DPACKAGE_VERSION='"2.11.4"' -Ifirmware/coreb/faad -w
+$(COREB_DIR)/faad/%.o: COREB_CFLAGS += $(COREB_FAAD_DEFS) -Os
+$(COREB_DIR)/faad/common.o: COREB_CFLAGS += -Dfaad_malloc=faad_malloc_unused -Dfaad_free=faad_free_unused
+$(COREB_DIR)/b_aac.o: COREB_CFLAGS += $(COREB_FAAD_DEFS)
+$(COREB_DIR)/alac/%.o: COREB_CFLAGS += -Ifirmware/coreb/alac -w
+$(COREB_DIR)/b_alac.o: COREB_CFLAGS += -Ifirmware/coreb/alac
 $(COREB_DIR)/%.o: firmware/coreb/%.c Makefile
 	@$(MKDIR_P) $(dir $@)
 	$(CC) $(COREB_CFLAGS) -c $< -o $@
 define COREB_IMAGE
 $(COREB_DIR)/$(1).elf: $(patsubst %,$(COREB_DIR)/%.o,$(COREB_RT) $(COREB_FAM_$(1))) firmware/coreb/coreb.ld
 	$$(CC) $$(AP_ARCH_FLAGS) -nostdlib -T firmware/coreb/coreb.ld -Wl,--gc-sections,--no-warn-rwx-segments \
+	    -Wl,--defsym=B_STACK=$(COREB_STACK_$(1)) \
 	    $$(filter %.o,$$^) -lgcc -o $$@
 $(COREB_DIR)/$(1).bin: $(COREB_DIR)/$(1).elf
 	$$(OBJCOPY) -O binary $$< $$@

@@ -53,8 +53,10 @@ MEMORY
     /* FW_RAM: initialized data + bss.  Starts at the top of the main stack
        (SP = 0x03004000); the 16 KiB BELOW 0x03004000 is the stack zone
        0x03000000..0x03004000 and must never hold data.  The upper bound
-       (0x0304C000) also stays clear of the loaded image (0x0304F490+). */
-    FW_RAM  (rwx) : ORIGIN = 0x03004000, LENGTH = 0x00048000   /* to 0x0304C000 */
+       (0x03030000) leaves 0x03030000..0x0303FFFF to the audio input ring
+       (audio_shared.h AS_IN_RING, written by core A, read by core B) and stays
+       clear of the loaded image (0x0304F490+). */
+    FW_RAM  (rwx) : ORIGIN = 0x03004000, LENGTH = 0x0002C000   /* to 0x03030000 */
 }
 
 /* ---- stacks ----------------------------------------------------------- */

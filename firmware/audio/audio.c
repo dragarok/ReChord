@@ -17,6 +17,7 @@
 #include "audio.h"
 #include "audio_shared.h"
 #include "mp3_info.h"
+#include "mp4.h"
 #include "drivers/clock.h"
 #include "drivers/dac_cs43131.h"
 #include "services/fs.h"
@@ -50,7 +51,7 @@ static char s_name[FS_NAME_MAX];           /* entry being streamed */
 /* ---- streaming state ----------------------------------------------------- */
 
 static fs_file_t *s_file;
-static uint8_t s_hdr[42];
+static uint8_t s_hdr[72];
 static uint32_t s_hdr_len, s_hdr_pos;
 static uint32_t s_left;                    /* file bytes still to stream */
 static uint32_t s_data_off;                /* file offset of the first streamed byte */
@@ -78,7 +79,8 @@ static int ext_is(const char *name, const char *ext)
 
 static int playable(const char *name)
 {
-    return ext_is(name, "flac") || ext_is(name, "wav") || ext_is(name, "mp3") || ext_is(name, "mp2");
+    return ext_is(name, "flac") || ext_is(name, "wav") || ext_is(name, "mp3") || ext_is(name, "mp2") ||
+           ext_is(name, "m4a") || ext_is(name, "m4b") || ext_is(name, "mp4") || ext_is(name, "alac");
 }
 
 /* FLAC: STREAMINFO -> track, synthesized header in s_hdr, file left at the first frame. */
@@ -205,6 +207,62 @@ static int open_mp3(fs_file_t *f, as_track_t *t)
     return 0;
 }
 
+/* MP4/M4A (AAC, ALAC): core B gets "u32 length + codec config", then
+ * "u32 length + frame" for every sample, read through the sample tables. The
+ * tables are read on a second handle, marked at them, so neither handle walks
+ * the cluster chain from the start of the file. */
+static int s_mp4;                          /* the open track is MP4 */
+static fs_file_t *s_tab;                   /* its sample-table handle */
+static mp4_info_t s_mi;
+static mp4_cur_t s_cur;
+static uint32_t s_fpos;                    /* where s_file is */
+static uint32_t s_stream_left;             /* MP4: bytes promised to B not yet written */
+
+static int open_m4a(fs_file_t *f, const char *path, as_track_t *t)
+{
+    uint32_t tables;
+
+    if (mp4_info(mp3_rd, f, (uint32_t)fs_file_size(f), &s_mi) != 0)
+        return -1;
+    s_tab = fs_open_read(path);
+    if (!s_tab)
+        return -1;
+    tables = s_mi.stsz_off < s_mi.stco_off ? s_mi.stsz_off : s_mi.stco_off;
+    if (s_mi.stsc_off < tables)
+        tables = s_mi.stsc_off;
+    fs_seek(s_tab, (long)tables);
+    fs_mark(s_tab);
+    mp4_cursor(&s_cur);
+    t->codec = s_mi.codec == MP4_AAC ? AS_CODEC_AAC : AS_CODEC_ALAC;
+    t->rate = s_mi.rate;
+    t->channels = s_mi.channels;
+    t->bits = s_mi.bits;
+    t->frames = s_mi.frames;
+    t->trim = s_mi.trim;
+    s_hdr[0] = (uint8_t)s_mi.cfg_len;
+    s_hdr[1] = s_hdr[2] = s_hdr[3] = 0;
+    memcpy(s_hdr + 4, s_mi.cfg, s_mi.cfg_len);
+    s_hdr_len = 4u + s_mi.cfg_len;
+    s_left = 0;
+    s_data_off = 0;
+    s_fpos = 0xFFFFFFFFu;
+    s_mp4 = 1;
+    t->bytes = s_hdr_len + 4u * s_mi.nsamples + s_mi.data_bytes;
+    s_stream_left = t->bytes;
+    s_kbps = 0;
+    return 0;
+}
+
+static void close_track(void)
+{
+    if (s_file)
+        fs_close(s_file);
+    if (s_tab)
+        fs_close(s_tab);
+    s_file = s_tab = NULL;
+    s_mp4 = 0;
+}
+
 /* Open the next playable entry of the playlist directory and queue it for B. */
 static int open_next(void)
 {
@@ -238,17 +296,19 @@ static int open_next(void)
         }
         memset(&t, 0, sizeof t);
         s_kbps = 0;
+        s_mp4 = 0;
         if ((ext_is(ent.name, "flac") ? open_flac(s_file, &t) :
-             ext_is(ent.name, "wav") ? open_wav(s_file, &t) : open_mp3(s_file, &t)) != 0) {
+             ext_is(ent.name, "wav") ? open_wav(s_file, &t) :
+             (ext_is(ent.name, "mp3") || ext_is(ent.name, "mp2")) ? open_mp3(s_file, &t) :
+             open_m4a(s_file, path, &t)) != 0) {
             log_printf("audio: %s: not a playable stream (size %ld)", ent.name, fs_file_size(s_file));
-            fs_close(s_file);
-            s_file = NULL;
+            close_track();
             continue;
         }
         t.seq = ++s_seq;
         /* file byte p lands at ring offset in_wr + skip + hdr + (p - start): make that
          * congruent to p mod 4, so whole sectors can be read straight into the ring */
-        t.skip = (s_data_off - (AS->in_wr + s_hdr_len)) & 3u;
+        t.skip = s_mp4 ? 0u : (s_data_off - (AS->in_wr + s_hdr_len)) & 3u;
         t.bytes += t.skip;
         s_skip_left = t.skip;
         s_hdr_pos = 0;
@@ -283,8 +343,11 @@ static int open_next(void)
 static void refill(void)
 {
     uint8_t *ring = (uint8_t *)AS_IN_RING;
+    uint32_t start = AS->in_wr;
 
-    for (int guard = 0; guard < 8; guard++) {
+    /* up to 32 KiB per tick (bounds the time spent here), in as many pieces as it
+     * takes: M4A comes as a 4-byte length then a few hundred bytes, per packet */
+    for (int guard = 0; guard < 512 && AS->in_wr - start < 0x8000u; guard++) {
         uint32_t used = AS->in_wr - AS->in_rd, free = AS_IN_SIZE - used;
         uint32_t off = AS->in_wr % AS_IN_SIZE, k = AS_IN_SIZE - off;
 
@@ -318,6 +381,41 @@ static void refill(void)
             memcpy(ring + off, s_hdr + s_hdr_pos, n);
             s_hdr_pos += n;
             AS->in_wr += n;
+            if (s_mp4)
+                s_stream_left -= n;
+            continue;
+        }
+        if (s_mp4 && !s_left) {             /* next sample: its length, then its bytes */
+            uint32_t at, len;
+            int r = mp4_next(mp3_rd, s_tab, &s_mi, &s_cur, &at, &len);
+
+            if (r == 1 && 4u + len <= s_stream_left) {
+                s_hdr[0] = (uint8_t)len;
+                s_hdr[1] = (uint8_t)(len >> 8);
+                s_hdr[2] = (uint8_t)(len >> 16);
+                s_hdr[3] = (uint8_t)(len >> 24);
+                s_hdr_len = 4;
+                s_hdr_pos = 0;
+                s_left = len;
+                if (at != s_fpos && fs_seek(s_file, (long)at) < 0)
+                    r = -1;
+                s_fpos = at;
+                if (r == 1)
+                    continue;
+            }
+            if (s_stream_left) {            /* B was promised these bytes: zeros (it skips them) */
+                uint32_t n = s_stream_left < k ? s_stream_left : k;
+
+                if (r != 0)
+                    log_printf("audio: sample table error %d at sample %u", r, (unsigned)s_cur.sample);
+                memset(ring + off, 0, n);
+                s_stream_left -= n;
+                AS->in_wr += n;
+                s_left = 0;
+                s_hdr_len = s_hdr_pos = 0;
+                continue;
+            }
+            close_track();
             continue;
         }
         if (s_left) {
@@ -336,12 +434,15 @@ static void refill(void)
             {
                 s_left -= (uint32_t)n;
                 AS->in_wr += (uint32_t)n;
+                if (s_mp4) {
+                    s_stream_left -= (uint32_t)n;
+                    s_fpos += (uint32_t)n;
+                }
             }
-            if (s_left)
+            if (s_left || s_mp4)
                 continue;
         }
-        fs_close(s_file);
-        s_file = NULL;
+        close_track();
     }
 }
 
@@ -350,7 +451,7 @@ static void refill(void)
 /* Core-B images: one per codec family (Makefile COREB_FAMILIES). */
 static const char *family_of(uint32_t codec)
 {
-    return codec == AS_CODEC_AAC || codec == AS_CODEC_ALAC ? "bm4a" : "bmain";
+    return codec == AS_CODEC_AAC ? "baac" : "bmain";
 }
 
 static const char *s_b_image;            /* module now in core B, NULL: none */
@@ -362,15 +463,22 @@ static int b_load(const char *image)
     uint32_t t0;
     int n;
 
+    t0 = time_ms();
+    if (s_b_up) {                            /* park B first: no exception may be half-handled */
+        AS->cmd = AS_CMD_PARK;
+        while (AS->state != AS_B_PARKED && time_ms() - t0 < 100u)
+            cpu_wait_tick();
+    }
     REG(CRU_SOFTRST3) = (CAL_CORE_RST << 16) | CAL_CORE_RST;     /* hold B in reset */
     s_b_up = 0;
     s_b_image = NULL;
-    t0 = time_ms();
+    AS->cmd = AS_CMD_NONE;
     n = module_load(image, (void *)AS_B_RAM, AS_B_IMAGE_MAX);
     if (n < 0) {
         log_printf("player: core-B image %s: %d", image, n);
         return -1;
     }
+    AS->run = 0;                             /* B idles after boot until A restarts it */
     AS->state = AS_B_BOOT;
     AS->b_hz = clock_core_b_hz();
     AS->b_div = AS->b_div_req = clock_pll_hz() / clock_core_b_hz();
@@ -474,10 +582,7 @@ static void halt(void)
 {
     if (s_dma_on)
         dma_stop();
-    if (s_file) {
-        fs_close(s_file);
-        s_file = NULL;
-    }
+    close_track();
     if (s_b_up) {
         AS->run = 0;
         AS->cmd = AS_CMD_STOP;
@@ -592,15 +697,20 @@ void audio_poll(void)
     refill();
     /* start output once B has filled the ring (or the whole stream is shorter) */
     if (!s_dma_on && !AS->cmd &&
-        (AS->pcm_wr >= AS_PCM_BLOCKS || (AS->pcm_end && AS->pcm_wr >= AS->pcm_end)))
+        (AS->pcm_wr >= AS_PCM_BLOCKS || (AS->pcm_end && AS->pcm_wr >= AS->pcm_end))) {
         dma_start();
+        log_printf("audio: output on, %u blocks ready, B at %u MHz", (unsigned)AS->pcm_wr,
+                   (unsigned)(AS->b_hz / 1000000u));
+    }
     /* B ended the DMA chain: once the last block has played and been recycled,
      * either the stream is over, or the next track needs another sample rate */
     if (s_dma_on && !(DMA_CHEN & (1u << DMA_CH)) && AS->pcm_played == AS->pcm_wr) {
         if (AS->state == AS_B_RATE)
             stream_switch();
         else if (AS->state == AS_B_ENDED) {
-            log_printf("audio: end of stream, %u tracks, B err %u", (unsigned)AS->done_seq, (unsigned)AS->err);
+            log_printf("audio: end of stream, %u tracks, B err %x, B heap peak %u B, stack free %u B",
+                       (unsigned)AS->done_seq, (unsigned)AS->err, (unsigned)AS->b_heap_peak,
+                       (unsigned)AS->b_stack_free);
             halt();
         }
     }
@@ -636,6 +746,7 @@ static void stream_switch(void)
     s_rate = rate;
     AS->rate = rate;
     AS->cmd = AS_CMD_RESTART;
+    AS->run = 1;
 }
 
 int audio_status(audio_status_t *st)

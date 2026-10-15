@@ -6,7 +6,7 @@
 /* libmad's two allocations (main data, IMDCT overlap) come from the arena */
 void *malloc(size_t n) { return b_alloc(n); }
 void *calloc(size_t k, size_t n) { return b_calloc(k * n); }
-void free(void *p) { }
+void free(void *p) { b_free(p); }
 
 /* ---- MP3 (libmad, fixed point) -------------------------------------------- */
 
@@ -35,6 +35,7 @@ int b_mp3_open(void)
     s_mp3->pos = s_mp3->sy.pcm.length = 0;
     s_mp3->trim = b_trk.trim;
     s_mp3->final = 0;
+    b_in_need = MP3_BUF;                     /* one refill of the frame buffer */
     return 0;
 }
 

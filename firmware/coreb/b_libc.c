@@ -56,3 +56,23 @@ int memcmp(const void *a, const void *b, size_t n)
             return *x - *y;
     return 0;
 }
+
+int abs(int v)
+{
+    return v < 0 ? -v : v;
+}
+
+/* Insertion sort: FAAD2 sorts SBR band tables of at most a few dozen entries. */
+void qsort(void *base, size_t n, size_t sz, int (*cmp)(const void *, const void *))
+{
+    uint8_t *b = base, tmp[16];
+
+    if (sz > sizeof tmp)
+        return;
+    for (size_t i = 1; i < n; i++)
+        for (size_t j = i; j > 0 && cmp(b + (j - 1) * sz, b + j * sz) > 0; j--) {
+            memcpy(tmp, b + j * sz, sz);
+            memcpy(b + j * sz, b + (j - 1) * sz, sz);
+            memcpy(b + (j - 1) * sz, tmp, sz);
+        }
+}

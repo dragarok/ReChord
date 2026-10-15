@@ -32,9 +32,14 @@ void b_in_copy(void *out, uint32_t n);           /* n <= b_in_avail() */
 /* Up to n bytes, waiting (WFI) for core A's refills; short only at the track end. */
 uint32_t b_in_read(void *out, uint32_t n);
 uint32_t b_in_pos(void);                         /* bytes of the track consumed */
+/* Input one decode step may need (a frame or packet); the runtime decodes only once
+ * this much of the track (or all of the rest) is in the ring. Set by open(), else 32 KiB. */
+extern uint32_t b_in_need;
 
-/* Bump allocator over the decoder arena, emptied when a track opens. */
+/* Heap over the decoder arena, emptied when a track opens (8-byte aligned). */
 void *b_alloc(size_t n);
 void *b_calloc(size_t n);
+void b_free(void *p);
+void *b_realloc(void *p, size_t n);
 
 #endif

@@ -1,0 +1,4 @@
+Apple ALAC (https://github.com/macosforge/alac, c38887c, Apache-2.0): ag_dec.c,
+dp_dec.c, ALACBitUtilities.c and their headers, with <stdio.h>/<math.h> includes
+removed. alac_dec.c is our C port of ALACDecoder.cpp (same element decoding,
+32-bit word output, stream sample counts clamped to the frame length).

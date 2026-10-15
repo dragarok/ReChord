@@ -303,3 +303,8 @@ int fs_list_dir(const char *path, uint32_t index, fs_dirent_t *out,
     if (out_total) *out_total = i;
     return 0;
 }
+
+int fs_mark(fs_file_t *f)
+{
+    return f ? 0 : FS_ERR_ARG;
+}

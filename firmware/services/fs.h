@@ -78,6 +78,11 @@ long fs_read(fs_file_t *f, void *buf, unsigned long cap);
  * with a seekable source (WAV/FLAC/MP3). */
 long fs_seek(fs_file_t *f, long offset);
 
+/* Remember the current position's place in the cluster chain: later backward
+ * seeks walk the chain from there instead of from the file's start (target only;
+ * the host backend ignores it). 0, or FS_ERR_*. */
+int fs_mark(fs_file_t *f);
+
 /* Total size of the open file in bytes, or FS_ERR_*. */
 long fs_file_size(fs_file_t *f);
 

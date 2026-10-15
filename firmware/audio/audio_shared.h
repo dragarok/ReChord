@@ -22,15 +22,18 @@
 
 /* Core-B RAM, as stock's decoder images use it: code (+ read-only data) in the
  * 128 KiB code RAM at 0x01000000 (core B sees it at 0), everything written in the
- * data RAM from 0x01020000 (stock: SP 0x01022000, data segments at 0x01020000). */
+ * data RAM from 0x01020000 (stock: SP 0x01022000, data segments at 0x01020000):
+ * this shared block, then the image's .data/.bss, its decoder heap, and its stack
+ * at the top (the stack reserve is per image: coreb.ld B_STACK). The data RAM is
+ * taken as 256 KiB (HDRAM0..7: SDK BBSystem.c gates 8 banks); unverified on
+ * hardware. Both rings live in core-A SRAM, as RECHO's PCM ring does. */
 #define AS_B_RAM          0x01000000u   /* core-B image runs here (B sees it at 0) */
 #define AS_B_IMAGE_MAX    0x00020000u   /* 128 KiB: code + rodata + the .data load copy */
-#define AS_B_DATA         0x01020000u   /* .data, .bss, then the stack, up to AS_SHARED */
-#define AS_SHARED         0x01028000u   /* struct audio_shared */
-#define AS_IN_RING        0x01030000u   /* compressed input ring */
+#define AS_SHARED         0x01020000u   /* struct audio_shared (4 KiB) */
+#define AS_B_DATA         0x01021000u   /* .data, .bss, heap, stack: to AS_B_TOP */
+#define AS_B_TOP          0x01060000u
+#define AS_IN_RING        0x03030000u   /* compressed input ring, core-A SRAM (firmware_ap.ld) */
 #define AS_IN_SIZE        0x00010000u   /* 64 KiB */
-#define AS_ARENA          0x01040000u   /* decoder heap, emptied at every track open */
-#define AS_ARENA_SIZE     0x00010000u   /* 64 KiB (to 0x01050000: banks 0..5, as stock) */
 #define AS_PCM_RING       0x03090000u   /* PCM ring, core-A SRAM (RECHO uses it too) */
 #define AS_PCM_BLOCKS     8u
 #define AS_BLOCK_FRAMES   1024u
@@ -38,19 +41,22 @@
 #define AS_LLI            (AS_PCM_RING - 0x100u)   /* 8 x 28 B, just below the ring (SRAM ends at 0x030A0000) */
 
 #define AS_MAGIC          0x4F445541u   /* "AUDO" */
-#define AS_VERSION        4u
+#define AS_VERSION        6u
 #define AS_QUEUE          4u
 
-enum { AS_CODEC_FLAC = 1, AS_CODEC_WAV = 2, AS_CODEC_MP3 = 3, AS_CODEC_AIFF = 4, AS_CODEC_AAC = 5, AS_CODEC_ALAC = 6 };
+enum { AS_CODEC_FLAC = 1, AS_CODEC_WAV = 2, AS_CODEC_MP3 = 3, AS_CODEC_AIFF = 4, AS_CODEC_AAC = 5, AS_CODEC_ALAC = 6,
+       AS_CODEC_VORBIS = 7, AS_CODEC_OPUS = 8 };
 
 /* B state. ENDED and RATE: B has ended the DMA chain after the last block it wrote
  * (that LLI has no successor), so the DMA stops by itself once it has played it.
  * ENDED = the stream is over; RATE = the next track needs another sample rate:
  * A re-clocks, then sends AS_CMD_RESTART. */
-enum { AS_B_BOOT = 0, AS_B_READY, AS_B_PLAYING, AS_B_ENDED, AS_B_ERROR, AS_B_RATE };
+enum { AS_B_BOOT = 0, AS_B_READY, AS_B_PLAYING, AS_B_ENDED, AS_B_ERROR, AS_B_RATE, AS_B_PARKED };
 
 /* A -> B commands (cmd field, B clears it to 0 when done) */
-enum { AS_CMD_NONE = 0, AS_CMD_STOP = 1, AS_CMD_RESTART = 2 };
+/* PARK: B stops its SysTick, masks interrupts and idles in thread mode, so core A
+ * can hold it in reset with no exception half-handled (before loading another image) */
+enum { AS_CMD_NONE = 0, AS_CMD_STOP = 1, AS_CMD_RESTART = 2, AS_CMD_PARK = 3 };
 
 typedef struct {
     uint32_t seq;            /* A: track sequence number (1, 2, ...) */
@@ -92,6 +98,8 @@ typedef struct {
     volatile uint32_t b_div;         /* A: PLL divider in use (A applies it in the CRU) */
     volatile uint32_t b_div_req;     /* B: divider B wants, from its load */
     volatile uint32_t ticks;         /* B: heartbeat */
+    volatile uint32_t b_heap_peak;   /* B: most of its arena in use, bytes */
+    volatile uint32_t b_stack_free;  /* B: stack never touched, bytes (low-water mark) */
 
     volatile uint32_t rate;          /* A: sample rate the output runs at */
     volatile uint32_t cmd;           /* A -> B */

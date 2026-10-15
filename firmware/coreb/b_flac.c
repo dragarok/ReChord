@@ -44,15 +44,8 @@ static drflac_bool32 flac_tell_cb(void *u, drflac_int64 *pos)
 }
 
 static void *a_malloc(size_t n, void *u) { return b_alloc(n); }
-static void *a_realloc(void *p, size_t n, void *u)
-{
-    void *q = b_alloc(n);
-
-    if (q && p)
-        memcpy(q, p, n);                 /* only growth happens; over-copy stays in the arena */
-    return q;
-}
-static void a_free(void *p, void *u) { }
+static void *a_realloc(void *p, size_t n, void *u) { return b_realloc(p, n); }
+static void a_free(void *p, void *u) { b_free(p); }
 static const drflac_allocation_callbacks s_alloc = { NULL, a_malloc, a_realloc, a_free };
 
 int b_flac_open(void)
