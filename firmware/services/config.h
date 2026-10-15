@@ -24,6 +24,8 @@ typedef struct {
     uint8_t auto_off;            /* index: 5, 15, 30 min, never */
     uint8_t usb, resume, strip, tags, cpu;   /* cpu: 0 auto, 1 max */
     uint8_t dac_mhz;             /* core A in USB DAC mode: 50, 100 or 200 (MHz) */
+    uint8_t usb_out;             /* USB-C earphones: 1 = host mode while no cable (drivers/usb_out.h) */
+    uint8_t usb_vbus;            /* what powers them: USB_OUT_SUPPLY_PORT, _GPIO21 */
     uint8_t dac_charge;          /* USB DAC mode: CFG_DAC_BATTERY (draw nothing from the host), _CHARGE, _POWER_ONLY */
     int16_t volume;              /* dB, -90..0, or CFG_VOLUME_MUTE */
     char browse[128];            /* the browser's folder */

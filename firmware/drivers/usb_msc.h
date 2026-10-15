@@ -29,6 +29,8 @@ void usb_dwc2_stop(void);
 /* Just the PHY and the USB clocks (and the pins the reference drives with them), for
  * the core in host mode and the VBUS probe; usb_dwc2_phy_off() undoes it. */
 void usb_dwc2_phy_on(void);
+/* The USB interrupt (NVIC IRQ 5) goes to whichever mode set this (the USB DAC, the host). */
+extern void (*volatile usb_irq_hook)(void);
 void usb_dwc2_phy_off(void);
 
 /* Last session: [7:0] last SCSI opcode, [15:8] last START STOP byte 4,

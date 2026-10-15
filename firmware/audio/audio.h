@@ -48,6 +48,10 @@ void audio_ext_stop(void);
 /* +1: next track; -1: previous (or the start of this one if more than 3 s in).
  * Returns audio_play()'s result. */
 int audio_skip(int dir);
+/* The output: 1 = a USB audio device (drivers/usb_out.h, ready), 0 = the jack. Playing
+ * stops on a change (1 is returned); the caller plays again. */
+int audio_set_output(int usb);
+int audio_output_usb(void);
 /* 1 = pause, 0 = resume; returns the paused state. */
 int audio_pause(int on);
 int audio_paused(void);

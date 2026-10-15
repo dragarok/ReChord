@@ -693,6 +693,18 @@ void usb_dwc2_init_hs(void)
  * PHY and USB clocks down. The next usb_dwc2_init() re-runs core_init():
  * GRSTCTL core soft reset + GRXFSIZ/GNPTXFSIZ/DIEPTXF reallocation + EP0
  * re-arm is the "re-allocate everything" side of the mode switch. */
+void (*volatile usb_irq_hook)(void);
+
+void USBC_IRQHandler(void)
+{
+    void (*h)(void) = usb_irq_hook;
+
+    if (h)
+        h();
+    else
+        *(volatile uint32_t *)0xE000E180u = 1u << 5;   /* nobody's: mask it (NVIC_ICER0) */
+}
+
 void usb_dwc2_phy_on(void)
 {
     hw_on();

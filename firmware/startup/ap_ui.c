@@ -15,6 +15,7 @@
 #include "drivers/usb_cdc.h"
 #include "drivers/usb_uac.h"
 #include "drivers/usb_probe.h"
+#include "drivers/usb_out.h"
 #include "drivers/dac_cs43131.h"
 #include "services/fs_target.h"
 #include "services/fw_update.h"
@@ -250,6 +251,15 @@ static void power_off(const char *why)
 /* MSC session, run on demand from the "USB storage" menu entry (the cable
  * edge opens the CDC console instead): expose the user volume (LUN 0) and
  * the SD card (LUN 1, read-only) until eject/unplug/power key. */
+/* Before a USB device mode (disk, console, DAC) or the probe: the core back from host. */
+static void usb_out_off(void)
+{
+    if (usb_out_active()) {
+        usb_out_stop();
+        audio_set_output(0);
+    }
+}
+
 static void usb_session(void)
 {
     const usb_lun_t luns[2] = {
@@ -258,6 +268,8 @@ static void usb_session(void)
     };
     uint32_t rd, wr;
     int r;
+
+    usb_out_off();
 
     if (!s_user) {      /* layout unknown or wrong board: never export LBA 0.. */
         snprintf(s_usb, sizeof s_usb, "no user volume");
@@ -515,6 +527,7 @@ static void usb_console_run(void)
     char ln[64];
     unsigned len = 0, frames = 0;
 
+    usb_out_off();
     screen("USB diag");
     line(1, "enumerating... POWER=exit");
     display_flush_rows(0, DISPLAY_H - 1);
@@ -643,6 +656,7 @@ static void usb_probe_menu(void)
     input_event_t ev;
     int n;
 
+    usb_out_off();
     player_stop();
     screen("USB-C probe");
     line(1, "no cable; an earphone may be in");
@@ -874,6 +888,7 @@ static void usb_dac_session(void)
 {
     int r;
 
+    usb_out_off();
     player_stop();
     save_state("usb dac");
     power_screen(1);
@@ -952,6 +967,41 @@ static void cable_connected(void)
     power_activity();
 }
 
+/* USB-C earphones (Settings): while there is no cable, the player is a USB host waiting for
+ * one; a USB audio device that enumerates takes the music (what was playing starts again
+ * there), unplugged it goes back to the jack. While host, VBUS is the player's own: no cable
+ * dialog, no charging shown. */
+static void usb_out_tick(void)
+{
+    static int last = USB_OUT_OFF;
+    int st, playing;
+
+    if (g_cfg.usb_out && !usb_out_active() && !usb_cable() && !s_cable)
+        usb_out_start(g_cfg.usb_vbus);
+    else if (!g_cfg.usb_out && usb_out_active())
+        usb_out_stop();
+    st = usb_out_poll();
+    power_usb_supply_off(usb_out_active());
+    if (st == last)
+        return;
+    playing = player_get_state() == PLAYER_PLAYING;
+    if (st == USB_OUT_READY) {
+        const usb_out_status_t *u = usb_out_status();
+
+        log_printf("ui: USB-C out: '%s' (UAC%d)", u->name, u->uac);
+        if (audio_set_output(1) && playing && player_play() != PLAYER_OK)
+            log_printf("ui: USB-C out: the track did not start");
+        audio_set_volume_db(audio_get_volume_db());   /* the device's volume to the player's */
+    } else if (last == USB_OUT_READY) {
+        log_printf("ui: USB-C out: gone, back to the jack");
+        audio_set_output(0);                      /* (playing stopped: nothing plays aloud by surprise) */
+    } else if (st == USB_OUT_UNSUPPORTED) {
+        log_printf("ui: USB-C out: not a USB audio output");
+    }
+    last = st;
+    ui_invalidate_all();
+}
+
 void ap_ui_loop(void)
 {
     input_event_t ev;
@@ -991,9 +1041,12 @@ void ap_ui_loop(void)
             ui_invalidate_all();
         }
 
+        if (usb_out_active())
+            cable = 0;                   /* (VBUS is the player's own while host) */
         if (cable && !s_cable)           /* the cable in (also at boot) */
             cable_connected();
         s_cable = cable;
+        usb_out_tick();
 
         /* hold power 2 s to switch off; the press that switched us on may
          * still be held, so arm only after the key has been released once

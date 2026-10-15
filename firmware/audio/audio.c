@@ -22,6 +22,7 @@
 #include "asf.h"
 #include "drivers/clock.h"
 #include "drivers/dac_cs43131.h"
+#include "drivers/usb_out.h"
 #include "services/fs.h"
 #include "services/log.h"
 #include "services/modules.h"
@@ -59,6 +60,7 @@ static uint32_t s_data_off;                /* file offset of the first streamed 
 static uint32_t s_skip_left;               /* alignment filler still to write */
 static uint32_t s_seq;
 static int s_b_up, s_dac_up, s_dma_on, s_playing, s_paused;
+static int s_usb;                    /* the output is USB audio (usb_out.h), not the jack */
 static uint32_t s_underruns, s_underrun_log;   /* B's count when last seen; ms of the last log */
 static uint32_t s_rate, s_rate_changes;
 static audio_track_t s_tracks[AS_QUEUE];   /* titles/durations by seq, for the UI */
@@ -863,6 +865,32 @@ static void dma_stop(void)
     s_dma_on = 0;
 }
 
+static void out_start(void)
+{
+    if (s_usb) {
+        usb_out_stream_start();
+        s_dma_on = 1;
+    } else {
+        dma_start();
+    }
+}
+
+static void out_stop(void)
+{
+    if (s_usb) {
+        usb_out_stream_stop();
+        s_dma_on = 0;
+    } else {
+        dma_stop();
+    }
+}
+
+/* The chain still plays (the DMA channel, or USB, has not reached its end). */
+static int out_running(void)
+{
+    return s_usb ? usb_out_streaming() : (DMA_CHEN & (1u << DMA_CH)) != 0;
+}
+
 /* ---- volume: CS43131 PCM volume A/B (MAP 0x090001/0x090002), 0.5 dB steps,
  * both chips; -40 dB at power-on like RECHO (the chip's own default is 0 dB,
  * full scale into the headphones). ------------------------------------------ */
@@ -881,11 +909,35 @@ static void dac_volume(void)
     }
 }
 
+/* ---- the output: the jack (I2S DMA, DAC) or a USB audio device (usb_out.h, which takes
+ * the PCM ring's LLI chain as the DMA would) -------------------------------------------- */
+
+static int out_rate(uint32_t rate, uint32_t bits)
+{
+    if (s_usb)
+        return usb_out_set_format(rate, bits) == 0 ? 0 : -5;
+    if (!s_dac_up) {
+        if (dac_init(rate) != 0)
+            return -4;
+        s_dac_up = 1;
+    } else if (dac_set_rate(rate) != 0) {
+        return -4;
+    }
+    return 0;
+}
+
+static void out_volume(void)
+{
+    if (s_usb)
+        usb_out_set_volume(s_vol_db);
+    else if (s_dac_up && !s_ext)
+        dac_volume();
+}
+
 int audio_set_volume_db(int db)
 {
     s_vol_db = db < VOL_MIN_DB ? VOL_MIN_DB : db > 0 ? 0 : db;
-    if (s_dac_up && !s_ext)
-        dac_volume();
+    out_volume();
     return s_vol_db;
 }
 
@@ -991,7 +1043,9 @@ void audio_ext_stop(void)
 static void halt(void)
 {
     if (s_dma_on)
-        dma_stop();
+        out_stop();
+    if (s_usb)
+        usb_out_release();                   /* the device idles until the next play */
     close_track();
     if (s_b_up) {
         AS->run = 0;
@@ -1041,14 +1095,13 @@ int audio_play(int pos)
         AS->b_hz = clock_core_b_hz();
         AS->b_div = AS->b_div_req = 1;
     }
-    if (!s_dac_up) {
-        if (dac_init(s_rate) != 0)
-            return -4;
-        s_dac_up = 1;
-    } else if (dac_set_rate(s_rate) != 0) {
-        return -4;
+    {
+        int r = out_rate(s_rate, AS->q[0].bits);
+
+        if (r != 0)
+            return r;
     }
-    dac_volume();                            /* before the first sample reaches the DAC */
+    out_volume();                            /* before the first sample reaches the DAC */
     AS->rate = s_rate;
     AS->run = 1;
     s_playing = 1;
@@ -1084,7 +1137,9 @@ int audio_pause(int on)
 {
     if (!s_playing || !s_dma_on || on == s_paused)
         return s_paused;
-    if (on)
+    if (s_usb)
+        usb_out_pause(on);
+    else if (on)
         dac_i2s_stop();
     else
         dac_i2s_start();
@@ -1196,13 +1251,13 @@ void audio_poll(void)
     /* start output once B has filled the ring (or the whole stream is shorter) */
     if (!s_dma_on && !AS->cmd &&
         (AS->pcm_wr >= AS_PCM_BLOCKS || (AS->pcm_end && AS->pcm_wr >= AS->pcm_end))) {
-        dma_start();
+        out_start();
         log_printf("audio: output on, %u blocks ready, B at %u MHz", (unsigned)AS->pcm_wr,
                    (unsigned)(AS->b_hz / 1000000u));
     }
     /* B ended the DMA chain: once the last block has played and been recycled,
      * either the stream is over, or the next track needs another sample rate */
-    if (s_dma_on && !(DMA_CHEN & (1u << DMA_CH)) && AS->pcm_played == AS->pcm_wr) {
+    if (s_dma_on && !out_running() && AS->pcm_played == AS->pcm_wr) {
         if (AS->state == AS_B_RATE)
             stream_switch();
         else if (AS->state == AS_B_ENDED) {
@@ -1224,7 +1279,7 @@ static void stream_switch(void)
     const char *image = family_of(n->codec);
     uint32_t rate = n->rate;
 
-    dma_stop();
+    out_stop();
     if (image != s_b_image) {
         log_printf("audio: core B %s -> %s", s_b_image ? s_b_image : "-", image);
         if (b_load(image) != 0) {
@@ -1239,7 +1294,7 @@ static void stream_switch(void)
     }
     if (rate != s_rate) {
         log_printf("audio: rate %u -> %u Hz", (unsigned)s_rate, (unsigned)rate);
-        if (dac_set_rate(rate) != 0) {
+        if (out_rate(rate, n->bits) != 0) {
             halt();
             return;
         }
@@ -1250,6 +1305,24 @@ static void stream_switch(void)
     AS->rate = rate;
     AS->cmd = AS_CMD_RESTART;
     AS->run = 1;
+}
+
+int audio_set_output(int usb)
+{
+    if (!usb == !s_usb)
+        return 0;
+    if (s_playing)
+        halt();
+    s_usb = usb;
+    if (!usb)
+        s_dac_up = 0;                        /* the jack: DAC (and amp) brought up again at the next play */
+    log_printf("audio: output %s", usb ? "USB" : "the jack");
+    return 1;
+}
+
+int audio_output_usb(void)
+{
+    return s_usb;
 }
 
 int audio_status(audio_status_t *st)

@@ -4,7 +4,7 @@
  * Interrupt driven (NVIC IRQ 5): SETUPs and their data stages, the isochronous
  * OUT audio endpoint (EP1 OUT, one packet per (micro)frame) and the feedback
  * endpoint (EP1 IN, every 8 microframes at high speed, every frame at full speed)
- * are all served from USBC_IRQHandler; usb_uac_run() sleeps in WFI and does what
+ * are all served from uac_irq() (usb_irq_hook); usb_uac_run() sleeps in WFI and does what
  * may take time: re-clocking the DAC, I2C volume writes, the screen.
  *
  * Samples go from the RX FIFO straight into the ring audio.c's DMA plays (I2S
@@ -767,7 +767,7 @@ static void rx_one(void)
     }
 }
 
-void USBC_IRQHandler(void)
+static void uac_irq(void)
 {
     uint32_t gi = OTG(GINTSTS) & OTG(GINTMSK);
 
@@ -872,6 +872,7 @@ int usb_uac_run(int (*tick)(void), void (*status)(const usb_uac_status_t *))
         fifo_flush();
     }
     OTG(GINTMSK) |= GI_INCOMPISOIN | GI_INCOMPISOOUT;
+    usb_irq_hook = uac_irq;
     OTG(GAHBCFG) |= 1u;                      /* global interrupt */
     NVIC_ISER0 = 1u << USB_IRQ;
     log_printf("uac: waiting for the host");
@@ -945,6 +946,7 @@ int usb_uac_run(int (*tick)(void), void (*status)(const usb_uac_status_t *))
     }
     NVIC_ICER0 = 1u << USB_IRQ;
     OTG(GAHBCFG) &= ~1u;
+    usb_irq_hook = 0;
     log_printf("uac: end (%d): packets %u, dropped %u, underruns %u, missed %u", ret, (unsigned)s.st.packets,
                (unsigned)s.st.dropped, (unsigned)s.st.underruns, (unsigned)s.st.missed);
     usb_dwc2_stop();

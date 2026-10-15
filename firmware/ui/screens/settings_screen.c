@@ -43,6 +43,8 @@ static const char *v_dacpow(void)
     static const char *const k[] = { "battery", "charge", "power only" };
     return k[g_cfg.dac_charge % 3u];
 }
+static const char *v_usbout(void) { return g_cfg.usb_out ? "on" : "off"; }
+static const char *v_usbvbus(void) { return g_cfg.usb_vbus ? "GPIO2.1" : "port"; }
 static const char *v_resume(void)
 {
     static const char *const k[] = { "off", "folder", "track" };
@@ -69,6 +71,8 @@ static void s_dacpow(void)
     static const uint8_t next[3] = { CFG_DAC_POWER_ONLY, CFG_DAC_BATTERY, CFG_DAC_CHARGE };
     g_cfg.dac_charge = next[g_cfg.dac_charge % 3u];
 }
+static void s_usbout(void) { g_cfg.usb_out ^= 1u; }
+static void s_usbvbus(void) { g_cfg.usb_vbus ^= 1u; }
 static void s_resume(void) { g_cfg.resume = (uint8_t)((g_cfg.resume + 1u) % 3u); }
 static void s_strip(void) { g_cfg.strip ^= 1u; }
 static void s_cpu(void) { g_cfg.cpu ^= 1u; }
@@ -87,6 +91,8 @@ static const menu_item_t k_items[] = {
     { "Auto power off", v_auto, s_auto },
     { "On USB connect", v_usb, s_usb },
     { "DAC power", v_dacpow, s_dacpow },
+    { "USB-C earphones", v_usbout, s_usbout },
+    { "USB-C power", v_usbvbus, s_usbvbus },
     { "Resume at power-on", v_resume, s_resume },
     { "Debug strip", v_strip, s_strip },
     { "CPU clock", v_cpu, s_cpu },
