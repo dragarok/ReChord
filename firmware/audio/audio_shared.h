@@ -47,7 +47,8 @@
 enum { AS_CODEC_FLAC = 1, AS_CODEC_WAV = 2, AS_CODEC_MP3 = 3, AS_CODEC_AIFF = 4, AS_CODEC_AAC = 5, AS_CODEC_ALAC = 6,
        AS_CODEC_VORBIS = 7, AS_CODEC_OPUS = 8, AS_CODEC_WAVF = 9 /* IEEE float32 PCM */,
        AS_CODEC_AIFF_LE = 10 /* AIFC 'sowt' */, AS_CODEC_WAVPACK = 11,
-       AS_CODEC_DSD = 12 /* DSF/DFF -> 176.4 kHz */ };
+       AS_CODEC_DSD = 12 /* DSF/DFF -> 176.4 kHz */,
+       AS_CODEC_WMA = 14 /* WMA v1/v2 (ASF) */, AS_CODEC_WMAPRO = 15 /* WMA Pro (ASF) */ };
 
 /* B state. ENDED and RATE: B has ended the DMA chain after the last block it wrote
  * (that LLI has no successor), so the DMA stops by itself once it has played it.

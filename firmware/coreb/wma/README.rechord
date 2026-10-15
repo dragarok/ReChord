@@ -1,0 +1,39 @@
+WMA decoders for core B, from Rockbox (https://github.com/Rockbox/rockbox, master at
+f2eaa15ac2cb0fe97b58d9c69e43777f9eb94cb4, fetched 2026-10-15):
+
+  libwma    lib/rbcodec/codecs/libwma     WMA v1/v2 (0x160/0x161), fixed point
+  pro/      lib/rbcodec/codecs/libwmapro  WMA Pro (0x162), fixed point, mono/stereo
+  shared    lib/rbcodec/codecs/lib        mdct.c, fft-ffmpeg.c, mdct_lookup.c,
+                                          ffmpeg_bitstream.c and their headers
+
+Both are ports of FFmpeg's decoders (wmadec.c by the FFmpeg project, wmaprodec.c by
+Baptiste Coudurier, Benjamin Larsson, Ulion, Sascha Sommer), LGPL-2.1-or-later as the
+file headers say; Rockbox's own files (wmafixed.*, codeclib glue) are GPL-2.0-or-later.
+Both are compatible with ReChord's GPL-3.0. mdct_lookup.c's tables come from Tremor
+(BSD-style, Xiph.Org). Not taken: Rockbox's codec glue (wma.c, wmapro.c), libasf (our
+ASF demuxer is firmware/audio/asf.c), libwmavoice, the ARM/ColdFire assembly (ARM-mode
+asm; the C paths are used, so core B and the host reference compute alike).
+
+Local changes (each marked "ReChord" in the source):
+- codecs.h, codeclib.h, platform.h, wma_wfx.h: our stand-ins for Rockbox's codec API
+  headers: empty IRAM attributes, no-op DEBUGF/LOGF, byte swaps on GCC builtins, a
+  big-endian 32-bit read as one unaligned load (AV_RB32), av_log2 on CLZ, and the
+  asf_waveformatex_t the decoders take (from libasf/asf.h).
+- Include paths flattened (<codecs/lib/codeclib.h> -> "codeclib.h", libasf -> wma_wfx.h);
+  the per-CPU IRAM tiers in wmadec.h / pro/wmaprodec.h replaced by empty defines;
+  WMAPRO_MAX_CHANNELS fixed at 2 (Rockbox: 8 on large-memory targets).
+- wmafixed.c/h: long -> int32_t/uint32_t in fsincos, fixsqrt32 (a 64-bit host long
+  changed the CORDIC's arithmetic).
+- wmadata.h: noisetable_exp is const (32 KiB in code RAM rather than .data); LSP mode
+  reads it doubled (NOISE() in wmadeci.c) instead of doubling the table in place.
+- wmadeci.c: scratch_buf typed fixed32; frame_out_buf cleared in wma_decode_init (it is
+  static: a previous track's overlap leaked into the next track's first frame).
+- pro/wmaprodec.c: the output buffers cleared in decode_init, for the same reason.
+- ffmpeg_bitstream.c: the VLC code sort is a Shell sort on the code (qsort's comparator
+  took an int difference of two 31-bit keys, which can overflow); same order, no libc.
+
+Output scale (firmware/coreb/b_wma.c, b_wmapro.c): libwma gives 2.29 fixed point
+(Rockbox sample depth 29) with inverted polarity, libwmapro 2.25 (depth 25); both are
+clipped to +-1.0 and left-justified in the 32-bit I2S word. Checked against FFmpeg's
+float decoders: 92-105 dB SNR on ffmpeg-encoded WMA v1/v2, 58-86 dB on Windows-encoded
+WMA v2 (bit reservoir, block switching), 90-99 dB on WMA Pro (16-96 kHz).
