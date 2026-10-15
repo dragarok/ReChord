@@ -50,6 +50,7 @@ enum {
 #define HP_CONNDET  (1u << 1)
 #define HP_ENA      (1u << 2)
 #define HP_ENCHNG   (1u << 3)
+#define HP_OCACT    (1u << 4)
 #define HP_OCCHNG   (1u << 5)
 #define HP_RST      (1u << 8)
 #define HP_PWR      (1u << 12)
@@ -74,6 +75,16 @@ enum {
 #define PID_DATA1 2u
 #define PID_SETUP 3u
 
+/* USB 2.0 timing (sections of the USB 2.0 specification; docs/USB_COMPLIANCE.md) */
+#define T_ATTDB_MS    100u   /* 7.1.7.3: connect debounce, before the reset */
+#define T_DRSTR_MS     50u   /* 7.1.7.5: a reset from a root port lasts at least 50 ms */
+#define T_RSTRCY_MS    20u   /* 7.1.7.5: reset recovery, 10 ms at least (+10 ms margin) */
+#define T_DSETADDR_MS   5u   /* 9.2.6.3: SET_ADDRESS recovery, 2 ms at least */
+#define T_CTRL_MS    5000u   /* 9.2.6.4: a request completes within 5 s */
+#define T_CLKVALID_MS 500u   /* UAC2: how long a device may take to lock a new rate (ours) */
+#define OC_RETRY_MS  2000u   /* overcurrent: the port off this long, then tried again */
+#define OC_TRIES        3u
+
 #define CH_CTRL 0u
 #define CH_FB   3u
 #define LLI_DONE (1u << 12)
@@ -93,6 +104,11 @@ typedef struct {
 static struct {
     usb_out_status_t st;
     int supply, started;
+    uint32_t budget_ma;
+    int force_fs;                     /* this device: full speed after high speed failed */
+    volatile int overcurrent;         /* the port said so (interrupt) */
+    int port_off;                     /* off after an overcurrent, until oc_at + OC_RETRY_MS */
+    uint32_t oc_at, oc_count, vbus_low, vbus_seen;
     uint8_t addr, mps0, cfg_value, ac_if;
     alt_t alts[MAX_ALTS];
     uint8_t nalts;
@@ -188,6 +204,8 @@ static void ch0_halted(uint32_t hc)
 {
     if (!s.c.stage || s.c.done)
         return;
+    if (hc & (HC_XACTERR | HC_BBLERR | HC_DTERR))
+        s.st.errors++;
     if (hc & HC_STALL) {
         s.c.done = -2;
     } else if (hc & HC_XFERCOMPL) {
@@ -225,7 +243,7 @@ static int ctrl(uint8_t bm, uint8_t br, uint16_t val, uint16_t idx, uint16_t len
     s.c.stage = ST_SETUP;
     ch0_go();
     NVIC_ISER0 = 1u << USB_IRQ;
-    for (t0 = time_ms(); !s.c.done && time_ms() - t0 < 500u; )
+    for (t0 = time_ms(); !s.c.done && time_ms() - t0 < T_CTRL_MS; )
         cpu_wait_tick_or(&s.c.done);
     NVIC_ICER0 = 1u << USB_IRQ;
     if (!s.c.done) {
@@ -416,8 +434,10 @@ static void host_irq(void)
             } else {
                 if (hc & HC_XFERCOMPL)
                     s.st.packets++;
-                if (hc & (HC_FRMOVRUN | HC_XACTERR))
+                if (hc & HC_FRMOVRUN)
                     s.st.late++;
+                if (hc & (HC_XACTERR | HC_BBLERR))
+                    s.st.errors++;
             }
         }
     }
@@ -427,6 +447,8 @@ static void host_irq(void)
         OTG(HPRT) = (p & ~HP_W1C) | (p & (HP_CONNDET | HP_ENCHNG | HP_OCCHNG));
         if ((p & HP_ENCHNG) && !(p & HP_ENA) && s.st.state == USB_OUT_READY)
             s.disconnected = 1;
+        if ((p & HP_OCCHNG) && (p & HP_OCACT))     /* overcurrent: the poll takes the power off */
+            s.overcurrent = 1;
     }
     if (gi & GI_DISCONN) {
         OTG(GINTSTS) = GI_DISCONN;
@@ -625,8 +647,8 @@ static int enumerate(void)
     int n;
     uint32_t t0;
 
-    OTG(HPRT) = (OTG(HPRT) & ~HP_W1C) | HP_RST;      /* port reset, 50 ms */
-    delay_ms(50);
+    OTG(HPRT) = (OTG(HPRT) & ~HP_W1C) | HP_RST;      /* port reset (TDRSTR) */
+    delay_ms(T_DRSTR_MS);
     OTG(HPRT) = OTG(HPRT) & ~(HP_W1C | HP_RST);
     for (t0 = time_ms(); !(OTG(HPRT) & HP_ENA) && time_ms() - t0 < 100u; )
         cpu_wait_tick();
@@ -639,7 +661,7 @@ static int enumerate(void)
         log_printf("usbout: a low-speed device: not audio");
         return -1;
     }
-    delay_ms(20);
+    delay_ms(T_RSTRCY_MS);                           /* reset recovery */
     s.addr = 0;
     s.mps0 = 64;
     if (get_desc(1, 0, 0, dd, 8) < 8)
@@ -648,7 +670,7 @@ static int enumerate(void)
     if (ctrl(0x00, 5, 1, 0, 0, NULL) < 0)
         return -1;
     s.addr = 1;
-    delay_ms(5);
+    delay_ms(T_DSETADDR_MS);                         /* SET_ADDRESS recovery */
     if (get_desc(1, 0, 0, dd, 18) < 18)
         return -1;
     if (get_desc(2, 0, 0, s_cfg, 9) < 9)
@@ -670,9 +692,17 @@ static int enumerate(void)
     parse((uint32_t)n);
     if (!s.nalts) {
         log_printf("usbout: no stereo PCM playback interface: not a USB audio output");
+        snprintf(s.st.reason, sizeof s.st.reason, "not a USB audio output");
         return -2;
     }
     entities();
+    s.st.max_power_ma = s_cfg[8] * 2u;               /* bMaxPower, 2 mA units (USB 2.0 9.6.3) */
+    if (s.st.max_power_ma > s.budget_ma) {
+        snprintf(s.st.reason, sizeof s.st.reason, "needs %u mA, the port gives %u", (unsigned)s.st.max_power_ma,
+                 (unsigned)s.budget_ma);
+        log_printf("usbout: not configured: %s", s.st.reason);
+        return -2;
+    }
     if (ctrl(0x00, 9, s.cfg_value, 0, 0, NULL) < 0)
         return -1;
     s.st.bits_max = 0;
@@ -789,9 +819,30 @@ int usb_out_set_format(uint32_t rate, uint32_t bits)
     if (s.a)
         return 0;
     if (s.st.uac == 2 && s.clock) {
+        uint16_t idx = (uint16_t)(s.clock << 8 | s.ac_if);
+        uint32_t t0 = time_ms(), got;
+
         b[0] = (uint8_t)rate; b[1] = (uint8_t)(rate >> 8); b[2] = (uint8_t)(rate >> 16); b[3] = (uint8_t)(rate >> 24);
-        if (ctrl(0x21, 1, 0x0100, (uint16_t)(s.clock << 8 | s.ac_if), 4, b) < 0)
+        if (ctrl(0x21, 1, 0x0100, idx, 4, b) < 0)
             return -3;
+        for (;;) {                                   /* the clock locked (CS_CLOCK_VALID; absent: STALL) */
+            if (ctrl(0xA1, 1, 0x0200, idx, 1, b) < 1 || b[0])
+                break;
+            if (time_ms() - t0 > T_CLKVALID_MS) {
+                log_printf("usbout: the device's clock is not valid %u ms after %u Hz", T_CLKVALID_MS, (unsigned)rate);
+                return -3;
+            }
+            delay_ms(5);
+        }
+        if (ctrl(0xA1, 1, 0x0100, idx, 4, b) == 4) {  /* what it runs at now */
+            got = b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16 | (uint32_t)b[3] << 24;
+            if (got != rate) {
+                log_printf("usbout: asked for %u Hz, the device runs %u Hz", (unsigned)rate, (unsigned)got);
+                return -3;
+            }
+        }
+        if (time_ms() - t0 > 20u)
+            log_printf("usbout: the clock was valid after %u ms", (unsigned)(time_ms() - t0));
     }
     if (ctrl(0x01, 11, best->alt, best->ifn, 0, NULL) < 0)
         return -3;
@@ -905,7 +956,25 @@ int usb_out_set_volume(int db)
 
 /* ---- the session ---------------------------------------------------------------- */
 
-int usb_out_start(int supply)
+/* The 5 V for the device: the PHY's DRVVBUS, GPIO2.1 if the setting says so (the player then
+ * runs that path the other way: charging off, as stock's "power only" state), and the core's
+ * port power. */
+static void port_power(int on)
+{
+    if (on) {
+        RK_GRF[0xB8 / 4] = 0x00100010u;
+        if (s.supply == USB_OUT_SUPPLY_GPIO21)
+            board_usb_supply(BOARD_SUPPLY_VBUS);
+        OTG(HPRT) = (OTG(HPRT) & ~HP_W1C) | HP_PWR;
+    } else {
+        OTG(HPRT) &= ~(HP_W1C | HP_PWR);
+        RK_GRF[0xB8 / 4] = 0x00100000u;
+        if (s.supply == USB_OUT_SUPPLY_GPIO21)
+            board_usb_supply(BOARD_SUPPLY_NORMAL);
+    }
+}
+
+int usb_out_start(int supply, uint32_t budget_ma)
 {
     uint32_t depth;
 
@@ -914,16 +983,20 @@ int usb_out_start(int supply)
     memset(&s, 0, sizeof s);
     s.gain = 32768;
     s.supply = supply;
+    s.budget_ma = budget_ma;
     usb_dwc2_phy_on();
     RK_GRF[0xB8 / 4] = 0x00060006u;                  /* D+/D- 15k pull-downs (host) */
     RK_GRF[0xB4 / 4] = 0x06000200u;                  /* IDDIG from software, 0: A-device */
+    /* host disconnect detection at 600 mV (USBPHY_CON7[14:11] = 1): USB 2.0 7.1.7.3 wants the HS
+     * disconnect envelope detector between 525 and 625 mV; the PHY's default code is 650 mV */
+    RK_GRF[0x9C / 4] = 0x78000000u | 0x0800u;
     for (uint32_t i = 0; i < 10000u && !(OTG(GRSTCTL) & 0x80000000u); i++)
         rk_delay_us(1);
     OTG(GRSTCTL) |= 1u;                              /* core soft reset */
     for (uint32_t i = 0; i < 10000u && (OTG(GRSTCTL) & 1u); i++)
         rk_delay_us(1);
     OTG(PCGCCTL) = 0;
-    OTG(GUSBCFG) = (OTG(GUSBCFG) & ~(1u << 30)) | 1u << 29;   /* ForceHstMode */
+    OTG(GUSBCFG) = (OTG(GUSBCFG) & ~(1u << 30)) | 1u << 29;   /* ForceHstMode (25 ms to take effect) */
     delay_ms(25);
     OTG(HCFG) &= ~7u;                                /* 30/60 MHz PHY clock, high speed allowed */
     depth = OTG(GHWCFG3) >> 16;
@@ -950,19 +1023,14 @@ int usb_out_start(int supply)
     OTG(HAINTMSK) = 0xFu;
     OTG(GINTSTS) = 0xFFFFFFFFu;
     OTG(GINTMSK) = GI_RXFLVL | GI_PRTINT | GI_HCHINT | GI_DISCONN;
-    /* VBUS: the PHY's DRVVBUS always; GPIO2.1 too if the setting says so (the player then runs
-     * that path the other way: charging off, as stock's "power only" state) */
-    RK_GRF[0xB8 / 4] = 0x00100010u;
-    if (supply == USB_OUT_SUPPLY_GPIO21)
-        board_usb_supply(BOARD_SUPPLY_VBUS);
-    OTG(HPRT) = (OTG(HPRT) & ~HP_W1C) | HP_PWR;
+    port_power(1);
     usb_irq_hook = host_irq;
     OTG(GAHBCFG) |= 1u;
     NVIC_ISER0 = 1u << USB_IRQ;
     s.started = 1;
     s.st.state = USB_OUT_WAIT;
-    log_printf("usbout: host on, VBUS from %s; FIFO %u words", supply == USB_OUT_SUPPLY_GPIO21 ? "GPIO2.1 + DRVVBUS" :
-               "DRVVBUS + port power", (unsigned)depth);
+    log_printf("usbout: host on, VBUS from %s, budget %u mA; FIFO %u words", supply == USB_OUT_SUPPLY_GPIO21 ?
+               "GPIO2.1 + DRVVBUS" : "DRVVBUS + port power", (unsigned)budget_ma, (unsigned)depth);
     return 0;
 }
 
@@ -976,7 +1044,7 @@ static void drop(const char *why)
     s.addr = 0;
     s.conn_ms = 0;
     s.disconnected = 0;
-    log_printf("usbout: %s", why);
+    log_printf("usbout: %s (link: %u errors, %u late packets)", why, (unsigned)s.st.errors, (unsigned)s.st.late);
 }
 
 void usb_out_stop(void)
@@ -987,15 +1055,35 @@ void usb_out_stop(void)
     NVIC_ICER0 = 1u << USB_IRQ;
     OTG(GAHBCFG) &= ~1u;
     usb_irq_hook = 0;
-    OTG(HPRT) &= ~(HP_W1C | HP_PWR);
-    RK_GRF[0xB8 / 4] = 0x00160000u;                  /* DRVVBUS, pull-downs off */
-    if (s.supply == USB_OUT_SUPPLY_GPIO21)
-        board_usb_supply(BOARD_SUPPLY_NORMAL);
+    port_power(0);
+    RK_GRF[0xB8 / 4] = 0x00060000u;                  /* pull-downs off */
+    RK_GRF[0x9C / 4] = 0x78000000u | 0x6800u;        /* disconnect threshold: the PHY's default code */
     OTG(GUSBCFG) &= ~(1u << 29);
+    OTG(HCFG) &= ~4u;
     RK_GRF[0xB4 / 4] = 0x06000000u;                  /* IDDIG from the PHY */
     usb_dwc2_phy_off();
     s.started = 0;
     s.st.state = USB_OUT_OFF;
+}
+
+/* The port's supply failed (overcurrent, or VBUS collapsed under the device): power off,
+ * OC_RETRY_MS, then on again; after OC_TRIES the port stays off (until host mode restarts). */
+static void supply_fault(const char *why)
+{
+    s.st.overcurrents++;
+    s.oc_count++;
+    drop(why);
+    port_power(0);
+    s.port_off = 1;
+    s.oc_at = time_ms();
+    s.vbus_low = s.vbus_seen = 0;
+    s.st.state = USB_OUT_WAIT;
+    memset(s.st.name, 0, sizeof s.st.name);
+    if (s.oc_count > OC_TRIES) {
+        snprintf(s.st.reason, sizeof s.st.reason, "port off: %s %u times", why, (unsigned)s.oc_count);
+        log_printf("usbout: %s", s.st.reason);
+        s.st.state = USB_OUT_ERROR;
+    }
 }
 
 int usb_out_poll(void)
@@ -1006,10 +1094,39 @@ int usb_out_poll(void)
         return USB_OUT_OFF;
     p = OTG(HPRT);
     now = time_ms();
+    if (s.overcurrent) {
+        s.overcurrent = 0;
+        supply_fault("overcurrent");
+        return s.st.state;
+    }
+    if (s.port_off) {
+        if (s.st.state == USB_OUT_ERROR || now - s.oc_at < OC_RETRY_MS)
+            return s.st.state;
+        s.port_off = 0;
+        port_power(1);
+        log_printf("usbout: port power on again (try %u of %u)", (unsigned)s.oc_count + 1u, OC_TRIES + 1u);
+        return s.st.state;
+    }
+    /* VBUS under a device (B-session valid, GRF 0x500100E8 bit 1, the PHY's comparator): once seen
+     * up, three ticks down in a row is a collapse (the supply cannot carry the device) */
+    if (s.st.state == USB_OUT_READY) {
+        if (RK_GRF[0xE8 / 4] & 2u) {
+            s.vbus_seen = 1;
+            s.vbus_low = 0;
+        } else if (s.vbus_seen && ++s.vbus_low >= 3u) {
+            supply_fault("VBUS collapsed");
+            return s.st.state;
+        }
+    }
     if (s.st.state != USB_OUT_WAIT && (s.disconnected || !(p & HP_CONN))) {
         drop("device unplugged");
         s.st.state = USB_OUT_WAIT;
+        s.oc_count = 0;
         memset(s.st.name, 0, sizeof s.st.name);
+        if (s.force_fs) {                            /* the next device: high speed again */
+            s.force_fs = 0;
+            OTG(HCFG) &= ~4u;
+        }
         return s.st.state;
     }
     if (s.st.state == USB_OUT_WAIT) {
@@ -1017,9 +1134,25 @@ int usb_out_poll(void)
             s.conn_ms = 0;
         } else if (!s.conn_ms) {
             s.conn_ms = now | 1u;
-        } else if (now - s.conn_ms >= 100u) {        /* connect debounce, then reset and enumerate */
-            int r = enumerate();
+        } else if (now - s.conn_ms >= T_ATTDB_MS) {  /* connect debounce, then reset and enumerate */
+            uint32_t e0 = s.st.errors;
+            int r;
 
+            memset(s.st.reason, 0, sizeof s.st.reason);
+            r = enumerate();
+            if (r == -1 && s.st.high_speed && !s.force_fs && (OTG(HPRT) & HP_CONN)) {
+                /* high speed did not enumerate: the link (the cable, the board's routing) may not
+                 * carry 480 Mb/s; full speed (12 Mb/s) has far more margin (USB 2.0 7.1) */
+                log_printf("usbout: high speed failed (%u transaction errors): full speed instead",
+                           (unsigned)(s.st.errors - e0));
+                s.force_fs = 1;
+                s.st.full_speed_fallback = 1;
+                OTG(HCFG) |= 4u;                     /* FSLSSupp: no chirp, full speed only */
+                r = enumerate();
+            }
+            if (r == -1 && !s.st.reason[0])
+                snprintf(s.st.reason, sizeof s.st.reason, "enumeration failed (%u errors)",
+                         (unsigned)(s.st.errors - e0));
             s.st.state = r == 0 ? USB_OUT_READY : r == -2 ? USB_OUT_UNSUPPORTED : USB_OUT_ERROR;
             if (r == 0)
                 usb_out_set_volume(0);

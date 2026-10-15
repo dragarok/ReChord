@@ -42,10 +42,15 @@ typedef struct {
     /* the stream */
     uint32_t rate, bits, subslot; /* bits 0 = not streaming */
     uint32_t packets, late, errors, fb_q16;   /* fb_q16: frames per packet from the feedback */
+    uint32_t max_power_ma;        /* the device's bMaxPower */
+    uint32_t overcurrents;        /* the port's overcurrent / VBUS collapse events */
+    int full_speed_fallback;      /* high speed failed: enumerated at full speed instead */
+    char reason[40];              /* why UNSUPPORTED or ERROR */
 } usb_out_status_t;
 
-/* Host mode on: PHY, host role, VBUS (supply: USB_OUT_SUPPLY_*), port power. */
-int usb_out_start(int supply);
+/* Host mode on: PHY, host role, VBUS (supply: USB_OUT_SUPPLY_*), port power. budget_ma: what
+ * the port can give a device (a device whose bMaxPower is above it is not configured). */
+int usb_out_start(int supply, uint32_t budget_ma);
 void usb_out_stop(void);
 int usb_out_active(void);          /* between start and stop (VBUS is the player's own) */
 /* Every main-loop tick: a device plugged in is reset and enumerated (blocking, ~0.3 s),

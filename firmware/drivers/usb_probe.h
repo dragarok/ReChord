@@ -27,6 +27,11 @@ typedef struct {
 
 #define USB_PROBE_STEPS 8
 
+/* The USB PHY's configuration registers as the probe found them after bring-up (GRF
+ * USBPHY_CON0..11 at 0x50010080, UOC_CON0..2 at 0x500100B0): what the silicon holds in the
+ * fields no firmware writes (ODT compensation, driver strength, HS eye height). */
+extern uint32_t usb_probe_phy[15];
+
 /* Runs every step (about 1.5 s). Returns the number of steps, or -1 if VBUS is already
  * present (a cable: the probe needs the port free; an earphone is fine). */
 int usb_probe_run(usb_probe_step_t *out, void (*progress)(int step, const char *name));

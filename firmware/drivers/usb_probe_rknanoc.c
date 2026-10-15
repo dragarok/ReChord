@@ -27,6 +27,8 @@ enum { CON6 = 0x98 / 4, CON7 = 0x9C / 4, UOC1 = 0xB4 / 4, UOC2 = 0xB8 / 4, STATU
 
 static const uint32_t k_gpio[3] = { 0x40160000u, 0x40170000u, 0x50030000u };
 
+uint32_t usb_probe_phy[15];
+
 /* One comparator's trip pattern over its eight reference codes. */
 static uint8_t sweep(unsigned reg, unsigned shift, unsigned bit)
 {
@@ -115,6 +117,8 @@ int usb_probe_run(usb_probe_step_t *out, void (*progress)(int step, const char *
         return -1;
     usb_dwc2_phy_on();                               /* (the comparators need the PHY up) */
     OTG(DCTL) |= 2u;                                 /* no D+ pull-up of our own */
+    for (unsigned i = 0; i < 15u; i++)
+        usb_probe_phy[i] = RK_GRF[(0x80u + 4u * i) / 4u] & 0xFFFFu;
     g21 = gpio_get(2, 1);
     g20 = gpio_get(2, 0);
 #define STEP(name, host) do { if (progress) progress(n, name); measure(&out[n++], name, host); } while (0)

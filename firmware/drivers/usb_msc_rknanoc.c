@@ -587,15 +587,23 @@ static void hw_on(void)
     cru_reset(2, 0);
     cru_reset(0, 0);
     rk_delay_us(5);
-    RK_GRF[0xB8 / 4] = 0x00010000u;                  /* USB PHY bring-up */
-    RK_GRF[0xB4 / 4] = 0x000E0002u;
-    RK_GRF[0x98 / 4] = 0x00040004u;
-    RK_GRF[0xB4 / 4] = 0x00010000u;
+    /* PHY out of suspend: the SDK's Grf_otgphy_suspend(0) (driver/GRF/grf.c), as stock does it */
+    RK_GRF[0xB8 / 4] = 0x00010000u;                  /* UOC_CON2: PLL on in suspend off (COMMONON) */
+    RK_GRF[0xB4 / 4] = 0x000E0002u;                  /* UOC_CON1: SUSPEND_N normal, OPMODE 0 */
+    RK_GRF[0x98 / 4] = 0x00040004u;                  /* USBPHY_CON6: differential receiver on */
+    RK_GRF[0xB4 / 4] = 0x00010000u;                  /* UOC_CON1: the controller drives the PHY */
     rk_delay_us(10200);
-    RK_GRF[0x88 / 4] = 0x0C000C00u;
-    RK_GRF[0x84 / 4] = 0x1FE00003u;
-    RK_GRF[0x8C / 4] = 0x001C0014u;
-    RK_GRF[0x80 / 4] = 0x00070004u;
+    /* The PHY's analog settings: exactly the register state stock MINIV390 and HIFIEC39 leave
+     * (FUN_03053006 = the SDK's Grf_Otgphy_Driver_Confige, literal pool 0x03053114), the
+     * configuration FiiO ships and runs at high speed on this board. Note the SDK function is
+     * mis-coded against its own comment: its CON1 write is 0xE01F0003, i.e. CON1[4:0] = 00011
+     * (bit 0: squelch trigger bit 3) and CON1[15:13] (HS eye height, low bits) = 000.
+     * RECHO 0.9.2 writes 0x1FE00003 there instead (clears CON1[12:5], leaves [4:0] and [15:13]);
+     * earlier ReChord copied that. docs/USB_COMPLIANCE.md section 1. */
+    RK_GRF[0x88 / 4] = 0x0C000C00u;                  /* CON2[11:10] = 11: auto compensation bypass (ODT) */
+    RK_GRF[0x84 / 4] = 0xE01F0003u;                  /* CON1: as above */
+    RK_GRF[0x8C / 4] = 0x001C0014u;                  /* CON3[4:2] = 5: bias current reference 425 mV */
+    RK_GRF[0x80 / 4] = 0x00070004u;                  /* CON0[2:0] = 4: HS eye-diagram adjust outside chirp */
     gpio_out(1, 4, 0);
     gpio_out(2, 0, 1);
     gpio_out(2, 2, 0);

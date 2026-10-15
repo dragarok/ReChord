@@ -684,6 +684,12 @@ static void usb_probe_menu(void)
             snprintf(dev + strlen(dev), sizeof dev - strlen(dev), "%s%s", dev[0] ? ", " : "", s->name);
     }
     if (n > 0) {
+        log_printf("probe: PHY CON0-11 %04x %04x %04x %04x %04x %04x %04x %04x %04x %04x %04x %04x, UOC %04x %04x %04x",
+                   (unsigned)usb_probe_phy[0], (unsigned)usb_probe_phy[1], (unsigned)usb_probe_phy[2],
+                   (unsigned)usb_probe_phy[3], (unsigned)usb_probe_phy[4], (unsigned)usb_probe_phy[5],
+                   (unsigned)usb_probe_phy[6], (unsigned)usb_probe_phy[7], (unsigned)usb_probe_phy[8],
+                   (unsigned)usb_probe_phy[9], (unsigned)usb_probe_phy[10], (unsigned)usb_probe_phy[11],
+                   (unsigned)usb_probe_phy[12], (unsigned)usb_probe_phy[13], (unsigned)usb_probe_phy[14]);
         snprintf(buf, sizeof buf, "VBUS up: %s", up[0] ? up : "none");
         line(1 + n, buf);
         snprintf(buf, sizeof buf, "device: %s", dev[0] ? dev : "none");
@@ -977,7 +983,7 @@ static void usb_out_tick(void)
     int st, playing;
 
     if (g_cfg.usb_out && !usb_out_active() && !usb_cable() && !s_cable)
-        usb_out_start(g_cfg.usb_vbus);
+        usb_out_start(g_cfg.usb_vbus, g_cfg.usb_out_ma);
     else if (!g_cfg.usb_out && usb_out_active())
         usb_out_stop();
     st = usb_out_poll();
@@ -995,8 +1001,8 @@ static void usb_out_tick(void)
     } else if (last == USB_OUT_READY) {
         log_printf("ui: USB-C out: gone, back to the jack");
         audio_set_output(0);                      /* (playing stopped: nothing plays aloud by surprise) */
-    } else if (st == USB_OUT_UNSUPPORTED) {
-        log_printf("ui: USB-C out: not a USB audio output");
+    } else if (st == USB_OUT_UNSUPPORTED || st == USB_OUT_ERROR) {
+        log_printf("ui: USB-C out: %s", usb_out_status()->reason);
     }
     last = st;
     ui_invalidate_all();

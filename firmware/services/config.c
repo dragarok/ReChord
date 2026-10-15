@@ -40,7 +40,8 @@ void config_defaults(void)
     g_cfg.dac_mhz = 50;                      /* the DAC needs ~7-12 % of it (QEMU profile) */
     g_cfg.dac_charge = CFG_DAC_BATTERY;
     g_cfg.usb_out = 0;                       /* until the board's VBUS supply is known (USB-C probe) */
-    g_cfg.usb_vbus = 0;      /* stock's default: the phone's battery is not the player's charger */
+    g_cfg.usb_vbus = 0;
+    g_cfg.usb_out_ma = 500;      /* stock's default: the phone's battery is not the player's charger */
 }
 
 void config_reset(void)
@@ -93,6 +94,8 @@ static void set(const char *k, const char *v)
         g_cfg.cpu = (uint8_t)i;
     else if (!strcmp(k, "usb_out") && (i = pick(v, k_off_on, 2)) >= 0)
         g_cfg.usb_out = (uint8_t)i;
+    else if (!strcmp(k, "usb_out_ma") && (i = atoi(v)) >= 100 && i <= 500)
+        g_cfg.usb_out_ma = (uint16_t)i;
     else if (!strcmp(k, "usb_vbus") && (i = pick(v, k_usb_vbus, 2)) >= 0)
         g_cfg.usb_vbus = (uint8_t)i;
     else if (!strcmp(k, "dac_charge") && (i = pick(v, k_dac_charge, 3)) >= 0)
@@ -173,12 +176,12 @@ static int text_of(char *t, unsigned long cap)
     return snprintf(t, cap,
                     "# ReChord settings (RECHO's format): key=value, one per line. Unknown keys are ignored.\n"
                     "play=%s\nbrightness=%u\nscreen_off=%s\nauto_off=%s\nusb=%s\nresume=%s\nstrip=%s\n"
-                    "tags=%s\ncpu=%s\ndac_mhz=%u\ndac_charge=%s\nusb_out=%s\nusb_vbus=%s\nvolume=%s\n"
+                    "tags=%s\ncpu=%s\ndac_mhz=%u\ndac_charge=%s\nusb_out=%s\nusb_vbus=%s\nusb_out_ma=%u\nvolume=%s\n"
                     "# where the browser and the player were\nbrowse=%s\ncursor=%u\n%s%s%s",
                     k_play[g_cfg.play % 4u], g_cfg.brightness, so, ao, k_usb[g_cfg.usb % 4u],
                     k_resume[g_cfg.resume % 3u], k_off_on[g_cfg.strip & 1u], k_off_on[g_cfg.tags & 1u],
                     k_cpu[g_cfg.cpu & 1u], g_cfg.dac_mhz, k_dac_charge[g_cfg.dac_charge % 3u],
-                    k_off_on[g_cfg.usb_out & 1u], k_usb_vbus[g_cfg.usb_vbus & 1u], vol, g_cfg.browse, g_cfg.cursor,
+                    k_off_on[g_cfg.usb_out & 1u], k_usb_vbus[g_cfg.usb_vbus & 1u], g_cfg.usb_out_ma, vol, g_cfg.browse, g_cfg.cursor,
                     g_cfg.track[0] ? "track=" : "", g_cfg.track, g_cfg.track[0] ? "\n" : "");
 }
 
