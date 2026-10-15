@@ -24,6 +24,7 @@
 #define PLAYER_VOL_H    6
 
 static char     s_title[PLAYER_TITLE_MAX];
+static char     s_artist[PLAYER_TITLE_MAX];   /* from the tags; "" = none */
 static uint32_t s_duration_s;
 static uint32_t s_position_s;
 static int      s_volume_db;   /* -60..0 */
@@ -83,12 +84,15 @@ static void player_screen_draw(void)
     snprintf(line, sizeof(line), "%s", s_title);
     display_draw_text(THEME_PAD, 32 + THEME_TEXT_YOFF, line,
                       THEME_COLOR_FG, THEME_COLOR_BG);
+    if (s_artist[0])
+        display_draw_text(THEME_PAD, 46 + THEME_TEXT_YOFF, s_artist,
+                          THEME_COLOR_DIM, THEME_COLOR_BG);
 
     /* play state (or a status line: unsupported file, no renderer, ...) */
     {
         const char *state_line = s_status[0] ? s_status
                                              : (s_playing ? "Playing" : "Paused");
-        display_draw_text(THEME_PAD, 48 + THEME_TEXT_YOFF, state_line,
+        display_draw_text(THEME_PAD, (s_artist[0] ? 61 : 48) + THEME_TEXT_YOFF, state_line,
                           s_status[0] ? THEME_COLOR_WARM
                                       : (s_playing ? THEME_COLOR_WARM
                                                    : THEME_COLOR_DIM),
@@ -170,6 +174,7 @@ static void player_screen_on_enter(void)
     player_screen_set_track(ti.title,
                             ti.duration_ms > 0
                                 ? (uint32_t)(ti.duration_ms / 1000) : 0);
+    player_screen_set_artist(ti.artist);
     player_screen_set_volume(player_get_volume());
     player_screen_set_playing(player_get_state() == PLAYER_PLAYING);
 }
@@ -187,6 +192,12 @@ void player_screen_set_track(const char *title, uint32_t duration_s)
     snprintf(s_title, sizeof(s_title), "%s", title ? title : "");
     s_duration_s = duration_s;
     s_position_s = 0;
+    ui_invalidate_all();
+}
+
+void player_screen_set_artist(const char *artist)
+{
+    snprintf(s_artist, sizeof(s_artist), "%s", artist ? artist : "");
     ui_invalidate_all();
 }
 
@@ -245,6 +256,8 @@ void player_screen_refresh(void)
     if (ti.title[0] && (strncmp(ti.title, s_title, sizeof s_title - 1) ||
                         (ti.duration_ms > 0 && (uint32_t)(ti.duration_ms / 1000) != s_duration_s)))
         player_screen_set_track(ti.title, ti.duration_ms > 0 ? (uint32_t)(ti.duration_ms / 1000) : 0);
+    if (strcmp(ti.artist, s_artist))
+        player_screen_set_artist(ti.artist);
     pos = (uint32_t)(player_get_position_ms() / 1000);
     if (pos != s_position_s)
         player_screen_set_position(pos);

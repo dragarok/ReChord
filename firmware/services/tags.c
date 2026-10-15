@@ -500,6 +500,162 @@ static void wav(ctx_t *c)
     }
 }
 
+/* ---- MP4 (M4A, ALAC): moov/udta/meta/ilst ------------------------------ */
+
+/* Box [p, end) children: the first child of type t, as its body [*b, *e). */
+static int mp4_child(ctx_t *c, uint32_t p, uint32_t end, const char *t, uint32_t *b, uint32_t *e)
+{
+    const uint8_t *h;
+
+    while (end - p >= 8u && (h = get(c, p, 16)) != 0) {
+        uint32_t n = be32(h), hl = 8;
+
+        if (n == 1u) {                 /* 64-bit size: only boxes under 4 GiB are walked */
+            if (end - p < 16u || be32(h + 8))
+                return -1;
+            n = be32(h + 12);
+            hl = 16;
+        } else if (n == 0u) {
+            n = end - p;               /* to the end */
+        }
+        if (n < hl || n > end - p)
+            return -1;
+        if (!memcmp(h + 4, t, 4)) {
+            *b = p + hl;
+            *e = p + n;
+            return 0;
+        }
+        p += n;
+    }
+    return -1;
+}
+
+static void mp4(ctx_t *c)
+{
+    static const char k_item[4][5] = { "\xa9nam", "\xa9" "ART", "\xa9" "alb", "trkn" };
+    uint32_t b, e, p, end;
+    const uint8_t *h;
+
+    if (mp4_child(c, 0, c->size, "moov", &b, &e) || mp4_child(c, b, e, "udta", &b, &e) ||
+        mp4_child(c, b, e, "meta", &b, &e) || e - b < 4u ||
+        mp4_child(c, b + 4u, e, "ilst", &p, &end))   /* meta is a full box: 4 bytes of version/flags */
+        return;
+    c->src = TAGS_SRC_MP4;
+    while (c->have != ALL && end - p >= 8u && (h = get(c, p, 8)) != 0) {
+        uint32_t n = be32(h), db, de;
+        int f = -1;
+
+        if (n < 8u || n > end - p)
+            return;
+        for (int i = 0; i < 4; i++)
+            if (!memcmp(h + 4, k_item[i], 4))
+                f = i;
+        /* the value: a "data" box, 8 bytes of type and locale, then the bytes */
+        if (f >= 0 && !mp4_child(c, p + 8u, p + n, "data", &db, &de) && de - db > 8u) {
+            uint32_t len = min32(de - db - 8u, TEXT_MAX);
+            const uint8_t *v = get(c, db + 8u, len);
+
+            if (v && f == F_TRACK && len >= 4u)
+                set_track(c, be16(v + 2));                 /* 0, track, total */
+            else if (v && f != F_TRACK)
+                set(c, f, v, len, E_UTF8);
+        }
+        p += n;
+    }
+}
+
+/* ---- Ogg (Vorbis, Opus): the comment header, the second packet ----------- */
+
+/* The packet can span pages: its pieces (file offset, length) in order, read
+ * through a virtual offset space so vorbis() can walk it as one block. */
+#define OGG_SPANS 24u
+
+typedef struct {
+    tags_read_at_t rd;
+    void *u;
+    uint32_t n, off[OGG_SPANS], len[OGG_SPANS];
+} ogg_map_t;
+
+static uint32_t ogg_rd(void *u, uint32_t off, void *buf, uint32_t n)
+{
+    ogg_map_t *m = (ogg_map_t *)u;
+    uint32_t got = 0, base = 0;
+
+    for (uint32_t i = 0; i < m->n && got < n; base += m->len[i++]) {
+        uint32_t want, r;
+
+        if (off + got >= base + m->len[i])
+            continue;
+        want = min32(n - got, base + m->len[i] - (off + got));
+        r = m->rd(m->u, m->off[i] + (off + got - base), (uint8_t *)buf + got, want);
+        got += r;
+        if (r != want)
+            break;
+    }
+    return got;
+}
+
+static void ogg(ctx_t *c)
+{
+    ogg_map_t m;
+    uint32_t pos = 0, packet = 0, total = 0, serial = 0;
+    int pages = 0;
+    const uint8_t *h;
+
+    m.rd = c->rd;
+    m.u = c->u;
+    m.n = 0;
+    while (packet < 2u && pages++ < 64 && (h = get(c, pos, 27)) != 0 && !memcmp(h, "OggS", 4)) {
+        uint32_t nseg = h[26], data, sz = 0;
+        const uint8_t *lace;
+
+        if (pages == 1)
+            serial = le32(h + 14);
+        else if (le32(h + 14) != serial)
+            break;                     /* another logical stream */
+        if (!(lace = get(c, pos + 27u, nseg)))
+            break;
+        data = pos + 27u + nseg;
+        for (uint32_t i = 0; i < nseg; sz += lace[i++]) {
+            if (lace[i] > c->size - data || sz > c->size - data - lace[i]) {
+                packet = 2u;           /* the page runs past the end of the file */
+                break;
+            }
+            if (packet == 1u && lace[i]) {             /* a piece of the comment packet */
+                if (m.n && m.off[m.n - 1] + m.len[m.n - 1] == data + sz)
+                    m.len[m.n - 1] += lace[i];
+                else if (m.n < OGG_SPANS) {
+                    m.off[m.n] = data + sz;
+                    m.len[m.n++] = lace[i];
+                } else {
+                    packet = 2u;       /* enough of it (a large cover follows the text) */
+                }
+                if (packet == 1u)
+                    total += lace[i];
+            }
+            if (packet < 2u && lace[i] < 255u)
+                packet++;
+        }
+        pos = data + sz;
+    }
+    if (!m.n)
+        return;
+    /* the packet: "\x03vorbis" or "OpusTags", then the Vorbis comment structure */
+    c->rd = ogg_rd;
+    c->u = &m;
+    c->size = total;
+    c->woff = c->wlen = 0;
+    if ((h = get(c, 0, 8)) != 0 && (!memcmp(h, "\x03vorbis", 7) || !memcmp(h, "OpusTags", 8))) {
+        uint32_t skip = h[0] == 3 ? 7u : 8u;
+
+        vorbis(c, skip, total);
+        if (c->out->found & TAGS_SRC_VORBIS)
+            c->out->found = (uint8_t)((c->out->found & ~TAGS_SRC_VORBIS) | TAGS_SRC_OGG);
+    }
+    c->rd = m.rd;
+    c->u = m.u;
+}
+
 int tags_read(tags_read_at_t rd, void *u, uint32_t size, int kind, tag_info_t *out)
 {
     ctx_t c;
@@ -514,6 +670,10 @@ int tags_read(tags_read_at_t rd, void *u, uint32_t size, int kind, tag_info_t *o
     c.src = 0;
     if (kind == TAGS_WAV) {
         wav(&c);
+    } else if (kind == TAGS_MP4) {
+        mp4(&c);
+    } else if (kind == TAGS_OGG) {
+        ogg(&c);
     } else {
         uint32_t pos = 0, n;
 

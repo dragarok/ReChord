@@ -46,6 +46,7 @@
 
 #include "panel_io.h"
 #include "clock.h"
+#include "rknanoc.h"
 
 /* GPIO port register block (see file header). */
 typedef struct {
@@ -98,45 +99,73 @@ static void iomux_gpio(unsigned port, unsigned pin)
         0x30000u << ((pin & 7u) * 2u);
 }
 
-/* Backlight full on: GPIO2.4 as GPIO output high (reference 0x030514c0;
- * its PWM dimming at 0x400F0000 is 0x03051dd8, not ported). */
+/* Backlight (RECHO 0x03051dd8, docs/RECHO_POWER_CFG.md C.5): PWM0 at
+ * 0x400F0000 (CNT, PERIOD, DUTY, CTRL) on GPIO2.4. duty <= 0: off (GPIO low);
+ * >= 100: full on (GPIO high, no PWM); else PWM at 10 kHz, or (100 - duty) kHz
+ * when that is lower, negative polarity (the light is on for 100 - duty %). */
+#define PWM0 ((volatile uint32_t *)0x400F0000u)
+void backlight_set(int duty)
+{
+    PWM0[3] = 0;
+    iomux_gpio(2, 4);
+    if (duty <= 0 || duty >= 100) {
+        if (duty <= 0)
+            GPIO2->dr &= ~(1u << 4);
+        else
+            GPIO2->dr |= 1u << 4;
+        GPIO2->ddr |= 1u << 4;
+        return;
+    }
+    {
+        uint32_t khz = 100u - (uint32_t)duty < 10u ? 100u - (uint32_t)duty : 10u;
+        uint32_t period = clock_pclk_hz() / (khz * 1000u);
+
+        *(volatile uint32_t *)0x50010040u = 0x03000100u;   /* GPIO2.4: PWM0 */
+        cru_gate(0x90, 1);
+        cru_reset(0x17, 1);
+        delay_ms(1);
+        cru_reset(0x17, 0);
+        PWM0[2] = period * (uint32_t)duty / 100u;
+        PWM0[0] = 0;
+        PWM0[1] = period;
+        PWM0[3] = 0x00010003u;            /* enable, continuous, negative polarity */
+    }
+}
+
 void backlight_on(void)
 {
-    iomux_gpio(2, 4);
-    GPIO2->dr |= 1u << 4;
-    GPIO2->ddr |= 1u << 4;
+    backlight_set(100);
 }
 
-/* Keys (reference key scan 0x03057eb0): SAR-ADC at 0x400D0000 [0] data,
- * [1] status, [2] ctrl = ch | 0x08 power | 0x10 start, 0x40 irq status.
- * Returns the previous conversion and starts the next one on channel 1. */
+/* SAR-ADC at 0x400D0000: [0] data, [1] status, [2] ctrl = ch | 0x08 power |
+ * 0x10 start, 0x40 done. Scanned as RECHO does (0x03057eb0), one conversion
+ * per call (once per 10 ms main-loop pass): channel 1 (the key ladder) three
+ * times out of four, the fourth goes round channels 0 (battery), 2, 3. */
 #define ADC ((volatile uint32_t *)0x400D0000u)
+static int s_adc[4] = { -1, 1023, 1023, 1023 };
+static unsigned s_adc_ch = 8u, s_adc_n;           /* channel converting; 8 = none yet */
+
 int keys_adc(void)
 {
-    int v = (int)(ADC[0] & 0x3FFu);
+    static const uint8_t k_other[3] = { 0, 2, 3 };
+    unsigned ch;
 
+    if (s_adc_ch < 8u) {
+        if (!(ADC[2] & 0x40u))
+            return s_adc[1];                      /* still converting: next call */
+        s_adc[s_adc_ch & 3u] = (int)(ADC[0] & 0x3FFu);
+    }
+    s_adc_n++;
+    ch = s_adc_n % 4u ? 1u : k_other[(s_adc_n / 4u) % 3u];
     ADC[2] &= ~0x10u;
-    ADC[2] = (ADC[2] & ~0x47u) | 1u | 0x18u;
-    return v;
+    ADC[2] = (ADC[2] & ~0x47u) | ch | 0x18u;
+    s_adc_ch = ch;
+    return s_adc[1];
 }
 
-/* One blocking conversion on channel ch, then channel 1 is restarted so the
- * next keys_adc() still returns a channel-1 value. -1 on timeout. */
-int keys_adc_channel(unsigned ch)
+int adc_value(unsigned ch)
 {
-    int v = -1;
-
-    ADC[2] &= ~0x10u;
-    ADC[2] = (ADC[2] & ~0x47u) | (ch & 7u) | 0x18u;
-    for (unsigned n = 0; n < 100000u; n++) {
-        if (ADC[2] & 0x40u) {
-            v = (int)(ADC[0] & 0x3FFu);
-            break;
-        }
-    }
-    ADC[2] &= ~0x10u;
-    ADC[2] = (ADC[2] & ~0x47u) | 1u | 0x18u;
-    return v;
+    return s_adc[ch & 3u];
 }
 
 /* Power key: GPIO2.5 input, 1 = pressed (reference 0x03051b2c). */

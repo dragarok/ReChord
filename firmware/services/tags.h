@@ -14,7 +14,7 @@
 #include <stdint.h>
 
 /* File kinds, from the extension. Any other value is read like TAGS_MP3. */
-enum { TAGS_MP3, TAGS_FLAC, TAGS_WAV };
+enum { TAGS_MP3, TAGS_FLAC, TAGS_WAV, TAGS_MP4, TAGS_OGG };
 
 /* tag_info_t.found: the sources that gave at least one field. */
 #define TAGS_SRC_ID3V2      0x01u   /* ID3v2 in front of the file, or the WAV "id3 " chunk */
@@ -23,6 +23,8 @@ enum { TAGS_MP3, TAGS_FLAC, TAGS_WAV };
 #define TAGS_SRC_ID3V1      0x08u
 #define TAGS_SRC_VORBIS     0x10u   /* FLAC VORBIS_COMMENT block */
 #define TAGS_SRC_RIFF       0x20u   /* WAV LIST/INFO */
+#define TAGS_SRC_MP4        0x40u   /* MP4 moov/udta/meta/ilst (iTunes) */
+#define TAGS_SRC_OGG        0x80u   /* Ogg Vorbis / Opus comment header */
 
 /* Strings are UTF-8, NUL-terminated, cut at a character boundary; "" and
  * track 0 when not found. */

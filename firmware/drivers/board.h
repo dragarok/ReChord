@@ -34,4 +34,7 @@ const char *board_name(void);
  * idle; -1 on the 8 GB board. */
 int board_adc_ch2(void);
 
+/* With USB power in: 1 = the battery is charged, 0 = charging (GPIO2.3). */
+int board_charge_done(void);
+
 #endif

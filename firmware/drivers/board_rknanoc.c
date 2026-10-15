@@ -24,7 +24,6 @@ typedef struct {
 
 #define GPIO0 ((board_gpio_t *)0x40160000u)
 #define GPIO2 ((board_gpio_t *)0x50030000u)
-#define ADC   ((volatile uint32_t *)0x400D0000u)
 
 static void iomux_gpio(unsigned port, unsigned pin)
 {
@@ -80,10 +79,18 @@ const char *board_name(void)
 int board_adc_ch2(void)
 {
 #if BOARD == BOARD_512M
-    extern int keys_adc_channel(unsigned ch);
+    extern int adc_value(unsigned ch);
 
-    return keys_adc_channel(2);
+    return adc_value(2);
 #else
     return -1;
 #endif
+}
+
+/* GPIO2.3 (RECHO and stock): with the cable in, 1 = charged, 0 = charging. */
+int board_charge_done(void)
+{
+    iomux_gpio(2, 3);
+    GPIO2->ddr &= ~(1u << 3);
+    return (int)((GPIO2->ext_porta >> 3) & 1u);
 }
