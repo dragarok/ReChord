@@ -13,17 +13,23 @@
 /* Negative results: */
 #define FWU_EIO      (-1)    /* eMMC read failed */
 #define FWU_EFS      (-2)    /* volume is not FAT32 */
-#define FWU_EFRAG    (-3)    /* image is not contiguous (copy it again) */
+#define FWU_EFRAG    (-3)    /* image in more than FWU_EXTENTS pieces (copy it again) */
 #define FWU_EFORMAT  (-4)    /* header / size / header copy mismatch */
 #define FWU_ECRC     (-5)    /* trailer CRC mismatch */
 #define FWU_EFIT     (-6)    /* larger than one firmware slot */
 #define FWU_EVERIFY  (-7)    /* read-back after write differs */
 #define FWU_EWRITE   (-8)    /* eMMC write failed */
 
+/* The pieces of the file on the volume, in file order: a host (macOS, Windows) fills free holes,
+ * so a large file is often fragmented (the user's own volume: 24 pieces for stock's 32 MiB). */
+#define FWU_EXTENTS 128
+
 typedef struct {
     char name[13];           /* "MINIV900.IMG" */
     uint8_t raw[11];         /* 8.3 directory name */
-    uint32_t lba;            /* first sector of the (contiguous) file */
+    uint32_t lba;            /* first sector of the file */
+    uint32_t n_ext;          /* pieces in ext[]; 0 = one, contiguous from lba (tests) */
+    struct { uint32_t lba, n; } ext[FWU_EXTENTS];   /* sectors */
     uint32_t size;           /* bytes */
     uint32_t fw_end;         /* bytes installed into each slot */
     uint32_t dir_lba, dir_off;

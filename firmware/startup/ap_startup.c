@@ -103,13 +103,27 @@ void ChainEntry(void)
 }
 #endif
 
+/* The entry both vector tables name: SP set to the top of the stack zone here, before any C
+ * runs, whatever the ROM (or a chained loader, or a reset through SYSRESETREQ) left in it.
+ * The reference's startup sets SP itself too. */
+void PowerOn_Entry(void) __attribute__((naked, noreturn, used));
+void PowerOn_Entry(void)
+{
+    __asm__ volatile("ldr r0, =0x03004000\n"   /* AP_INITIAL_MSP */
+                     "msr msp, r0\n"
+                     "mov r0, #0\n"
+                     "msr control, r0\n"          /* privileged, MSP in use */
+                     "isb\n"
+                     "b PowerOn_Reset\n");
+}
+
 /* ROM boot contract (verdict #19, matches reference + stock): the ROM copies
  * .data (scatter row 1, image right after row 0) to 0x03004000 and enters
  * through the vector table at its start - so .data must begin with one. */
 const uint32_t ap_ram_vectors[2]
     __attribute__((section(".data.ram_vectors"), used)) = {
     AP_INITIAL_MSP,
-    (uint32_t)&PowerOn_Reset,
+    (uint32_t)&PowerOn_Entry,
 };
 
 /* Handlers: weak aliases of Default_Handler, overridden by the drivers.
@@ -139,7 +153,7 @@ WEAK_HANDLER(GPIO0_IRQHandler);        /* 38 */
 const uint32_t ap_vectors[16 + AP_IRQS]
     __attribute__((section(".vectors"), used, aligned(256))) = {
     AP_INITIAL_MSP,                         /* 0x00 initial MSP = 0x03004000 */
-    (uint32_t)&PowerOn_Reset,               /* 0x04 Reset_Handler             */
+    (uint32_t)&PowerOn_Entry,               /* 0x04 Reset_Handler             */
     D,                                      /* 0x08 NMI                      */
     (uint32_t)&HardFault_Handler,           /* 0x0C HardFault                */
     D, D, D,                                /* MemManage, BusFault, UsageFault */

@@ -39,7 +39,7 @@
  * --gc-sections is never used on this link (see firmware/ap.mk).
  */
 
-ENTRY(PowerOn_Reset)
+ENTRY(PowerOn_Entry)
 
 MEMORY
 {

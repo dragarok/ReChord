@@ -45,11 +45,12 @@ void bootguard_fault(const uint32_t *frame, uint32_t exc)
     __asm__ volatile("dsb");
     if (n >= BOOTGUARD_MAX_CRASHES)
         board_power_off();                           /* no reset loop: off, the record kept */
-    SCB_AIRCR = 0x05FA0004u;                         /* SYSRESETREQ: the ROM boots us again */
-    __asm__ volatile("dsb");
-    for (;;)
-        ;
-}
+    SCB_AIRCR = 0x05FA0004u;                         /* SYSRESETREQ: if the chip resets, the ROM boots */
+    __asm__ volatile("dsb");                         /* us again and the record opens Recovery ... */
+    for (volatile uint32_t i = 0; i < 4000000u; i++) /* ... but a soft reset may do nothing on this */
+        ;                                            /* silicon (the 8 GB unit's verdict #24; the 512M */
+    board_power_off();                               /* ROM's own rd stayed put): then off, never a */
+}                                                    /* frozen screen (VOL+ at power-on: Recovery) */
 
 int bootguard_crashed(bootguard_rec_t *rec)
 {

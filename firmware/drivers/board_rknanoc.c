@@ -42,16 +42,25 @@ static void out(board_gpio_t *g, unsigned port, unsigned pin, int level)
     g->ddr |= 1u << pin;
 }
 
+#define REG32(a) (*(volatile uint32_t *)(a))
+
 static int s_strap = -1;              /* GPIO2.9 at boot: 0 = the 0x66666666 board */
 
 void board_early_init(void)
 {
+    REG32(0x5002004Cu) = 0xFFFF0000u;    /* PMU_SYS_REG3: no stale loader request (we are running) */
 #if BOARD == BOARD_512M
     out(GPIO0, 0, 14, 1);
     out(GPIO2, 2, 1, 1);
+    /* the GPIO2.9 strap as stock reads it (seg04 FUN_03079e36): its pull off (GRF GPIO_IO2PULL[0]
+     * bit 9, write-masked), settle, read, then the pin driven low */
     iomux_gpio(2, 9);
     GPIO2->ddr &= ~(1u << 9);
+    REG32(0x50010050u) = 0x02000000u;
+    for (volatile unsigned d = 0; d < 2000u; d++)
+        ;
     s_strap = (int)((GPIO2->ext_porta >> 9) & 1u);
+    out(GPIO2, 2, 9, 0);
     out(GPIO2, 2, 1, !s_strap);
 #endif
 }
@@ -86,8 +95,6 @@ int board_check(uint32_t emmc_sectors)
     return BOARD == BOARD_512M ? small : !small;
 }
 
-#define REG32(a) (*(volatile uint32_t *)(a))
-
 void board_reboot_rockusb(void)
 {
     __asm__ volatile("cpsid i");
@@ -113,6 +120,10 @@ void board_reboot_rockusb(void)
     GPIO2->ddr = 0;
     REG32(0x500100C4u) = 0x01000000u;                /* GRF_INTER_CON0: boot ROM at 0 */
     REG32(0xE000ED08u) = 0;                          /* VTOR */
+    REG32(0x0309FFF0u) = 0x6F6E614Eu;                /* the SDK's RebootTag "NanoCRebootFlag" */
+    REG32(0x0309FFF4u) = 0x62655243u;                /* (stock seg09 pool 0x0307D620..0x0307D630) */
+    REG32(0x0309FFF8u) = 0x46746F6Fu;
+    REG32(0x0309FFFCu) = 0x0067616Cu;
     REG32(0x5002004Cu) = 0xFFFF18AFu;                /* PMU_SYS_REG3: the loader flag */
     __asm__ volatile("dsb");
     REG32(0xE000ED0Cu) = 0x05FA0007u;                /* AIRCR: system reset */

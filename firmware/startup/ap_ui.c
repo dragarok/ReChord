@@ -173,6 +173,8 @@ static void update_prompt(void)
     r = fw_update_find(s_user, &img, update_progress);
     if (r == FWU_NONE || (r && !img.name[0]))
         return;
+    log_printf("update: %s, %u bytes in %u pieces: %s %d", img.name, (unsigned)img.size, (unsigned)img.n_ext,
+               r ? "NOT usable, error" : "valid", r);
     if (r) {
         screen("Firmware update NOT usable");
         snprintf(buf, sizeof buf, "%s: error %d", img.name, r);
@@ -198,6 +200,7 @@ static void update_prompt(void)
 
     screen("Updating - do NOT power off");
     r = fw_update_install(&img, update_progress);
+    log_printf("update: install %d", r);
     if (r) {
         snprintf(buf, sizeof buf, "Update FAILED: error %d", r);
         line(4, buf);
@@ -208,6 +211,8 @@ static void update_prompt(void)
         return;
     }
     r = fw_update_retire(&img);
+    log_printf("update: retire %d", r);
+    log_flush("update");
     snprintf(buf, sizeof buf, "Update done (cleanup %d)", r);
     line(4, buf);
     line(5, "press power to turn off, then on");
@@ -1027,7 +1032,8 @@ static void rockusb_flow(const char *why)
         line(3, "On a computer: rkdeveloptool");
         line(4, "  ld, then wl 0 MINIV390.IMG, rd");
         line(6, usb_cable() ? "rebooting into USB mode..." : "connect USB to a computer");
-        line(7, usb_cable() ? "" : "POWER: switch off instead");
+        line(7, usb_cable() ? "still here? unplug, RST, then" : "POWER: switch off instead");
+        line(8, usb_cable() ? "hold all keys + plug in USB" : "");
         display_flush_rows(0, DISPLAY_H - 1);
         if (usb_cable())
             break;
@@ -1049,15 +1055,51 @@ static int s_boot_key = KEY_NONE;
 static void boot_key_sample(void)
 {
     uint32_t t0 = time_ms(), up = 0, down = 0;
+    int lo = 1023, hi = 0;
 
     while (time_ms() - t0 < 400u) {              /* (the ADC's first readings, then 300 ms of one key) */
         int a = keys_adc();
 
+        lo = a < lo ? a : lo;
+        hi = a > hi ? a : hi;
         up = a >= 70 && a <= 183 ? up + 1u : 0u;
         down = a >= 0 && a <= 69 ? down + 1u : 0u;
         if (up >= 30u || down >= 30u) {
             s_boot_key = up >= 30u ? KEY_UP : KEY_DOWN;
+            break;
+        }
+        cpu_wait_tick();
+    }
+    log_printf("keys: at power-on the ladder read %d..%d", lo, hi);
+    if (s_boot_key != KEY_DOWN)
+        return;
+    /* VOL- leaves our firmware altogether, so a ladder that only reads low (a fault, not a
+     * finger) must not do it: the key has to stay down 2 s more, the screen counting, and
+     * letting go starts normally */
+    power_screen(1);
+    t0 = time_ms();
+    up = 0;
+    for (uint32_t shown = 0;;) {
+        uint32_t el = time_ms() - t0, left = el >= 2000u ? 0u : (2000u - el + 999u) / 1000u;
+
+        if (keys_adc() > 69) {
+            if (++up >= 5u) {                    /* (50 ms of not VOL-: let go) */
+                log_printf("keys: VOL- let go after %u ms: starting normally", (unsigned)el);
+                s_boot_key = KEY_NONE;
+                return;
+            }
+        } else {
+            up = 0;
+        }
+        if (!left)
             return;
+        if (left != shown) {
+            shown = left;
+            screen("VOL- held: USB recovery");
+            line(2, "keep holding VOL- to go on");
+            line(3, left == 2u ? "  2" : "  1");
+            line(5, "let go to start normally");
+            display_flush_rows(0, DISPLAY_H - 1);
         }
         cpu_wait_tick();
     }

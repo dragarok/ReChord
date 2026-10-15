@@ -20,7 +20,7 @@ static uint32_t s_sec[128], s_fat[128], s_fat_lba;
 #define s_blk (g_scratch)
 #define s_chk (g_scratch + BLK * 128u)
 _Static_assert(2u * BLK * 128u <= SCRATCH_WORDS, "updater buffers exceed the scratch");
-static struct { uint32_t fat, data, spc, root, nfats, fatsz; } s_fs;
+static struct { uint32_t fat, data, spc, root, nfats, fatsz, fsinfo; } s_fs;
 
 static uint32_t le16(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8; }
 static uint32_t le32(const uint8_t *p) { return le16(p) | le16(p + 2) << 16; }
@@ -144,6 +144,7 @@ static int fs_mount(uint32_t lba)
     s_fs.fatsz = le32(b + 0x24);
     s_fs.data = s_fs.fat + s_fs.nfats * s_fs.fatsz;
     s_fs.root = le32(b + 0x2C);
+    s_fs.fsinfo = le16(b + 0x30) ? lba + le16(b + 0x30) : 0;
     return 0;
 }
 
@@ -184,6 +185,32 @@ static int is_update_name(const uint8_t *e)
 #endif
 }
 
+/* count sectors of the file from sector `off`, through its pieces; past its end, 0xFF */
+static int img_read(const fw_image_t *img, uint32_t off, uint32_t count, uint32_t *buf)
+{
+    uint32_t i = 0;
+
+    if (!img->n_ext)
+        return emmc_read(img->lba + off, count, buf);
+    while (count) {
+        uint32_t k;
+
+        while (i < img->n_ext && off >= img->ext[i].n)
+            off -= img->ext[i++].n;
+        if (i == img->n_ext) {
+            memset(buf, 0xFF, count * 512u);
+            return 0;
+        }
+        k = img->ext[i].n - off < count ? img->ext[i].n - off : count;
+        if (emmc_read(img->ext[i].lba + off, k, buf))
+            return FWU_EIO;
+        buf += k * 128u;
+        count -= k;
+        off += k;
+    }
+    return 0;
+}
+
 static int validate(fw_image_t *img, uint32_t first, fwu_progress_t progress)
 {
     const uint8_t *h = (const uint8_t *)s_blk;
@@ -192,15 +219,25 @@ static int validate(fw_image_t *img, uint32_t first, fwu_progress_t progress)
 
     if (img->size < 0x400u || first < 2u)
         return FWU_EFORMAT;
+    img->n_ext = 1;
+    img->ext[0].lba = img->lba = clus_lba(first);
+    img->ext[0].n = s_fs.spc;
     for (uint32_t i = 1; i < (img->size + cl - 1u) / cl; i++, c = next) {
         if (fat_next(c, &next))
             return FWU_EIO;
-        if (next != c + 1u)
+        if (next < 2u || next >= 0x0FFFFFF8u)
+            return FWU_EFORMAT;                  /* the chain ends before the file does */
+        if (next == c + 1u) {
+            img->ext[img->n_ext - 1u].n += s_fs.spc;
+            continue;
+        }
+        if (img->n_ext == FWU_EXTENTS)
             return FWU_EFRAG;
+        img->ext[img->n_ext].lba = clus_lba(next);
+        img->ext[img->n_ext++].n = s_fs.spc;
     }
-    img->lba = clus_lba(first);
 
-    if (emmc_read(img->lba, 1, s_blk))
+    if (img_read(img, 0, 1, s_blk))
         return FWU_EIO;
     fwsize = le32(h + 0x1F4);
     img->fw_end = (fwsize + 0x104000u) & ~0xFFFFFu;
@@ -209,7 +246,7 @@ static int validate(fw_image_t *img, uint32_t first, fwu_progress_t progress)
         return FWU_EFORMAT;
     if ((img->fw_end >> 9) > emmc_fw_sectors() / 2u)
         return FWU_EFIT;
-    if (emmc_read(img->lba + (fwsize >> 9), 1, s_chk))
+    if (img_read(img, fwsize >> 9, 1, s_chk))
         return FWU_EIO;
     if (memcmp(s_blk, s_chk, 512) != 0)
         return FWU_EFORMAT;
@@ -218,7 +255,7 @@ static int validate(fw_image_t *img, uint32_t first, fwu_progress_t progress)
     for (uint32_t off = 0; off < img->size; off += BLK * 512u) {
         uint32_t n = img->size - off < BLK * 512u ? img->size - off : BLK * 512u;
 
-        if (emmc_read(img->lba + (off >> 9), (n + 511u) >> 9, s_blk))
+        if (img_read(img, off >> 9, (n + 511u) >> 9, s_blk))
             return FWU_EIO;
         if (off < img->fw_end)
             crc = crc_update(crc, h, img->fw_end - off < n ? img->fw_end - off : n);
@@ -286,7 +323,7 @@ static int put(uint32_t rel, uint32_t count, const uint32_t *src)
  *   3. sector 0 alone, last, verified: only now does the slot carry its tag.
  * Writing sector 0 at the start of a multi-sector transfer (as before, and as stock's seg08
  * does) could leave a tagged slot with its scatter table unwritten: a brick. */
-static int slot_write(uint32_t dst, uint32_t src, uint32_t n, const char *label, fwu_progress_t progress)
+static int slot_write(uint32_t dst, const fw_image_t *src, uint32_t n, const char *label, fwu_progress_t progress)
 {
     uint32_t b;
     int r;
@@ -295,16 +332,26 @@ static int slot_write(uint32_t dst, uint32_t src, uint32_t n, const char *label,
     if ((r = put(dst, 1, s_blk)))
         return r;
     for (b = 0; b < n; b += BLK) {
-        if (emmc_read(src + b, BLK, s_blk))
+        if (img_read(src, b, BLK, s_blk))
             return FWU_EIO;
         if ((r = b ? put(dst + b, BLK, s_blk) : put(dst + 1, BLK - 1u, s_blk + 128)))
             return r;
         if (progress)
             progress(label, b, n);
     }
-    if (emmc_read(src, 1, s_blk))
+    if (img_read(src, 0, 1, s_blk))
         return FWU_EIO;
     return put(dst, 1, s_blk);
+}
+
+/* a firmware slot as the source of a copy */
+static const fw_image_t *slot(uint32_t rel)
+{
+    static fw_image_t s;
+
+    s.n_ext = 0;
+    s.lba = EMMC_FW_BASE + rel;
+    return &s;
 }
 
 /* FW2 first, then FW1: at every point one slot holds either the old or the new firmware,
@@ -316,9 +363,9 @@ int fw_update_install(const fw_image_t *img, fwu_progress_t progress)
 
     if (n == 0u || n > s2)
         return FWU_EFIT;
-    if ((r = slot_write(s2, img->lba, n + 1u, "slot 2", progress)))   /* (+1: the header copy at fw_end) */
+    if ((r = slot_write(s2, img, n + 1u, "slot 2", progress)))   /* (+1: the header copy at fw_end) */
         return r;
-    return slot_write(0, EMMC_FW_BASE + s2, n + 1u, "slot 1", progress);
+    return slot_write(0, slot(s2), n + 1u, "slot 1", progress);
 }
 
 /* A slot as the boot checks it (stock seg01 FUN_0307b2cc): "RKnanoFW" at 0x1F8 of sector 0, and
@@ -345,27 +392,19 @@ int fw_update_repair(fwu_progress_t progress)
     if (!e1 && !e2)
         return FWU_EIO;                              /* (what booted us? nothing to copy from) */
     {
-        int r = e1 ? slot_write(s2, EMMC_FW_BASE, e1 + 1u, "repair slot 2", progress)
-                   : slot_write(0, EMMC_FW_BASE + s2, e2 + 1u, "repair slot 1", progress);
+        int r = e1 ? slot_write(s2, slot(0), e1 + 1u, "repair slot 2", progress)
+                   : slot_write(0, slot(s2), e2 + 1u, "repair slot 1", progress);
 
         return r ? r : e1 ? 2 : 1;
     }
 }
 
-/* Deletes the image: its (contiguous) clusters freed in every FAT copy,
- * then the entry and its long-name entries in the same sector marked 0xE5.
- * ponytail: long-name entries spilling into the previous sector are left
- * for fsck. FSInfo free count is not touched (hosts treat it as a hint). */
-int fw_update_retire(const fw_image_t *img)
+/* Deletes the image: the clusters of each of its pieces freed in every FAT copy,
+ * then the entry and its long-name entries in the same sector marked 0xE5, then the FSInfo
+ * free count raised by as much (when it holds one).
+ * ponytail: long-name entries spilling into the previous sector are left for fsck. */
+static int fat_free(uint32_t first, uint32_t last)
 {
-    uint8_t *b = (uint8_t *)s_sec;
-    uint32_t cl = s_fs.spc * 512u, first = 2u + (img->lba - s_fs.data) / s_fs.spc;
-    uint32_t last = first + (img->size + cl - 1u) / cl - 1u;
-
-    if (emmc_read(img->dir_lba, 1, s_sec))
-        return FWU_EIO;
-    if (memcmp(b + img->dir_off, img->raw, 11) != 0)
-        return FWU_EFORMAT;
     for (uint32_t c = first; c <= last; ) {
         uint32_t sec = c / 128u, end = (sec + 1u) * 128u - 1u;
 
@@ -383,9 +422,40 @@ int fw_update_retire(const fw_image_t *img)
         }
         c = end + 1u;
     }
+    return 0;
+}
+
+int fw_update_retire(const fw_image_t *img)
+{
+    uint8_t *b = (uint8_t *)s_sec;
+    uint32_t cl = s_fs.spc * 512u, left = (img->size + cl - 1u) / cl, freed = left;
+    int r;
+
+    if (emmc_read(img->dir_lba, 1, s_sec))
+        return FWU_EIO;
+    if (memcmp(b + img->dir_off, img->raw, 11) != 0)
+        return FWU_EFORMAT;
+    for (uint32_t i = 0; i < (img->n_ext ? img->n_ext : 1u) && left; i++) {
+        uint32_t lba = img->n_ext ? img->ext[i].lba : img->lba;
+        uint32_t n = img->n_ext ? img->ext[i].n / s_fs.spc : left;
+        uint32_t first = 2u + (lba - s_fs.data) / s_fs.spc;
+
+        n = n < left ? n : left;
+        if ((r = fat_free(first, first + n - 1u)))
+            return r;
+        left -= n;
+    }
     s_fat_lba = 0;
     b[img->dir_off] = 0xE5;
     for (int off = (int)img->dir_off - 32; off >= 0 && b[off + 11] == 0x0F && b[off] != 0xE5; off -= 32)
         b[off] = 0xE5;
-    return emmc_write(img->dir_lba, 1, s_sec) ? FWU_EWRITE : 0;
+    if (emmc_write(img->dir_lba, 1, s_sec))
+        return FWU_EWRITE;
+    if (s_fs.fsinfo && !emmc_read(s_fs.fsinfo, 1, s_sec) && le32(b) == 0x41615252u &&
+        le32(b + 0x1E4) == 0x61417272u && le32(b + 0x1E8) != 0xFFFFFFFFu) {
+        s_sec[0x1E8 / 4] += freed;
+        if (emmc_write(s_fs.fsinfo, 1, s_sec))
+            return FWU_EWRITE;
+    }
+    return 0;
 }

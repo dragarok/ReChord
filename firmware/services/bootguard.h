@@ -3,7 +3,8 @@
  *
  * A fault (HardFault, MemManage, BusFault, UsageFault, an unexpected interrupt) does not
  * hang: its PC and LR go into a crash record in SRAM that survives a reset, and the core
- * resets (SYSRESETREQ). The next boot sees the record and opens the recovery menu before
+ * resets (SYSRESETREQ). If the chip ignores the soft reset (not confirmed on silicon: the
+ * 8 GB unit did not reboot from it), the player powers off ~100 ms later instead. The next boot sees the record and opens the recovery menu before
  * anything else runs (ap_ui.c): install an update from the disk, USB disk to copy one,
  * start normally, power off. After BOOTGUARD_MAX_CRASHES crash resets in a row the player
  * powers off instead of looping; the record is still there at the next power-on. VOL+ held
