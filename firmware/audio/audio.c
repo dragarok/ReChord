@@ -21,8 +21,8 @@
 #include "drivers/dac_cs43131.h"
 #include "services/fs.h"
 #include "services/log.h"
+#include "services/modules.h"
 
-extern const uint8_t coreb_image[], coreb_image_end[];
 
 #define REG(a)      (*(volatile uint32_t *)(a))
 #define CRU_SOFTRST3 0x401800CCu
@@ -347,29 +347,53 @@ static void refill(void)
 
 /* ---- core B ------------------------------------------------------------- */
 
-static int b_start(void)
+/* Core-B images: one per codec family (Makefile COREB_FAMILIES). */
+static const char *family_of(uint32_t codec)
 {
-    uint32_t n = (uint32_t)(coreb_image_end - coreb_image);
+    return codec == AS_CODEC_AAC || codec == AS_CODEC_ALAC ? "bm4a" : "bmain";
+}
 
-    if (s_b_up)
-        return 0;
-    if (n > AS_B_IMAGE_MAX)
-        return -1;
+static const char *s_b_image;            /* module now in core B, NULL: none */
+
+/* Load the image into B's code RAM and let B boot; B keeps the stream state
+ * in the shared block, so a swap mid-stream continues where it was. */
+static int b_load(const char *image)
+{
+    uint32_t t0;
+    int n;
+
     REG(CRU_SOFTRST3) = (CAL_CORE_RST << 16) | CAL_CORE_RST;     /* hold B in reset */
-    memcpy((void *)AS_B_RAM, coreb_image, n);
-    memset((void *)AS_SHARED, 0, sizeof(audio_shared_t));
-    AS->magic = AS_MAGIC;
-    AS->version = AS_VERSION;
+    s_b_up = 0;
+    s_b_image = NULL;
+    t0 = time_ms();
+    n = module_load(image, (void *)AS_B_RAM, AS_B_IMAGE_MAX);
+    if (n < 0) {
+        log_printf("player: core-B image %s: %d", image, n);
+        return -1;
+    }
+    AS->state = AS_B_BOOT;
     AS->b_hz = clock_core_b_hz();
     AS->b_div = AS->b_div_req = clock_pll_hz() / clock_core_b_hz();
     REG(CRU_SOFTRST3) = CAL_CORE_RST << 16;                      /* release */
-    for (uint32_t t0 = time_ms(); AS->state != AS_B_READY; ) {
-        if (time_ms() - t0 > 200u)
+    while (AS->state != AS_B_READY) {
+        if (time_ms() - t0 > 300u)
             return -2;
         cpu_wait_tick();
     }
+    log_printf("player: B up with %s (%d B) in %u ms", image, n, (unsigned)(time_ms() - t0));
+    s_b_image = image;
     s_b_up = 1;
     return 0;
+}
+
+static int b_start(const char *image)
+{
+    if (s_b_up && s_b_image == image)
+        return 0;
+    memset((void *)AS_SHARED, 0, sizeof(audio_shared_t));
+    AS->magic = AS_MAGIC;
+    AS->version = AS_VERSION;
+    return b_load(image);
 }
 
 /* ---- DMA + I2S ------------------------------------------------------------ */
@@ -466,11 +490,16 @@ static void halt(void)
 
 int audio_play_dir(const char *dir, uint32_t index)
 {
-    int r;
+    static int s_as_init;
+    const char *image;
 
     halt();
-    if ((r = b_start()) != 0)
-        return r;
+    if (!s_as_init) {
+        memset((void *)AS_SHARED, 0, sizeof(audio_shared_t));
+        AS->magic = AS_MAGIC;
+        AS->version = AS_VERSION;
+        s_as_init = 1;
+    }
     strncpy(s_dir, dir, sizeof s_dir - 1);
     s_next_index = index;
     s_rate = 0;
@@ -484,10 +513,17 @@ int audio_play_dir(const char *dir, uint32_t index)
     refill();
     if (AS->q_wr == 0)
         return -3;                           /* nothing playable */
+    image = family_of(AS->q[0].codec);
+    if (!s_b_up || s_b_image != image) {
+        if (b_load(image) != 0)
+            return -1;
+    }
     if (!s_dac_up) {
         if (dac_init(s_rate) != 0)
             return -4;
         s_dac_up = 1;
+    } else if (dac_set_rate(s_rate) != 0) {
+        return -4;
     }
     dac_volume();                            /* before the first sample reaches the DAC */
     AS->rate = s_rate;
@@ -542,7 +578,7 @@ int audio_paused(void)
     return s_playing && s_paused;
 }
 
-static void rate_change(void);
+static void stream_switch(void);
 
 void audio_poll(void)
 {
@@ -562,7 +598,7 @@ void audio_poll(void)
      * either the stream is over, or the next track needs another sample rate */
     if (s_dma_on && !(DMA_CHEN & (1u << DMA_CH)) && AS->pcm_played == AS->pcm_wr) {
         if (AS->state == AS_B_RATE)
-            rate_change();
+            stream_switch();
         else if (AS->state == AS_B_ENDED) {
             log_printf("audio: end of stream, %u tracks, B err %u", (unsigned)AS->done_seq, (unsigned)AS->err);
             halt();
@@ -570,23 +606,35 @@ void audio_poll(void)
     }
 }
 
-/* Gapless across a sample-rate change: the old rate's last sample has played, so
- * only the clocks change (ACODEC PLL, I2S divider, the DAC's speed byte); then
- * B refills the ring and the DMA starts again as at PLAY. */
-static void rate_change(void)
+/* The next track needs another sample rate or another core-B image. The last
+ * sample before it has played, so: swap the image if needed (B keeps the stream
+ * state in the shared block), re-clock if needed (ACODEC PLL, I2S divider, the
+ * DAC's speed byte), then B refills the ring and the DMA starts as at PLAY. */
+static void stream_switch(void)
 {
-    uint32_t rate = AS->q[AS->q_rd % AS_QUEUE].rate;
+    const as_track_t *n = &AS->q[AS->q_rd % AS_QUEUE];
+    const char *image = family_of(n->codec);
+    uint32_t rate = n->rate;
 
     dma_stop();
-    log_printf("audio: rate %u -> %u Hz", (unsigned)s_rate, (unsigned)rate);
-    if (dac_set_rate(rate) != 0) {
-        halt();
-        return;
+    if (image != s_b_image) {
+        log_printf("audio: core B %s -> %s", s_b_image ? s_b_image : "-", image);
+        if (b_load(image) != 0) {
+            halt();
+            return;
+        }
+    }
+    if (rate != s_rate) {
+        log_printf("audio: rate %u -> %u Hz", (unsigned)s_rate, (unsigned)rate);
+        if (dac_set_rate(rate) != 0) {
+            halt();
+            return;
+        }
+        s_rate_changes++;
     }
     dma_prepare();
     s_rate = rate;
     AS->rate = rate;
-    s_rate_changes++;
     AS->cmd = AS_CMD_RESTART;
 }
 

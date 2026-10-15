@@ -215,7 +215,38 @@ def add_fonts(out: bytearray, fw1_end: int, font_img: Path) -> None:
     print(f"      fonts from {font_img.name}: small @0x{FONT_SMALL_OFF:X}, large @0x{FONT_LARGE_OFF:X}")
 
 
-def build_ref_shape_5m(img33: bytes, ref_path: Path, out_path: Path, font_img: Path = None) -> Path:
+# Modules (core-B decoder images...): a table at MODULES_OFF, the blobs behind it,
+# sector-aligned. firmware/services/modules.c reads it from the slot on the eMMC.
+#   +0 "RCMOD1\0\0", +8 u32 count, then count x { char name[8]; u32 off, len, sum, 0 }
+#   off: from the start of the image; sum: u32 sum of the little-endian words.
+MODULES_OFF = 0x100000
+MODULES_MAGIC = b"RCMOD1\0\0"
+
+
+def add_modules(out: bytearray, fw1_end: int, modules) -> None:
+    if not modules:
+        return
+    if fw1_end > MODULES_OFF:
+        raise SystemExit(f"fw1 ends at 0x{fw1_end:X}, past the modules at 0x{MODULES_OFF:X}")
+    table = bytearray(MODULES_MAGIC + struct.pack("<I", len(modules)) + bytes(4))
+    off = MODULES_OFF + 512
+    for name, path in modules:
+        blob = Path(path).read_bytes()
+        blob += bytes(-len(blob) % 4)
+        words = struct.unpack(f"<{len(blob) // 4}I", blob)
+        table += name.encode()[:8].ljust(8, b"\0") + struct.pack("<IIII", off, len(blob), sum(words) & 0xFFFFFFFF, 0)
+        if off + len(blob) > FONT_SMALL_OFF:
+            raise SystemExit("modules run into the fonts")
+        out[off:off + len(blob)] = blob
+        print(f"      module {name}: {len(blob)} B @0x{off:X}")
+        off = (off + len(blob) + 511) & ~511
+    if len(table) > 512:
+        raise SystemExit("too many modules for one table sector")
+    out[MODULES_OFF:MODULES_OFF + len(table)] = table
+
+
+def build_ref_shape_5m(img33: bytes, ref_path: Path, out_path: Path, font_img: Path = None,
+                       modules=()) -> Path:
     """Test #9: a 5MB fw1-ONLY image with the reference's outer-table shape.
 
     The reference image (5,242,884 B) is the only fw1-only image proven to
@@ -269,6 +300,7 @@ def build_ref_shape_5m(img33: bytes, ref_path: Path, out_path: Path, font_img: P
 
     if font_img:
         add_fonts(out, fw1_end, font_img)
+    add_modules(out, fw1_end, modules)
 
     # self-consistency copy (the -3 check) at fw_end from the template header
     fw_end2 = struct.unpack_from("<I", out, 0x1F4)[0]
@@ -302,6 +334,8 @@ def main() -> int:
     ap.add_argument("--bb", type=Path, default=None,
                     help="optional custom section_3 (BB) bin; default keeps the "
                          "stock section_3 bytes untouched")
+    ap.add_argument("--module", action="append", default=[], metavar="NAME=PATH",
+                    help="blob stored in the image's module table (core-B images)")
     ap.add_argument("--fonts", type=Path, default=None,
                     help="stock IMG to copy the bitmap fonts from (into the 5MB image)")
     ap.add_argument("--placeholder", action="store_true",
@@ -582,7 +616,8 @@ def main() -> int:
     # Test #9 companion output: the 5MB ref-shape image
     ref_img = Path("community/refcfw/HIFIEC90.IMG")
     if ref_img.exists():
-        build_ref_shape_5m(bytes(img), ref_img, args.output.with_name("ReChord_AP5M.IMG"), args.fonts)
+        build_ref_shape_5m(bytes(img), ref_img, args.output.with_name("ReChord_AP5M.IMG"), args.fonts,
+                           [m.split("=", 1) for m in args.module])
     else:
         print("RESULT: FAIL - see checks above", file=sys.stderr)
         return 1

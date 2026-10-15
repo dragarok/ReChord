@@ -50,30 +50,33 @@ include firmware/ap.mk
 # Distinct from the SDK A_CORE pipeline above (build-ap/link-ap/pack-fw1):
 # this links ONLY firmware/{startup,ui,drivers,services,theme,libc}/*.c.
 CFW_BUILD_DIR := build/cfw
-CFW_OBJS := $(patsubst %.c,$(CFW_BUILD_DIR)/objs/%.o,$(AP_SRCS)) $(CFW_BUILD_DIR)/objs/coreb_blob.o
+CFW_OBJS := $(patsubst %.c,$(CFW_BUILD_DIR)/objs/%.o,$(AP_SRCS))
 CFW_ELF := $(CFW_BUILD_DIR)/rechord_ap.elf
 
-# ---- core B (decoder) image: linked at 0, embedded in the AP image ----
+# ---- core B (decoder) images: one per codec family, linked at 0. They live in the
+# firmware slot (make_fw1 --module), core A loads the one a track needs. ----
 COREB_DIR  := build/coreb
-COREB_MAD  := bit fixed frame huffman layer12 layer3 stream synth timer
-COREB_SRCS := firmware/coreb/b_startup.c firmware/coreb/b_main.c firmware/coreb/b_libc.c \
-              $(patsubst %,firmware/coreb/libmad/%.c,$(COREB_MAD))
-COREB_OBJS := $(patsubst firmware/coreb/%.c,$(COREB_DIR)/%.o,$(COREB_SRCS))
+COREB_RT   := b_startup b_main b_libc
+COREB_MAD  := $(patsubst %,libmad/%,bit fixed frame huffman layer12 layer3 stream synth timer)
+COREB_FAMILIES := main
+COREB_FAM_main := b_codecs_main b_flac b_pcm b_mp3 $(COREB_MAD)
 COREB_CFLAGS := $(AP_ARCH_FLAGS) -O2 -Wall -Wno-unused-function -ffreestanding \
                 -fno-tree-loop-distribute-patterns -ffunction-sections -fdata-sections -MMD -MP \
-                -Ifirmware -Ifirmware/coreb/libmad -DOPT_ACCURACY -DNDEBUG
+                -Ifirmware -Ifirmware/coreb -Ifirmware/coreb/libmad -DOPT_ACCURACY -DNDEBUG
 $(COREB_DIR)/%.o: firmware/coreb/%.c Makefile
 	@$(MKDIR_P) $(dir $@)
 	$(CC) $(COREB_CFLAGS) -c $< -o $@
-$(COREB_DIR)/coreb.elf: $(COREB_OBJS) firmware/coreb/coreb.ld
-	$(CC) $(AP_ARCH_FLAGS) -nostdlib -T firmware/coreb/coreb.ld -Wl,--gc-sections,--no-warn-rwx-segments \
-	    $(COREB_OBJS) -lgcc -o $@
-$(COREB_DIR)/coreb.bin: $(COREB_DIR)/coreb.elf
-	$(OBJCOPY) -O binary $< $@
-$(CFW_BUILD_DIR)/objs/coreb_blob.o: firmware/audio/coreb_blob.S $(COREB_DIR)/coreb.bin
-	@$(MKDIR_P) $(dir $@)
-	$(CC) $(AP_ARCH_FLAGS) -c $< -o $@
--include $(wildcard $(COREB_DIR)/*.d $(COREB_DIR)/libmad/*.d)
+define COREB_IMAGE
+$(COREB_DIR)/$(1).elf: $(patsubst %,$(COREB_DIR)/%.o,$(COREB_RT) $(COREB_FAM_$(1))) firmware/coreb/coreb.ld
+	$$(CC) $$(AP_ARCH_FLAGS) -nostdlib -T firmware/coreb/coreb.ld -Wl,--gc-sections,--no-warn-rwx-segments \
+	    $$(filter %.o,$$^) -lgcc -o $$@
+$(COREB_DIR)/$(1).bin: $(COREB_DIR)/$(1).elf
+	$$(OBJCOPY) -O binary $$< $$@
+endef
+$(foreach f,$(COREB_FAMILIES),$(eval $(call COREB_IMAGE,$(f))))
+COREB_BINS := $(patsubst %,$(COREB_DIR)/%.bin,$(COREB_FAMILIES))
+COREB_MODULES := $(foreach f,$(COREB_FAMILIES),--module b$(f)=$(COREB_DIR)/$(f).bin)
+-include $(wildcard $(COREB_DIR)/*.d $(COREB_DIR)/*/*.d)
 
 cfw-ap: $(CFW_ELF)
 	@echo "CFW AP ELF: $(CFW_ELF)"
@@ -101,8 +104,8 @@ $(CFW_ELF): $(CFW_OBJS) $(AP_LDSCRIPT)
 # 512 MB MINIVnnn.IMG, 8 GB HIFIECnn.IMG. 900/90 sort above any stock version.
 UPDATE_IMG := $(if $(filter 8g,$(BOARD)),HIFIEC90.IMG,MINIV900.IMG)
 
-cfw-img: $(CFW_ELF)
-	$(PYTHON) tools/make_fw1.py $(CFW_ELF) -o build/ReChord_AP.IMG $(if $(FONT_IMG),--fonts $(FONT_IMG))
+cfw-img: $(CFW_ELF) $(COREB_BINS)
+	$(PYTHON) tools/make_fw1.py $(CFW_ELF) -o build/ReChord_AP.IMG $(if $(FONT_IMG),--fonts $(FONT_IMG)) $(COREB_MODULES)
 	cp build/ReChord_AP5M.IMG build/$(UPDATE_IMG)
 	@echo "  update file for the $(BOARD) board: build/$(UPDATE_IMG)"
 
