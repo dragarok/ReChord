@@ -64,16 +64,19 @@ COREB_TREMOR := $(patsubst %,tremor/%,block codebook floor0 floor1 info mapping0
 COREB_OGG := ogg/framing ogg/bitwise
 COREB_OPUS := $(patsubst firmware/coreb/%.c,%,$(wildcard firmware/coreb/opus/celt/*.c firmware/coreb/opus/silk/*.c \
                  firmware/coreb/opus/silk/fixed/*.c firmware/coreb/opus/src/*.c firmware/coreb/opus/opusfile/*.c))
-COREB_FAMILIES := main aac ogg opus
+COREB_DEMAC := $(patsubst %,demac/%,decoder entropy predictor filter_16_11 filter_64_11 filter_32_10 filter_256_13 filter_1280_15)
+COREB_FAMILIES := main aac ogg opus ape
 COREB_FAM_main := b_codecs_main b_flac b_pcm b_mp3 b_alac $(COREB_MAD) $(COREB_ALAC)
 COREB_FAM_aac  := b_codecs_aac b_aac $(COREB_FAAD)
 COREB_FAM_ogg  := b_codecs_ogg b_vorbis $(COREB_TREMOR) $(COREB_OGG)
 COREB_FAM_opus := b_codecs_opus b_opus $(COREB_OPUS) $(COREB_OGG)
+COREB_FAM_ape  := b_codecs_ape b_ape $(COREB_DEMAC)
 # stack reserve per image (bytes): FAAD2 nests up to ~93 KiB of locals (HE-AAC v2)
 COREB_STACK_main := 0x5000
 COREB_STACK_aac  := 0x18000
 COREB_STACK_ogg  := 0x4000
 COREB_STACK_opus := 0x8000
+COREB_STACK_ape  := 0x1000
 COREB_CFLAGS := $(AP_ARCH_FLAGS) -O2 -Wall -Wno-unused-function -ffreestanding \
                 -fno-tree-loop-distribute-patterns -ffunction-sections -fdata-sections -MMD -MP \
                 -Ifirmware -Ifirmware/coreb -Ifirmware/coreb/libmad -DOPT_ACCURACY -DNDEBUG
@@ -90,6 +93,7 @@ COREB_OPUS_DEFS := -DOPUS_BUILD -DFIXED_POINT -DDISABLE_FLOAT_API -DVAR_ARRAYS -
 $(COREB_DIR)/opus/%.o $(COREB_DIR)/b_opus.o: COREB_CFLAGS += $(COREB_OPUS_DEFS)
 $(COREB_DIR)/tremor/%.o $(COREB_DIR)/ogg/%.o $(COREB_DIR)/b_vorbis.o: COREB_CFLAGS += -Ifirmware/coreb/tremor -Ifirmware/coreb/ogg -w -Dalloca=__builtin_alloca
 $(COREB_DIR)/b_alac.o: COREB_CFLAGS += -Ifirmware/coreb/alac
+$(COREB_DIR)/demac/%.o: COREB_CFLAGS += -Wno-unused-variable
 $(COREB_DIR)/%.o: firmware/coreb/%.c Makefile
 	@$(MKDIR_P) $(dir $@)
 	$(CC) $(COREB_CFLAGS) -c $< -o $@

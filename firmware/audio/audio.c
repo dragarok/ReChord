@@ -16,6 +16,7 @@
 
 #include "audio.h"
 #include "audio_shared.h"
+#include "ape_info.h"
 #include "mp3_info.h"
 #include "mp4.h"
 #include "drivers/clock.h"
@@ -82,7 +83,7 @@ static int playable(const char *name)
     return ext_is(name, "flac") || ext_is(name, "wav") || ext_is(name, "mp3") || ext_is(name, "mp2") ||
            ext_is(name, "aif") || ext_is(name, "aiff") || ext_is(name, "aifc") ||
            ext_is(name, "m4a") || ext_is(name, "m4b") || ext_is(name, "mp4") || ext_is(name, "alac") ||
-           ext_is(name, "ogg") || ext_is(name, "oga") || ext_is(name, "opus");
+           ext_is(name, "ogg") || ext_is(name, "oga") || ext_is(name, "opus") || ext_is(name, "ape");
 }
 
 /* FLAC: STREAMINFO -> track, synthesized header in s_hdr, file left at the first frame. */
@@ -367,6 +368,41 @@ static int open_ogg(fs_file_t *f, as_track_t *t)
     return fs_seek(f, 0) < 0 ? -1 : 0;
 }
 
+/* Monkey's Audio: a 24-byte header (ape_info.h), then only the frames: the tags at
+ * both ends, the seek table and the stored WAV header never leave the eMMC.
+ * Core-B instructions per stereo frame by compression level (fast .. insane), as
+ * measured in QEMU (24-bit, tests/bench.py APE*; insane estimated from its filter
+ * taps). A stream that would need more than B_BUDGET instructions a second is
+ * skipped: it could only play with gaps (insane at any rate, extra high above 96 kHz). */
+static const uint16_t k_ape_cost[5] = { 420, 650, 950, 2470, 10200 };
+#define B_BUDGET 240000000u
+
+static int open_ape(fs_file_t *f, as_track_t *t)
+{
+    ape_info_t ai;
+    uint32_t secs;
+
+    if (ape_info(mp3_rd, f, (uint32_t)fs_file_size(f), &ai) != 0 || fs_seek(f, (long)ai.data_off) < 0)
+        return -1;
+    if ((uint64_t)k_ape_cost[ai.level / 1000u - 1u] * ai.rate * (ai.channels + 1u) > 3ull * B_BUDGET) {   /* mono: 2/3 */
+        log_printf("audio: APE level %u at %u Hz is too slow for core B", (unsigned)ai.level, (unsigned)ai.rate);
+        return -1;
+    }
+    t->codec = AS_CODEC_APE;
+    t->rate = ai.rate;
+    t->channels = ai.channels;
+    t->bits = ai.bits;
+    t->frames = ai.samples;
+    ape_stream_header(&ai, s_hdr);
+    s_hdr_len = APE_STREAM_HDR;
+    s_data_off = ai.data_off;
+    s_left = ai.data_end - ai.data_off;
+    t->bytes = s_hdr_len + s_left;
+    secs = ai.samples / ai.rate;
+    s_kbps = secs ? s_left / 125u / secs : 0u;
+    return 0;
+}
+
 static void close_track(void)
 {
     if (s_file)
@@ -418,6 +454,7 @@ static int open_next(void)
              (ext_is(ent.name, "mp3") || ext_is(ent.name, "mp2")) ? open_mp3(s_file, &t) :
              (ext_is(ent.name, "ogg") || ext_is(ent.name, "oga") || ext_is(ent.name, "opus")) ?
                  open_ogg(s_file, &t) :
+             ext_is(ent.name, "ape") ? open_ape(s_file, &t) :
              open_m4a(s_file, path, &t)) != 0) {
             log_printf("audio: %s: not a playable stream (size %ld)", ent.name, fs_file_size(s_file));
             close_track();
@@ -570,7 +607,7 @@ static void refill(void)
 static const char *family_of(uint32_t codec)
 {
     return codec == AS_CODEC_AAC ? "baac" : codec == AS_CODEC_VORBIS ? "bogg" :
-           codec == AS_CODEC_OPUS ? "bopus" : "bmain";
+           codec == AS_CODEC_OPUS ? "bopus" : codec == AS_CODEC_APE ? "bape" : "bmain";
 }
 
 static const char *s_b_image;            /* module now in core B, NULL: none */
