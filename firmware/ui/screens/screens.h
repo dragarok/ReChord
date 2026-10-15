@@ -77,18 +77,16 @@ void menu_draw_item(int y, const char *label, const char *value, bool selected);
  * ====================================================================== */
 
 #define BROWSER_PATH_MAX 128
-#define BROWSER_WINDOW   12   /* entries fetched per fs_list_dir() call ==
-                                 visible page rows                          */
+#define BROWSER_WINDOW   12   /* visible rows */
 
+/* The folder on screen: its path, the dirlist page (services/dirlist.h) and the
+ * cursor in it; "/" lists the volumes. */
 typedef struct browser_state {
-    char        path[BROWSER_PATH_MAX];
-    fs_dirent_t window[BROWSER_WINDOW];
-    uint32_t    win_start;  /* index of window[0] inside the dir listing    */
-    uint32_t    win_count;  /* entries currently in window                  */
-    uint32_t    total;      /* total entries in path                        */
-    int         cursor;     /* absolute selected index                      */
-    int         top;        /* absolute index of first visible row          */
-    bool        mounted;    /* a listing was loaded at least once           */
+    char path[BROWSER_PATH_MAX];
+    uint32_t total;         /* entries on this page */
+    int      page, more;    /* dirlist page, more pages after it */
+    int      cursor, top;   /* selected entry, first visible row */
+    bool     mounted;       /* the listing is loaded */
 } browser_state_t;
 
 extern const ui_screen_t browser_screen;
@@ -96,6 +94,7 @@ extern const ui_screen_t browser_screen;
 /* Set the root directory the browser starts in (call before pushing). */
 void browser_screen_set_root(const char *path);
 const browser_state_t *browser_screen_state(void);
+void browser_screen_resume(const char *path, int cursor);
 
 /* ======================================================================
  * player_screen — now-playing skeleton
@@ -126,7 +125,6 @@ extern const ui_screen_t settings_screen;
 
 void settings_screen_reload(void);   /* settings_load() into the live copy  */
 void settings_screen_store(void);    /* settings_save() the live copy       */
-const rechord_settings_t *settings_screen_get(void);
 const menu_model_t       *settings_screen_model(void);
 const menu_view_t        *settings_screen_view(void);
 

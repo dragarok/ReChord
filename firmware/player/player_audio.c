@@ -4,15 +4,29 @@
  * IPC ring nothing consumed. Opening a file plays its directory from that file
  * on, gapless across tracks.
  */
+#include <stdlib.h>
 #include <string.h>
 
 #include "player.h"
 #include "audio/audio.h"
 #include "services/fs.h"
+#include "services/dirlist.h"
+#include "services/queue.h"
+#include "services/log.h"
+#include "services/config.h"
 
-static char s_dir[160], s_name[FS_NAME_MAX];
-static uint32_t s_index;
+static char s_name[FS_NAME_MAX];
 static int s_open;
+static char s_src[150];                      /* where the queue came from (for resume) */
+static int s_tree;
+
+/* "f:<first cluster>:<folder>" / "t:...": the queue's source and the heard track. */
+void player_note_track(uint32_t clus)
+{
+    if (!s_src[0])
+        return;
+    snprintf(g_cfg.track, sizeof g_cfg.track, "%c:%lu:%s", s_tree ? 't' : 'f', (unsigned long)clus, s_src);
+}
 
 /* Kept for browser_screen's error text (the core-A FLAC adapter is gone). */
 unsigned flac_diag_block, flac_diag_channels;
@@ -21,26 +35,50 @@ int flac_diag_reason;
 
 int player_init(void) { return PLAYER_OK; }
 
+/* Queue the file's folder (sorted), starting at the file. */
 int player_open(const char *path)
 {
     const char *slash = strrchr(path, '/');
+    char dir[160];
     size_t dl = slash ? (size_t)(slash - path) : 0;
-    fs_dirent_t ent;
-    uint32_t got, total;
+    int n, incomplete;
 
-    if (!slash || dl >= sizeof s_dir || strlen(slash + 1) >= sizeof s_name)
+    if (!slash || dl >= sizeof dir || strlen(slash + 1) >= sizeof s_name)
         return PLAYER_ERR;
-    memcpy(s_dir, path, dl);
-    s_dir[dl] = 0;
-    if (!dl)
-        strcpy(s_dir, "/");
+    memcpy(dir, path, dl);
+    dir[dl] = 0;
     strcpy(s_name, slash + 1);
-    for (s_index = 0; ; s_index++) {        /* its position in the listing */
-        if (fs_list_dir(s_dir, s_index, &ent, 1, &got, &total) != 0 || !got)
+    s_open = 0;
+    for (int page = 0, more = 1; more; page++) {     /* find the file's ref */
+        if ((n = dirlist_load(dl ? dir : "/", NULL, page, &more)) < 0)
             return PLAYER_ERR;
-        if (!strcmp(ent.name, s_name))
-            break;
+        for (int i = 0; i < n; i++)
+            if (!dirlist_is_dir(i) && !strcmp(dirlist_name(i), s_name)) {
+                fs_ref_t start = *dirlist_ref(i);
+
+                if (queue_from_folder(dir, NULL, &start, &incomplete) != 0 || !queue_count())
+                    return PLAYER_ERR;
+                snprintf(s_src, sizeof s_src, "%s", dir);
+                s_tree = 0;
+                s_open = 1;
+                return PLAYER_OK;
+            }
     }
+    return PLAYER_ERR;
+}
+
+/* Everything under a folder, subfolders included (RECHO: hold play on a folder). */
+int player_open_tree(const char *path)
+{
+    int incomplete;
+
+    s_open = 0;
+    if (queue_from_tree(path, NULL, &incomplete) != 0 || !queue_count())
+        return PLAYER_ERR_EMPTY;
+    if (incomplete)
+        log_printf("player: '%s' queued in part: %d tracks", path, queue_count());
+    snprintf(s_src, sizeof s_src, "%s", path);
+    s_tree = 1;
     s_open = 1;
     return PLAYER_OK;
 }
@@ -53,7 +91,19 @@ int player_play(void)
     }
     if (!s_open)
         return PLAYER_ERR_EMPTY;
-    return audio_play_dir(s_dir, s_index) == 0 ? PLAYER_OK : PLAYER_ERR;
+    return audio_play(queue_pos()) == 0 ? PLAYER_OK : PLAYER_ERR;
+}
+
+int player_mode(void) { return queue_mode(); }
+
+/* Next play mode; the tracks already handed to core B still play first. */
+int player_cycle_mode(void)
+{
+    queue_set_mode((queue_mode() + 1) % Q_MODES);
+    g_cfg.play = (uint8_t)queue_mode();
+    config_save_later();
+    log_printf("ui: play mode %s", queue_mode_name(queue_mode()));
+    return queue_mode();
 }
 
 int player_pause(void)
@@ -89,7 +139,37 @@ long player_get_position_ms(void)
     return st.track.rate ? (long)((uint64_t)st.frames * 1000u / st.track.rate) : 0;
 }
 
-int player_set_volume(int db) { audio_set_volume_db(db); return PLAYER_OK; }
+int player_set_volume(int db)
+{
+    g_cfg.volume = (int16_t)audio_set_volume_db(db);
+    config_save_later();
+    return PLAYER_OK;
+}
+
+/* Resume "track": the saved queue, from the saved track. 0, or < 0. */
+int player_resume(const char *track)
+{
+    unsigned long clus;
+    char kind = track[0], *p;
+    int incomplete;
+
+    if ((kind != 'f' && kind != 't') || track[1] != ':')
+        return -1;
+    clus = strtoul(track + 2, &p, 10);
+    if (*p++ != ':')
+        return -1;
+    if (kind == 't' ? queue_from_tree(p, NULL, &incomplete) : queue_from_folder(p, NULL, NULL, &incomplete))
+        return -2;
+    for (int i = 0; i < queue_count(); i++)
+        if (queue_ref(i)->clus == clus) {
+            queue_seek(i);
+            break;
+        }
+    snprintf(s_src, sizeof s_src, "%s", p);
+    s_tree = kind == 't';
+    s_open = 1;
+    return 0;
+}
 int player_get_volume(void) { return audio_get_volume_db(); }
 
 int player_get_track(track_info_t *out)

@@ -121,7 +121,7 @@ void menu_draw(const menu_model_t *model, const menu_view_t *view)
 
 static void menu_screen_on_enter(void)
 {
-    menu_view_init(&s_view);
+    /* coming back to the menu keeps its cursor; menu_screen_bind() resets it */
 }
 
 static void menu_screen_draw(void)

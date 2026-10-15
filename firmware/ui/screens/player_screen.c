@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "screens.h"
+#include "services/queue.h"
 #include "../theme.h"
 #include "../internal/hal.h"
 
@@ -116,42 +117,39 @@ static void player_screen_draw(void)
                       line, THEME_COLOR_FG, THEME_COLOR_BG);
 }
 
+/* RECHO's keys: VOL+/VOL- volume (held: repeats); PLAY pause/resume, held: next
+ * track; BACK previous track (or the start of this one after 3 s), held: next
+ * play mode. MENU (ap_ui.c): Files; held: the main menu. */
 static void player_screen_handle_event(const input_event_t *ev)
 {
+    int hold = ev->adc_value == INPUT_ADC_LONG;
+
     switch (ev->type) {
     case KEY_UP:
     case KEY_DOWN:
-        if (ev->adc_value == INPUT_ADC_LONG) {   /* hold: next / previous track */
-            /* the press itself already stepped the volume: take that back */
-            player_set_volume(player_get_volume() + (ev->type == KEY_UP ? -1 : 1));
-            player_screen_set_volume(player_get_volume());
-            if (ev->type == KEY_UP)
-                player_next();
-            else
-                player_prev();
-            break;
-        }
-        {
-        /* volume through the player module (it clamps -60..+20 dB) */
-        int db = player_get_volume() + (ev->type == KEY_UP ? 1 : -1);
-        player_set_volume(db);
+        player_set_volume(player_get_volume() + (ev->type == KEY_UP ? 1 : -1));
         player_screen_set_volume(player_get_volume());
         break;
-    }
     case KEY_SELECT:
-        if (s_status[0])
-            break;                        /* error view: inert (BACK leaves) */
-        if (s_playing) {
-            player_pause();
-            player_screen_set_playing(player_get_state() == PLAYER_PLAYING);
-        } else {
-            player_play();
-            player_screen_set_playing(player_get_state() == PLAYER_PLAYING);
+        if (hold) {
+            player_next();
+        } else if (!s_status[0]) {
+            if (s_playing)
+                player_pause();
+            else
+                player_play();
         }
+        player_screen_set_playing(player_get_state() == PLAYER_PLAYING);
         break;
     case KEY_BACK:
-        /* playback continues in the background; re-entering re-syncs. */
-        ui_pop_screen();
+        if (hold) {
+            char m[32];
+
+            snprintf(m, sizeof m, "play mode: %s", queue_mode_name(player_cycle_mode()));
+            player_screen_set_status(m);
+        } else {
+            player_prev();
+        }
         break;
     default:
         break;

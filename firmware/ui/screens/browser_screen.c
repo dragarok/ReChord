@@ -1,19 +1,12 @@
 /*
- * browser_screen.c — file browser skeleton over the abstract fs_list_dir()
- * service (names + counts only — no sizes, no dates).
+ * browser_screen.c -- the file browser: folders first, then files, natural order
+ * (services/dirlist.c); "/" lists the volumes. A folder of more than DL_MAX
+ * entries is shown a page at a time (DOWN past the end / UP past the top).
  *
- * Pagination model (host-tested in tests/test_browser_pagination.c):
- *   - the listing is a flat, stable-ordered sequence of `total` entries;
- *   - the visible page is [top, top + page) with page == BROWSER_WINDOW;
- *   - the fetch window always starts at `top`: whenever the view scrolls,
- *     fs_list_dir(path, top, window, BROWSER_WINDOW, ...) refetches;
- *   - cursor movement clamps at both ends of the listing.
- *
- * Navigation:
- *   KEY_UP/KEY_DOWN  move selection (scrolls the page),
- *   KEY_SELECT       enter a directory / open a file (placeholder hook),
- *   KEY_BACK         parent directory (clamped at the configured root);
- *                    pops the screen stack when already at the root.
+ *   UP/DOWN        move
+ *   SELECT         open a folder; on a file, play its folder from it
+ *   SELECT (hold)  on a folder: play it and everything under it
+ *   BACK           parent folder (leaves the browser at its root)
  */
 #include <stdio.h>
 #include <string.h>
@@ -21,308 +14,232 @@
 #include "screens.h"
 #include "../theme.h"
 #include "../internal/hal.h"
+#include "services/dirlist.h"
+#include "services/fs_target.h"
 
 static browser_state_t s_state;
-static char            s_root[BROWSER_PATH_MAX];
+static char s_root[BROWSER_PATH_MAX];
+static char s_vol[FS_VOLUMES][16];           /* "/": the mounted volumes */
 
-/* ---- listing / window -------------------------------------------------- */
-
-static int browser_page(void)
+static int at_volumes(void)
 {
-    return BROWSER_WINDOW;   /* one fetch == one visible page */
+    return !strcmp(s_state.path, "/");
 }
 
-static void browser_clamp_view(void)
+/* (Re)load the listing of the current page. */
+static void load(void)
 {
-    if (s_state.mounted) {
-        if (s_state.cursor > (int)s_state.total - 1)
-            s_state.cursor = (int)s_state.total - 1;
-        if (s_state.cursor < 0)
-            s_state.cursor = 0;
+    s_state.mounted = true;
+    s_state.more = 0;
+    if (at_volumes()) {
+        fs_dirent_t e;
+        uint32_t got, total, n = 0;
+
+        for (uint32_t i = 0; i < FS_VOLUMES; i++)
+            if (fs_list_dir("/", i, &e, 1, &got, &total) == 0 && got)
+                snprintf(s_vol[n++], sizeof s_vol[0], "%s", e.name);
+        s_state.total = n;
+    } else {
+        int n = dirlist_load(s_state.path, NULL, s_state.page, &s_state.more);
+
+        if (n < 0)
+            log_printf("browser: list '%s' failed (%d)", s_state.path, n);
+        s_state.total = n < 0 ? 0u : (uint32_t)n;
     }
+    if (s_state.cursor >= (int)s_state.total)
+        s_state.cursor = s_state.total ? (int)s_state.total - 1 : 0;
     if (s_state.top > s_state.cursor)
         s_state.top = s_state.cursor;
-    if (s_state.top < 0)
-        s_state.top = 0;
 }
 
-static void browser_fetch_window(void)
+static const char *entry_name(int i)
 {
-    uint32_t got = 0;
-    uint32_t total = 0;
-    int rc;
-
-    rc = fs_list_dir(s_state.path, s_state.win_start, s_state.window,
-                     (uint32_t)BROWSER_WINDOW, &got, &total);
-    if (rc != 0) {
-        log_printf("browser: list '%s' failed (%d)", s_state.path, rc);
-        s_state.win_count = 0;
-        s_state.total = 0;
-        s_state.mounted = true;
-        return;
-    }
-    s_state.win_count = got;
-    s_state.total = total;
-    s_state.mounted = true;
-    browser_clamp_view();
+    return at_volumes() ? s_vol[i] : dirlist_name(i);
 }
 
-/* Keep cursor inside [top, top + page) and refetch when the page moves. */
-static void browser_ensure_visible(void)
+static int entry_is_dir(int i)
 {
-    uint32_t old_start = s_state.win_start;
-
-    if (s_state.cursor < s_state.top)
-        s_state.top = s_state.cursor;
-    if (s_state.cursor > s_state.top + browser_page() - 1)
-        s_state.top = s_state.cursor - browser_page() + 1;
-    if (s_state.top < 0)
-        s_state.top = 0;
-
-    s_state.win_start = (uint32_t)s_state.top;
-    if (s_state.win_start != old_start || !s_state.mounted)
-        browser_fetch_window();
+    return at_volumes() || dirlist_is_dir(i);
 }
 
-/* ---- path handling ----------------------------------------------------- */
-
-static void browser_path_copy(char *dst, const char *src, int cap)
+static void go(const char *path)
 {
-    snprintf(dst, (size_t)cap, "%s", src);
+    snprintf(s_state.path, sizeof s_state.path, "%s", path);
+    s_state.cursor = s_state.top = s_state.page = 0;
+    load();
 }
 
-/* Compare paths ignoring trailing slashes ("/music/" == "/music"). */
-static bool browser_same_path(const char *a, const char *b)
+/* "<path>/<name>" into out; 0, or -1 when it does not fit. */
+static int join(char *out, size_t cap, const char *name)
 {
-    size_t la = strlen(a);
-    size_t lb = strlen(b);
+    size_t len = strlen(s_state.path), nlen = strlen(name);
 
-    while (la > 1 && a[la - 1] == '/')
-        la--;
-    while (lb > 1 && b[lb - 1] == '/')
-        lb--;
-    return la == lb && strncmp(a, b, la) == 0;
+    if (len + nlen + 2 > cap)
+        return -1;
+    memcpy(out, s_state.path, len);
+    if (len == 0 || out[len - 1] != '/')
+        out[len++] = '/';
+    memcpy(out + len, name, nlen + 1);
+    return 0;
 }
 
-static void browser_load(const char *path)
+static bool to_parent(void)
 {
-    browser_path_copy(s_state.path, path, BROWSER_PATH_MAX);
-    s_state.cursor = 0;
-    s_state.top = 0;
-    s_state.win_start = 0;
-    s_state.win_count = 0;
-    s_state.mounted = false;
-    browser_ensure_visible();
-}
+    char next[BROWSER_PATH_MAX], *slash;
 
-static void browser_enter_dir(const char *name)
-{
-    char next[BROWSER_PATH_MAX];
-    size_t len = strlen(s_state.path);
-    size_t nlen = strlen(name);
-
-    /* "<path>/<name>", bounded construction (no truncation possible) */
-    if (len + nlen + 2 > BROWSER_PATH_MAX) {
-        log_printf("browser: path too long for '%s'", name);
-        return;
-    }
-    memcpy(next, s_state.path, len);
-    if (len == 0 || next[len - 1] != '/')
-        next[len++] = '/';
-    memcpy(next + len, name, nlen);
-    next[len + nlen] = '\0';
-    browser_load(next);
-}
-
-/* Move to the parent directory, clamped at the configured root.
- * Returns false when already at the root (caller decides to pop). */
-static bool browser_to_parent(void)
-{
-    char next[BROWSER_PATH_MAX];
-    char *slash;
-
-    if (browser_same_path(s_state.path, s_root))
+    if (!strcmp(s_state.path, s_root))
         return false;
-
-    browser_path_copy(next, s_state.path, BROWSER_PATH_MAX);
+    snprintf(next, sizeof next, "%s", s_state.path);
     slash = strrchr(next, '/');
-    if (slash == NULL)
+    if (!slash)
         return false;
     if (slash == next)
-        next[1] = '\0';   /* keep the leading "/" */
+        next[1] = '\0';
     else
         *slash = '\0';
-
-    /* never navigate above the configured root */
-    if (strlen(next) < strlen(s_root) &&
-        strncmp(next, s_root, strlen(next)) == 0) {
-        browser_path_copy(next, s_root, BROWSER_PATH_MAX);
-    }
-    browser_load(next);
+    if (strlen(next) < strlen(s_root))
+        snprintf(next, sizeof next, "%s", s_root);
+    go(next);
     return true;
 }
 
-/* ---- screen vtable ----------------------------------------------------- */
+/* ---- screen ------------------------------------------------------------------ */
 
 static void browser_screen_on_enter(void)
 {
     if (s_state.path[0] == '\0')
-        browser_path_copy(s_state.path, "/", BROWSER_PATH_MAX);
-    s_state.mounted = false;
-    s_state.win_start = 0;
-    s_state.top = 0;
-    browser_ensure_visible();
+        snprintf(s_state.path, sizeof s_state.path, "/");
+    load();                                  /* also after a queue reused dirlist */
 }
 
 static void browser_screen_draw(void)
 {
-    int page = browser_page();
-    int row;
     char footer[32];
 
     display_clear(THEME_COLOR_BG);
-
-    /* title bar: current path */
-    display_fill_rect(0, 0, DISPLAY_W - 1, THEME_TITLE_H - 1,
-                      THEME_COLOR_TITLE_BG);
-    display_draw_text(THEME_PAD, THEME_TITLE_TEXT_Y + THEME_TEXT_YOFF,
-                      s_state.path, THEME_COLOR_ACCENT, THEME_COLOR_TITLE_BG);
-
-    /* visible rows from the fetch window */
-    for (row = 0; row < page; row++) {
-        int abs_idx = s_state.top + row;
-        uint32_t widx = (uint32_t)abs_idx - s_state.win_start;
-        int y = THEME_MENU_TOP + row * THEME_ITEM_H;
-        const fs_dirent_t *ent;
+    display_fill_rect(0, 0, DISPLAY_W - 1, THEME_TITLE_H - 1, THEME_COLOR_TITLE_BG);
+    display_draw_text(THEME_PAD, THEME_TITLE_TEXT_Y + THEME_TEXT_YOFF, s_state.path,
+                      THEME_COLOR_ACCENT, THEME_COLOR_TITLE_BG);
+    for (int row = 0; row < BROWSER_WINDOW; row++) {
+        int i = s_state.top + row;
         char label[FS_NAME_MAX + 2];
-        bool selected;
 
-        if (abs_idx >= (int)s_state.total || widx >= s_state.win_count)
+        if (i >= (int)s_state.total)
             break;
-        ent = &s_state.window[widx];
-        selected = abs_idx == s_state.cursor;
-
-        if (ent->is_dir) {
-            snprintf(label, sizeof(label), "%s/", ent->name);
-            menu_draw_item(y, label, NULL, selected);
-        } else {
-            menu_draw_item(y, ent->name, NULL, selected);
-        }
+        snprintf(label, sizeof label, entry_is_dir(i) ? "%s/" : "%s", entry_name(i));
+        menu_draw_item(THEME_MENU_TOP + row * THEME_ITEM_H, label, NULL, i == s_state.cursor);
     }
-
-    /* footer: names + counts only */
-    snprintf(footer, sizeof(footer), "%u / %u",
-             (unsigned)(s_state.total ? s_state.cursor + 1 : 0),
-             (unsigned)s_state.total);
+    if (s_state.page || s_state.more)
+        snprintf(footer, sizeof footer, "%u / %u  page %d%s", (unsigned)(s_state.total ? s_state.cursor + 1 : 0),
+                 (unsigned)s_state.total, s_state.page + 1, s_state.more ? "+" : "");
+    else
+        snprintf(footer, sizeof footer, "%u / %u", (unsigned)(s_state.total ? s_state.cursor + 1 : 0),
+                 (unsigned)s_state.total);
     menu_draw_item(DISPLAY_H - THEME_ITEM_H, footer, NULL, false);
 }
 
-static void invalidate_row(int abs_idx)
+static void invalidate_row(int i)
 {
-    int y = THEME_MENU_TOP + (abs_idx - s_state.top) * THEME_ITEM_H;
+    int y = THEME_MENU_TOP + (i - s_state.top) * THEME_ITEM_H;
 
     ui_invalidate(0, y, DISPLAY_W - 1, y + THEME_ITEM_H - 1);
 }
 
-/* Cursor step: without a scroll only the two rows and the "n / total" footer
- * change, so only those are flushed (a full repaint is 54400 pixels). */
-static void browser_step(int delta)
+/* Cursor step: without a scroll only two rows and the footer change. */
+static void step(int delta)
 {
-    int old_cursor = s_state.cursor, old_top = s_state.top;
+    int old = s_state.cursor, old_top = s_state.top;
 
     s_state.cursor += delta;
-    browser_ensure_visible();
+    if (s_state.cursor < s_state.top)
+        s_state.top = s_state.cursor;
+    if (s_state.cursor > s_state.top + BROWSER_WINDOW - 1)
+        s_state.top = s_state.cursor - BROWSER_WINDOW + 1;
     if (s_state.top != old_top) {
         ui_invalidate_all();
         return;
     }
-    invalidate_row(old_cursor);
+    invalidate_row(old);
     invalidate_row(s_state.cursor);
     ui_invalidate(0, DISPLAY_H - THEME_ITEM_H, DISPLAY_W - 1, DISPLAY_H - 1);
 }
 
+static void flip_page(int delta)
+{
+    s_state.page += delta;
+    s_state.cursor = s_state.top = 0;
+    load();
+    if (delta < 0 && s_state.total) {
+        s_state.cursor = (int)s_state.total - 1;
+        s_state.top = s_state.cursor > BROWSER_WINDOW - 1 ? s_state.cursor - BROWSER_WINDOW + 1 : 0;
+    }
+    ui_invalidate_all();
+}
+
+static void show_result(int rc, const char *name)
+{
+    char shown[64];
+
+    snprintf(shown, sizeof shown, "%s", name);   /* dirlist may be reloaded below */
+    if (rc == PLAYER_OK) {
+        track_info_t ti;
+
+        player_screen_set_status(NULL);
+        rc = player_play();
+        if (player_get_track(&ti) == PLAYER_OK)
+            player_screen_set_track(ti.title, ti.duration_ms > 0 ? (uint32_t)(ti.duration_ms / 1000) : 0);
+    }
+    if (rc != PLAYER_OK) {
+        char eb[32];
+
+        snprintf(eb, sizeof eb, rc == PLAYER_ERR_EMPTY ? "nothing to play here" : "cannot play (%d)", rc);
+        player_screen_set_track(shown, 0);
+        player_screen_set_status(eb);
+        log_printf("browser: play '%s' failed (%d)", shown, rc);
+    }
+    ui_push_screen(&player_screen);
+}
+
 static void browser_screen_handle_event(const input_event_t *ev)
 {
+    int i = s_state.cursor;
+    int hold = ev->adc_value == INPUT_ADC_LONG;
+
     switch (ev->type) {
     case KEY_UP:
-        if (s_state.cursor > 0)
-            browser_step(-1);
+        if (i > 0)
+            step(-1);
+        else if (s_state.page > 0)
+            flip_page(-1);
         break;
     case KEY_DOWN:
-        if (s_state.cursor < (int)s_state.total - 1)
-            browser_step(+1);
+        if (i < (int)s_state.total - 1)
+            step(+1);
+        else if (s_state.more)
+            flip_page(+1);
         break;
     case KEY_SELECT: {
-        uint32_t widx = (uint32_t)s_state.cursor - s_state.win_start;
-        const fs_dirent_t *ent;
+        char full[BROWSER_PATH_MAX + 2];
 
-        if (widx >= s_state.win_count)
+        if (i >= (int)s_state.total || join(full, sizeof full, entry_name(i)) != 0)
             break;
-        ent = &s_state.window[widx];
-        if (ent->is_dir) {
-            browser_enter_dir(ent->name);
+        if (entry_is_dir(i) && !hold) {
+            go(full);
             ui_invalidate_all();
-        } else {
-            /* Open with the player module and show Now Playing.
-             * Full path = "<dir>/<name>" (same bounded build as enter_dir). */
-            char full[BROWSER_PATH_MAX + 2];
-            size_t len = strlen(s_state.path);
-            size_t nlen = strlen(ent->name);
-            int rc;
-
-            if (len + nlen + 2 > sizeof(full)) {
-                log_printf("browser: path too long for '%s'", ent->name);
-                break;
-            }
-            memcpy(full, s_state.path, len);
-            if (len == 0 || full[len - 1] != '/')
-                full[len++] = '/';
-            memcpy(full + len, ent->name, nlen + 1);
-
-            rc = player_open(full);
-            if (rc == PLAYER_OK) {
-                track_info_t ti;
-
-                player_screen_set_status(NULL);
-                if (player_get_track(&ti) == PLAYER_OK)
-                    player_screen_set_track(
-                        ti.title,
-                        ti.duration_ms > 0
-                            ? (uint32_t)(ti.duration_ms / 1000) : 0);
-                (void)player_play();
-            } else {
-                /* Show the raw error code (-1 io, -2 format, -3 out of the
-                 * codec subset e.g. FLAC block/seektable pool, -4 no codec):
-                 * "cannot open file" hides three distinct causes. */
-                char eb[28];
-                extern unsigned flac_diag_block, flac_diag_channels;
-                extern unsigned long flac_diag_need;
-                extern int flac_diag_reason;
-                if (rc == -3 && flac_diag_reason == 2)
-                    snprintf(eb, sizeof eb, "flac pool %lu", flac_diag_need);
-                else if (rc == -3 && flac_diag_reason)
-                    snprintf(eb, sizeof eb, "flac %d ch%u b%u", flac_diag_reason,
-                             flac_diag_channels, flac_diag_block);
-                else
-                    snprintf(eb, sizeof eb, "cannot open (%d)", rc);
-                player_screen_set_track(ent->name, 0);
-                player_screen_set_status(
-                    rc == PLAYER_ERR_UNSUPPORTED ? eb : eb);
-                log_printf("browser: open '%s' failed (%d) rsn=%d blk=%u ch=%u st=%lu",
-                           full, rc, flac_diag_reason, flac_diag_block,
-                           flac_diag_channels, flac_diag_need);
-            }
-            ui_push_screen(&player_screen);
+        } else if (entry_is_dir(i)) {
+            show_result(player_open_tree(full), entry_name(i));
+        } else if (!hold) {
+            show_result(player_open(full), entry_name(i));
         }
         break;
     }
     case KEY_BACK:
-        if (browser_to_parent()) {
+        if (hold)
+            break;
+        if (to_parent())
             ui_invalidate_all();
-        } else {
-            /* at the root: leave the browser (the app layer pushed it) */
+        else
             ui_pop_screen();
-        }
         break;
     default:
         break;
@@ -341,12 +258,9 @@ void browser_screen_set_root(const char *path)
 {
     if (path == NULL || path[0] == '\0')
         path = "/";
-    browser_path_copy(s_root, path, BROWSER_PATH_MAX);
-    browser_path_copy(s_state.path, path, BROWSER_PATH_MAX);
-    s_state.cursor = 0;
-    s_state.top = 0;
-    s_state.win_start = 0;
-    s_state.win_count = 0;
+    snprintf(s_root, sizeof s_root, "%s", path);
+    snprintf(s_state.path, sizeof s_state.path, "%s", path);
+    s_state.cursor = s_state.top = s_state.page = 0;
     s_state.total = 0;
     s_state.mounted = false;
 }
@@ -354,4 +268,16 @@ void browser_screen_set_root(const char *path)
 const browser_state_t *browser_screen_state(void)
 {
     return &s_state;
+}
+
+/* Open at a saved folder and row (resume at power-on); falls back to "/". */
+void browser_screen_resume(const char *path, int cursor)
+{
+    go(path);
+    if (!s_state.total && strcmp(path, "/")) {
+        go("/");
+        return;
+    }
+    s_state.cursor = cursor < (int)s_state.total ? cursor : 0;
+    s_state.top = s_state.cursor > BROWSER_WINDOW - 1 ? s_state.cursor - BROWSER_WINDOW + 1 : 0;
 }

@@ -47,12 +47,14 @@ typedef struct {                     /* directory cursor */
     uint32_t clus, sec, off, left;   /* left: clusters, contiguous dirs only */
     int contig;
     uint32_t lba;                    /* sector of the entry last returned */
+    uint32_t idx;                    /* entries returned so far (slot = idx - 1) */
 } cur_t;
 
 typedef struct {                     /* a directory entry or the root */
     char name[FS_NAME_MAX];
     int is_dir, contig;
     uint32_t clus, size;
+    uint32_t slot;                   /* index of its (primary) entry in the directory */
     uint32_t dlba, doff;             /* FAT: where the 8.3 entry lives */
     uint8_t raw[11], nlfn;           /* 8.3 name; long-name entries before it */
     cur_t lfn;                       /* cursor at the first of those */
@@ -423,6 +425,7 @@ static void cur_init(cur_t *d, const vol_t *v, const ent_t *dir)
     d->sec = d->off = 0;
     d->contig = dir->contig;
     d->left = dir->contig ? (dir->size + cl - 1u) / cl : 0u;
+    d->idx = 0;
 }
 
 /* Next 32-byte entry; NULL at the end of the directory (d->clus then still
@@ -461,6 +464,7 @@ static uint8_t *cur_next(cur_t *d)
         return NULL;
     b += d->off;
     d->off += 32u;
+    d->idx++;
     return b;
 }
 
@@ -558,6 +562,7 @@ static int fat_dir_read(cur_t *d, ent_t *e)
         e->size = le32(p + 28);
         e->dlba = d->lba;
         e->doff = d->off - 32u;
+        e->slot = d->idx - 1u;
         memcpy(e->raw, p, 11);
         if (e->is_dir && e->clus == 0u)      /* ".." to root: not reported */
             continue;
@@ -578,6 +583,7 @@ static int exfat_dir_read(cur_t *d, ent_t *e)
 
         if (p[0] != 0x85 || p[1] < 2u)
             continue;
+        e->slot = d->idx - 1u;
         n2 = p[1];
         attr = le16(p + 4);
         if (!(p = cur_next(d)) || p[0] != 0xC0)
@@ -849,6 +855,110 @@ int fs_exists(const char *path)
     const vol_t *v;
 
     return resolve(path, &v) >= 0;
+}
+
+/* ---- references: a file or folder found by a scan, opened without its path ---- */
+
+static void ref_of(fs_ref_t *r, const vol_t *v, const ent_t *dir, const ent_t *e)
+{
+    r->clus = e->clus;
+    r->size = e->size;
+    r->pclus = dir->clus;
+    r->psize = dir->size;
+    r->slot = (uint16_t)e->slot;
+    r->vol = (uint8_t)(v - s_vol);
+    r->flags = (uint8_t)((e->is_dir ? FS_REF_DIR : 0) | (e->contig ? FS_REF_CONTIG : 0) |
+                         (dir->contig ? FS_REF_PCONTIG : 0));
+}
+
+static int scan(const vol_t *v, ent_t *dir, fs_scan_cb cb, void *u)
+{
+    ent_t here = *dir;                       /* s_ent is reused by the reader */
+    cur_t d;
+    fs_ref_t r;
+    int n = 0;
+
+    cur_init(&d, v, &here);
+    while (dir_read(&d, &s_ent) == 1) {
+        ref_of(&r, v, &here, &s_ent);
+        n++;
+        if (cb(u, s_ent.name, &r))
+            break;
+    }
+    return n;
+}
+
+int fs_scan(const char *path, fs_scan_cb cb, void *u)
+{
+    const vol_t *v;
+    int r = resolve(path, &v);
+
+    if (r != 0)
+        return r < 0 ? r : FS_ERR_ARG;       /* "/": the volume list has no refs */
+    if (!s_ent.is_dir)
+        return FS_ERR_OPEN;
+    return scan(v, &s_ent, cb, u);
+}
+
+static int ref_vol(const fs_ref_t *r, const vol_t **pv)
+{
+    if (!r || r->vol >= FS_VOLUMES || !s_vol[r->vol].type)
+        return FS_ERR_ARG;
+    *pv = &s_vol[r->vol];
+    return 0;
+}
+
+int fs_scan_ref(const fs_ref_t *dir, fs_scan_cb cb, void *u)
+{
+    const vol_t *v;
+    ent_t e;
+
+    if (ref_vol(dir, &v) || !(dir->flags & FS_REF_DIR))
+        return FS_ERR_ARG;
+    memset(&e, 0, sizeof e);
+    e.is_dir = 1;
+    e.clus = dir->clus;
+    e.size = dir->size;
+    e.contig = (dir->flags & FS_REF_CONTIG) != 0;
+    return scan(v, &e, cb, u);
+}
+
+fs_file_t *fs_open_ref(const fs_ref_t *r)
+{
+    const vol_t *v;
+    struct fs_file *f;
+
+    if (ref_vol(r, &v) || (r->flags & FS_REF_DIR))
+        return NULL;
+    memset(&s_ent, 0, sizeof s_ent);         /* no directory entry: read-only use */
+    if (!(f = handle_new(v)))
+        return NULL;
+    f->first = f->clus = r->clus;
+    f->size = r->size;
+    f->contig = (uint8_t)((r->flags & FS_REF_CONTIG) != 0);
+    return f;
+}
+
+int fs_ref_name(const fs_ref_t *r, char *out, unsigned long n)
+{
+    const vol_t *v;
+    ent_t dir;
+    cur_t d;
+
+    if (ref_vol(r, &v) || !n)
+        return FS_ERR_ARG;
+    memset(&dir, 0, sizeof dir);
+    dir.is_dir = 1;
+    dir.clus = r->pclus;
+    dir.size = r->psize;
+    dir.contig = (r->flags & FS_REF_PCONTIG) != 0;
+    cur_init(&d, v, &dir);
+    while (dir_read(&d, &s_ent) == 1)
+        if (s_ent.slot == r->slot && s_ent.clus == r->clus) {
+            snprintf(out, n, "%s", s_ent.name);
+            return 0;
+        }
+    return FS_ERR_OPEN;
 }
 
 fs_file_t *fs_open_read(const char *path)

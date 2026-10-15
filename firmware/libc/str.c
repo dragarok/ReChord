@@ -114,3 +114,29 @@ int strcasecmp(const char *a, const char *b)
     }
     return (int)(unsigned char)*a - (int)(unsigned char)*b;
 }
+
+/* Decimal (optional sign); stops at the first non-digit. */
+unsigned long strtoul(const char *s, char **end, int base)
+{
+    unsigned long v = 0;
+
+    (void)base;                              /* decimal only */
+    while (*s == ' ')
+        s++;
+    while (*s >= '0' && *s <= '9')
+        v = v * 10u + (unsigned long)(*s++ - '0');
+    if (end)
+        *end = (char *)s;
+    return v;
+}
+
+int atoi(const char *s)
+{
+    int neg = 0;
+
+    while (*s == ' ')
+        s++;
+    if (*s == '-' || *s == '+')
+        neg = *s++ == '-';
+    return neg ? -(int)strtoul(s, 0, 10) : (int)strtoul(s, 0, 10);
+}

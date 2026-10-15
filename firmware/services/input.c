@@ -86,25 +86,42 @@ int input_poll(input_event_t *ev)
 
 static unsigned s_held_scans;        /* scans the debounced key has been held */
 
+/* UP/DOWN act on the press (and repeat while held); the other keys have a press
+ * and a hold meaning, so they act on release (short) or at INPUT_LONG_SCANS. */
+static int acts_on_press(int key)
+{
+    return key == KEY_UP || key == KEY_DOWN;
+}
+
 int input_scan(int adc_value, int power)
 {
-    int key = power ? KEY_POWER : input_map_adc(adc_value);
+    int key = power ? KEY_POWER : input_map_adc(adc_value), prev, r = 0;
 
     if (key != s_scan_last) {          /* not stable yet */
         s_scan_last = key;
         return 0;
     }
     if (key == s_scan_held) {
-        /* a press fires at once; holding it on fires one more, long, event */
-        if (key != KEY_NONE && ++s_held_scans == INPUT_LONG_SCANS)
+        if (key == KEY_NONE)
+            return 0;
+        s_held_scans++;
+        if (acts_on_press(key)) {
+            if (s_held_scans >= INPUT_REPEAT_START &&
+                (s_held_scans - INPUT_REPEAT_START) % INPUT_REPEAT_EVERY == 0)
+                return input_push(key, INPUT_ADC_REPEAT) == INPUT_OK;
+        } else if (s_held_scans == INPUT_LONG_SCANS) {
             return input_push(key, INPUT_ADC_LONG) == INPUT_OK;
+        }
         return 0;
     }
+    prev = s_scan_held;
+    if (prev != KEY_NONE && !acts_on_press(prev) && s_held_scans < INPUT_LONG_SCANS)
+        r = input_push(prev, prev == KEY_POWER ? -1 : 0) == INPUT_OK;       /* short press, on release */
     s_scan_held = key;
     s_held_scans = 0;
-    if (key == KEY_NONE)
-        return 0;
-    return input_push(key, power ? -1 : adc_value) == INPUT_OK;
+    if (key != KEY_NONE && acts_on_press(key))
+        r |= input_push(key, adc_value) == INPUT_OK;
+    return r;
 }
 
 void input_mock_clear(void)

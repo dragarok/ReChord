@@ -55,7 +55,6 @@ AP_STARTUP_SRCS := \
 # UI layer (same set as $(UI_SRCS) in firmware/ui/ui.mk).
 AP_UI_SRCS := \
   firmware/ui/ui.c \
-  firmware/ui/settings_schema.c \
   firmware/ui/screens/boot_screen.c \
   firmware/ui/screens/menu_screen.c \
   firmware/ui/screens/browser_screen.c \
@@ -81,7 +80,6 @@ AP_DRIVER_SRCS := \
 # Services: settings/log/input + the target fs backend (same set as
 # $(SERVICES_TARGET_SRCS) in firmware/services/services.mk).
 AP_SERVICE_SRCS := \
-  firmware/services/settings.c \
   firmware/services/log.c \
   firmware/services/input.c \
   firmware/services/fw_update.c \
@@ -89,7 +87,10 @@ AP_SERVICE_SRCS := \
   firmware/services/fs_target.c \
   firmware/services/screenshot.c \
   firmware/services/tags.c \
-  firmware/services/modules.c
+  firmware/services/modules.c \
+  firmware/services/dirlist.c \
+  firmware/services/queue.c \
+  firmware/services/config.c
 
 # Theme module (same set as $(THEME_SRCS) in firmware/theme/theme.mk).
 AP_THEME_SRCS := \

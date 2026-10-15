@@ -23,6 +23,8 @@
 #include "services/fs.h"
 #include "services/log.h"
 #include "services/modules.h"
+#include "services/dirlist.h"
+#include "services/queue.h"
 
 
 #define REG(a)      (*(volatile uint32_t *)(a))
@@ -43,9 +45,6 @@
 
 /* ---- playlist: a directory and an index into its listing ---------------- */
 
-#define PATH_MAX_A 160
-static char s_dir[PATH_MAX_A];
-static uint32_t s_next_index;              /* next directory entry to try */
 static char s_name[FS_NAME_MAX];           /* entry being streamed */
 
 /* ---- streaming state ----------------------------------------------------- */
@@ -77,14 +76,6 @@ static int ext_is(const char *name, const char *ext)
     return !*dot && !*ext;
 }
 
-static int playable(const char *name)
-{
-    return ext_is(name, "flac") || ext_is(name, "wav") || ext_is(name, "mp3") || ext_is(name, "mp2") ||
-           ext_is(name, "aif") || ext_is(name, "aiff") || ext_is(name, "aifc") ||
-           ext_is(name, "m4a") || ext_is(name, "m4b") || ext_is(name, "mp4") || ext_is(name, "alac") ||
-           ext_is(name, "ogg") || ext_is(name, "oga") || ext_is(name, "opus") || ext_is(name, "wv") ||
-           ext_is(name, "dsf") || ext_is(name, "dff");
-}
 
 /* FLAC: STREAMINFO -> track, synthesized header in s_hdr, file left at the first frame. */
 static int open_flac(fs_file_t *f, as_track_t *t)
@@ -281,13 +272,13 @@ static mp4_cur_t s_cur;
 static uint32_t s_fpos;                    /* where s_file is */
 static uint32_t s_stream_left;             /* MP4: bytes promised to B not yet written */
 
-static int open_m4a(fs_file_t *f, const char *path, as_track_t *t)
+static int open_m4a(fs_file_t *f, const fs_ref_t *ref, as_track_t *t)
 {
     uint32_t tables;
 
     if (mp4_info(mp3_rd, f, (uint32_t)fs_file_size(f), &s_mi) != 0)
         return -1;
-    s_tab = fs_open_read(path);
+    s_tab = fs_open_ref(ref);
     if (!s_tab)
         return -1;
     tables = s_mi.stsz_off < s_mi.stco_off ? s_mi.stsz_off : s_mi.stco_off;
@@ -497,52 +488,39 @@ static void close_track(void)
     s_mp4 = 0;
 }
 
-/* Open the next playable entry of the playlist directory and queue it for B. */
+/* Open the next track the play queue hands out and queue it for B; a file that
+ * does not open is skipped. */
 static int open_next(void)
 {
-    fs_dirent_t ent;
-    uint32_t got, total;
-    char path[PATH_MAX_A + FS_NAME_MAX];
+    char name[FS_NAME_MAX];
 
-    for (;;) {
+    for (int tries = 0; tries < Q_MAX; tries++) {
         as_track_t t;
-        size_t dl;
+        fs_ref_t ref;
+        int kind, pos;
 
-        int r = fs_list_dir(s_dir, s_next_index, &ent, 1, &got, &total);
-
-        if (r != 0 || got == 0) {
-            if (r)
-                log_printf("audio: list %s #%u: %d", s_dir, (unsigned)s_next_index, r);
+        if (queue_take(&ref, &kind, &pos) != 0)
             return -1;
-        }
-        s_next_index++;
-        if (ent.is_dir || !playable(ent.name))
-            continue;
-        dl = strlen(s_dir);
-        memcpy(path, s_dir, dl);
-        if (!dl || path[dl - 1] != '/')
-            path[dl++] = '/';
-        strcpy(path + dl, ent.name);
-        s_file = fs_open_read(path);
+        if (fs_ref_name(&ref, name, sizeof name) != 0)
+            strcpy(name, "?");
+        s_file = fs_open_ref(&ref);
         if (!s_file) {
-            log_printf("audio: cannot open %s", ent.name);
+            log_printf("audio: cannot open %s", name);
             continue;
         }
         memset(&t, 0, sizeof t);
         s_kbps = 0;
         s_mp4 = 0;
-        if ((ext_is(ent.name, "flac") ? open_flac(s_file, &t) :
-             ext_is(ent.name, "wav") ? open_wav(s_file, &t) :
-             (ext_is(ent.name, "aif") || ext_is(ent.name, "aiff") || ext_is(ent.name, "aifc")) ?
-                 open_aiff(s_file, &t) :
-             (ext_is(ent.name, "mp3") || ext_is(ent.name, "mp2")) ? open_mp3(s_file, &t) :
-             (ext_is(ent.name, "ogg") || ext_is(ent.name, "oga") || ext_is(ent.name, "opus")) ?
-                 open_ogg(s_file, &t) :
-             ext_is(ent.name, "wv") ? open_wv(s_file, &t) :
-             ext_is(ent.name, "dsf") ? open_dsf(s_file, &t) :
-             ext_is(ent.name, "dff") ? open_dff(s_file, &t) :
-             open_m4a(s_file, path, &t)) != 0) {
-            log_printf("audio: %s: not a playable stream (size %ld)", ent.name, fs_file_size(s_file));
+        if ((kind == DL_FLAC ? open_flac(s_file, &t) :
+             kind == DL_WAV ? open_wav(s_file, &t) :
+             kind == DL_AIFF ? open_aiff(s_file, &t) :
+             kind == DL_MP3 ? open_mp3(s_file, &t) :
+             kind == DL_OGG || kind == DL_OPUS ? open_ogg(s_file, &t) :
+             kind == DL_WV ? open_wv(s_file, &t) :
+             kind == DL_DSF ? open_dsf(s_file, &t) :
+             kind == DL_DFF ? open_dff(s_file, &t) :
+             kind == DL_M4A ? open_m4a(s_file, &ref, &t) : -1) != 0) {
+            log_printf("audio: %s: not a playable stream (size %ld)", name, fs_file_size(s_file));
             close_track();
             continue;
         }
@@ -553,7 +531,6 @@ static int open_next(void)
         t.bytes += t.skip;
         s_skip_left = t.skip;
         s_hdr_pos = 0;
-        strncpy(s_name, ent.name, sizeof s_name - 1);
         {
             audio_track_t *u = &s_tracks[t.seq % AS_QUEUE];
 
@@ -564,20 +541,22 @@ static int open_next(void)
             u->frames = t.frames;
             u->codec = t.codec;
             u->kbps = s_kbps;
-            u->index = s_next_index - 1u;
-            strncpy(u->name, ent.name, sizeof u->name - 1);
+            u->index = (uint32_t)pos;
+            u->ref = ref;
+            strncpy(u->name, name, sizeof u->name - 1);
             u->name[sizeof u->name - 1] = 0;
         }
         AS->q[AS->q_wr % AS_QUEUE] = t;
         __asm__ volatile ("dmb" ::: "memory");   /* the entry before the count that publishes it */
         AS->q_wr++;
         log_printf("audio: queued %u '%s' codec %u %u Hz %u bit %u ch, %u frames, %u bytes",
-                   (unsigned)t.seq, ent.name, (unsigned)t.codec, (unsigned)t.rate, (unsigned)t.bits,
+                   (unsigned)t.seq, name, (unsigned)t.codec, (unsigned)t.rate, (unsigned)t.bits,
                    (unsigned)t.channels, (unsigned)t.frames, (unsigned)t.bytes);
         if (!s_rate)
             s_rate = t.rate;
         return 0;
     }
+    return -1;
 }
 
 /* Top up the input ring: header bytes, then file data, then the next file. */
@@ -837,7 +816,7 @@ static void halt(void)
     s_paused = 0;
 }
 
-int audio_play_dir(const char *dir, uint32_t index)
+int audio_play(int pos)
 {
     static int s_as_init;
     const char *image;
@@ -849,8 +828,7 @@ int audio_play_dir(const char *dir, uint32_t index)
         AS->version = AS_VERSION;
         s_as_init = 1;
     }
-    strncpy(s_dir, dir, sizeof s_dir - 1);
-    s_next_index = index;
+    queue_seek(pos);
     s_rate = 0;
     AS->in_wr = AS->in_rd = 0;
     AS->q_wr = AS->q_rd = 0;
@@ -893,22 +871,18 @@ void audio_stop(void)
 int audio_skip(int dir)
 {
     audio_status_t st;
-    fs_dirent_t ent;
-    uint32_t got, total, idx;
+    int pos;
 
     audio_status(&st);
     if (!st.seq)
         return -3;
-    idx = st.track.index;
     if (dir > 0)
-        return audio_play_dir(s_dir, idx + 1u);
-    if (st.frames <= 3u * st.track.rate) {          /* near the start: the previous playable entry */
-        for (uint32_t j = idx; j-- > 0; ) {
-            if (fs_list_dir(s_dir, j, &ent, 1, &got, &total) == 0 && got && !ent.is_dir && playable(ent.name))
-                return audio_play_dir(s_dir, j);
-        }
-    }
-    return audio_play_dir(s_dir, idx);              /* restart this one */
+        pos = queue_next_pos();
+    else if (st.frames <= 3u * st.track.rate)       /* near the start: the previous track */
+        pos = queue_prev_pos();
+    else
+        pos = queue_pos();                           /* restart this one */
+    return pos < 0 ? -3 : audio_play(pos);
 }
 
 /* Pause: stop the I2S transfer; the DMA then stalls on its handshake and keeps
@@ -1013,6 +987,7 @@ int audio_status(audio_status_t *st)
     st->seq = seq;
     if (s_b_up && seq && t->seq == seq) {
         st->track = *t;
+        queue_heard((int)t->index);
         /* decoded minus what still waits in the ring */
         {
             uint32_t buffered = (AS->pcm_wr - AS->pcm_played) * AS_BLOCK_FRAMES;

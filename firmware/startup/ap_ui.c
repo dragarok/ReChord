@@ -17,6 +17,10 @@
 #include "services/fs_target.h"
 #include "services/fw_update.h"
 #include "services/input.h"
+#include "services/config.h"
+#include "services/queue.h"
+#include "services/log.h"
+#include "audio/audio.h"
 #include "player.h"
 #include "ui/ui.h"
 #include "ui/screens/screens.h"
@@ -124,6 +128,11 @@ static int ask(int any_key)
     for (;;) {
         input_scan(keys_adc(), keys_power());
         while (input_poll(&ev) > 0) {
+            static const char *const k_names[] = { "none", "up", "down", "select", "back", "menu", "power" };
+
+            log_printf("ui: key %s%s on %s", ev.type >= 0 && ev.type < 7 ? k_names[ev.type] : "?",
+                       ev.adc_value == INPUT_ADC_LONG ? " (hold)" : ev.adc_value == INPUT_ADC_REPEAT ? " (repeat)" : "",
+                       ui_top_screen() ? ui_top_screen()->name : "-");
             if (any_key || ev.type == KEY_SELECT)
                 return 1;
             if (ev.type == KEY_BACK || ev.type == KEY_POWER)
@@ -189,8 +198,23 @@ static void update_prompt(void)
     power_off();
 }
 
+/* Before anything that ends the session (power off, USB disk): the settings and
+ * where the browser and player were, then the log. */
+static void save_state(const char *why)
+{
+    const browser_state_t *b = browser_screen_state();
+
+    if (b->path[0] && strcmp(b->path, "/")) {
+        snprintf(g_cfg.browse, sizeof g_cfg.browse, "%s", b->path);
+        g_cfg.cursor = (uint16_t)b->cursor;
+    }
+    config_save();
+    log_flush(why);
+}
+
 static void power_off(void)
 {
+    save_state("power off");
     screen("Powering off");
     while (keys_power())
         cpu_wait_tick();
@@ -216,6 +240,7 @@ static void usb_session(void)
         return;
     }
     player_stop();                       /* the PC may rewrite the files we stream */
+    save_state("usb");
     screen("USB mass storage");
     line(1, "eject on the PC or press power");
     display_flush_rows(0, DISPLAY_H - 1);
@@ -232,6 +257,13 @@ static void usb_session(void)
     if (r == USB_EXIT_EJECT || r == USB_EXIT_UNPLUG || r == USB_EXIT_USER)
         update_prompt();
     ui_invalidate_all();
+}
+
+/* After a settings change: what applies at once (brightness, debug strip and CPU
+ * policy arrive with the power work; the play mode applies in settings_screen). */
+void settings_apply(void)
+{
+    config_save_later();
 }
 
 static void open_files(void)    { browser_screen_set_root("/"); ui_push_screen(&browser_screen); }
@@ -539,9 +571,24 @@ void ap_ui_loop(void)
     if (s_user)
         update_prompt();  /* at boot too, as stock and RECHO check */
     player_init();       /* register wav/mp3/flac codecs (registry) */
+    config_load();
+    queue_set_mode(g_cfg.play);
+    audio_set_volume_db(g_cfg.volume == CFG_VOLUME_MUTE ? -90 : g_cfg.volume);
+    log_printf("cfg: play %s, volume %d, resume %u", queue_mode_name(g_cfg.play), g_cfg.volume, g_cfg.resume);
+    log_flush("boot");
     ui_init();
     menu_screen_bind(&k_root);
     ui_push_screen(&menu_screen);
+    if (s_user && g_cfg.resume != CFG_RESUME_OFF && g_cfg.browse[0]) {   /* resume: the folder */
+        browser_screen_set_root("/");
+        browser_screen_resume(g_cfg.browse, g_cfg.cursor);
+        ui_push_screen(&browser_screen);
+    }
+    if (s_user && g_cfg.resume == CFG_RESUME_TRACK && g_cfg.track[0] &&
+        player_resume(g_cfg.track) == 0 && player_play() == PLAYER_OK) {
+        ui_push_screen(&player_screen);
+        log_printf("ui: resumed %s", g_cfg.track);
+    }
     for (;;) {
         int adc = keys_adc(), power = keys_power(), cable = usb_cable();
         int adc2 = board_adc_ch2();
@@ -587,11 +634,31 @@ void ap_ui_loop(void)
         input_scan(adc, power);
 
         while (input_poll(&ev) > 0) {
-            if (ev.adc_value == INPUT_ADC_LONG && ui_top_screen() != &player_screen)
-                continue;                /* long presses only mean something on Now Playing */
-            if (ev.type == KEY_MENU) {
-                while (ui_stack_depth() > 1)
+            static const char *const k_names[] = { "none", "up", "down", "select", "back", "menu", "power" };
+
+            log_printf("ui: key %s%s on %s", ev.type >= 0 && ev.type < 7 ? k_names[ev.type] : "?",
+                       ev.adc_value == INPUT_ADC_LONG ? " (hold)" : ev.adc_value == INPUT_ADC_REPEAT ? " (repeat)" : "",
+                       ui_top_screen() ? ui_top_screen()->name : "-");
+            if (ev.adc_value == INPUT_ADC_LONG && ev.type != KEY_MENU &&
+                ui_top_screen() != &player_screen && ui_top_screen() != &browser_screen)
+                continue;                /* holds mean something on Now Playing and Files (and MENU) */
+            if (ev.type == KEY_MENU && ev.adc_value == INPUT_ADC_LONG) {
+                while (ui_stack_depth() > 1)       /* hold: the main menu */
                     ui_pop_screen();
+            } else if (ev.type == KEY_MENU) {      /* Files <-> Now playing */
+                if (ui_top_screen() == &browser_screen) {
+                    ui_push_screen(&player_screen);
+                } else {
+                    while (ui_stack_depth() > 1 && ui_top_screen() != &browser_screen)
+                        ui_pop_screen();
+                    if (ui_top_screen() != &browser_screen) {
+                        if (browser_screen_state()->path[0])
+                            ui_push_screen(&browser_screen);   /* where it was */
+                        else
+                            open_files();
+                    }
+                }
+                ui_invalidate_all();
             } else {
                 ui_handle_event(&ev);
             }
@@ -601,6 +668,17 @@ void ap_ui_loop(void)
 
         /* audio pump + Now Playing sync (no-ops without a playing track) */
         (void)player_process();
+        config_poll();
+        {
+            static uint32_t heard;
+            audio_status_t st;
+
+            audio_status(&st);
+            if (st.seq && st.seq != heard) {    /* the heard track changed: remember it */
+                heard = st.seq;
+                player_note_track(st.track.ref.clus);
+            }
+        }
         if (ui_top_screen() == &player_screen)
             player_screen_refresh();     /* only while it is on screen */
 

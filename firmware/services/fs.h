@@ -65,6 +65,27 @@ int fs_list_dir_each(const char *path, fs_dirent_cb cb);
 int fs_list_dir(const char *path, uint32_t index, fs_dirent_t *out,
                 uint32_t max, uint32_t *out_count, uint32_t *out_total);
 
+/* A file or folder as a scan found it: opened, scanned or named again without its
+ * path (play queues keep these, 20 bytes a track). Valid until the volume changes. */
+typedef struct {
+    uint32_t clus, size;            /* the entry: first cluster, size */
+    uint32_t pclus, psize;          /* its directory: first cluster, size */
+    uint16_t slot;                  /* its entry's index in that directory */
+    uint8_t vol, flags;             /* FS_REF_* */
+} fs_ref_t;
+#define FS_REF_DIR     1u
+#define FS_REF_CONTIG  2u           /* exFAT: no FAT chain */
+#define FS_REF_PCONTIG 4u           /* ditto, its directory */
+
+/* Scan callback: return nonzero to stop. */
+typedef int (*fs_scan_cb)(void *u, const char *name, const fs_ref_t *ref);
+/* Every entry of a directory (by path, or a folder ref), in on-disk order, with refs.
+ * Returns the number of entries visited, or FS_ERR_*. */
+int fs_scan(const char *path, fs_scan_cb cb, void *u);
+int fs_scan_ref(const fs_ref_t *dir, fs_scan_cb cb, void *u);
+fs_file_t *fs_open_ref(const fs_ref_t *r);
+int fs_ref_name(const fs_ref_t *r, char *out, unsigned long n);
+
 /* Open a file for reading. NULL on failure. */
 fs_file_t *fs_open_read(const char *path);
 
