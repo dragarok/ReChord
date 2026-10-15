@@ -58,24 +58,13 @@ static uint32_t s_data_off;                /* file offset of the first streamed 
 static uint32_t s_skip_left;               /* alignment filler still to write */
 static uint32_t s_seq;
 static int s_b_up, s_dac_up, s_dma_on, s_playing, s_paused;
+static uint32_t s_underruns, s_underrun_log;   /* B's count when last seen; ms of the last log */
 static uint32_t s_rate, s_rate_changes;
 static audio_track_t s_tracks[AS_QUEUE];   /* titles/durations by seq, for the UI */
 
 static uint32_t be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
 static uint32_t le32(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
 static uint32_t le16(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8; }
-
-static int ext_is(const char *name, const char *ext)
-{
-    const char *dot = strrchr(name, '.');
-
-    if (!dot)
-        return 0;
-    for (dot++; *dot && *ext; dot++, ext++)
-        if ((*dot | 0x20) != *ext)
-            return 0;
-    return !*dot && !*ext;
-}
 
 
 /* FLAC: STREAMINFO -> track, synthesized header in s_hdr, file left at the first frame. */
@@ -754,16 +743,6 @@ static int b_load(const char *image)
     return 0;
 }
 
-static int b_start(const char *image)
-{
-    if (s_b_up && s_b_image == image)
-        return 0;
-    memset((void *)AS_SHARED, 0, sizeof(audio_shared_t));
-    AS->magic = AS_MAGIC;
-    AS->version = AS_VERSION;
-    return b_load(image);
-}
-
 /* ---- DMA + I2S ------------------------------------------------------------ */
 
 static void dma_prepare(void)
@@ -872,6 +851,7 @@ int audio_play(int pos)
     AS->in_closed = 0;
     AS->pcm_wr = AS->pcm_played = AS->pcm_end = 0;
     AS->underruns = AS->err = 0;
+    s_underruns = 0;
     AS->cur_seq = AS->done_seq = 0;
     dma_prepare();
     refill();
@@ -944,10 +924,32 @@ int audio_paused(void)
 
 static void stream_switch(void);
 
+/* B fell behind the DMA (input late, or its clock too low): back to full speed,
+ * B scales down again from its load. Logged at most once a second. */
+static void check_underrun(void)
+{
+    uint32_t n = AS->underruns;
+
+    if (n == s_underruns)
+        return;
+    if (AS->b_div != 1u) {
+        clock_set_core_b_div(1);
+        AS->b_hz = clock_core_b_hz();
+        AS->b_div = AS->b_div_req = 1;
+    }
+    if (!s_underrun_log || time_ms() - s_underrun_log >= 1000u) {
+        log_printf("audio: underrun (%u in all), input %u B buffered", (unsigned)n,
+                   (unsigned)(AS->in_wr - AS->in_rd));
+        s_underrun_log = time_ms() | 1u;
+    }
+    s_underruns = n;
+}
+
 void audio_poll(void)
 {
     if (!s_playing)
         return;
+    check_underrun();
     if (AS->b_div_req != AS->b_div) {        /* core B asked for another clock */
         clock_set_core_b_div(AS->b_div_req);
         AS->b_hz = clock_core_b_hz();
@@ -967,9 +969,9 @@ void audio_poll(void)
         if (AS->state == AS_B_RATE)
             stream_switch();
         else if (AS->state == AS_B_ENDED) {
-            log_printf("audio: end of stream, %u tracks, B err %x, B heap peak %u B, stack free %u B",
-                       (unsigned)AS->done_seq, (unsigned)AS->err, (unsigned)AS->b_heap_peak,
-                       (unsigned)AS->b_stack_free);
+            log_printf("audio: end of stream, %u tracks, B err %x, B heap peak %u B, stack free %u B, "
+                       "%u underruns", (unsigned)AS->done_seq, (unsigned)AS->err, (unsigned)AS->b_heap_peak,
+                       (unsigned)AS->b_stack_free, (unsigned)AS->underruns);
             halt();
         }
     }
@@ -1027,7 +1029,9 @@ int audio_status(audio_status_t *st)
         queue_heard((int)t->index);
         /* decoded minus what still waits in the ring */
         {
-            uint32_t buffered = (AS->pcm_wr - AS->pcm_played) * AS_BLOCK_FRAMES;
+            int32_t blocks = (int32_t)(AS->pcm_wr - AS->pcm_played);   /* two reads: may be off by one */
+            uint32_t buffered = (uint32_t)(blocks < 0 ? 0 : blocks > (int32_t)AS_PCM_BLOCKS ?
+                                           (int32_t)AS_PCM_BLOCKS : blocks) * AS_BLOCK_FRAMES;
 
             st->frames = AS->cur_frames > buffered ? AS->cur_frames - buffered : 0;
         }

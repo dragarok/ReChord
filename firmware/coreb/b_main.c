@@ -43,16 +43,32 @@ static void systick_start(void)
     SYST_CSR = 7u;
 }
 
+static volatile uint32_t s_resync;      /* SysTick moved pcm_wr on: drop the block being written */
+
+/* A block the DMA has played is zeroed, so if B falls behind, the DMA (which
+ * goes round the ring regardless) plays silence, never old audio. If it finished
+ * the block B was still writing (an underrun), B gives that block and the next one
+ * up (the DMA is already in it) and goes on two blocks later: what it had in the
+ * block is lost, the rest stays in order. */
 static void recycle_blocks(void)
 {
     volatile uint32_t *lli = (volatile uint32_t *)AS_LLI;
 
     for (unsigned n = 0; n < AS_PCM_BLOCKS; n++) {
-        volatile uint32_t *ctlh = &lli[(AS->pcm_played % AS_PCM_BLOCKS) * LLI_WORDS + 4];
+        uint32_t i = AS->pcm_played % AS_PCM_BLOCKS;
+        volatile uint32_t *ctlh = &lli[i * LLI_WORDS + 4];
+        uint32_t *p = (uint32_t *)(AS_PCM_RING + i * AS_BLOCK_BYTES);
 
         if (!(*ctlh & LLI_DONE))
             break;
         *ctlh &= ~LLI_DONE;
+        for (uint32_t k = 0; k < AS_BLOCK_BYTES / 4u; k += 8u)
+            p[k] = p[k + 1] = p[k + 2] = p[k + 3] = p[k + 4] = p[k + 5] = p[k + 6] = p[k + 7] = 0;
+        if (AS->pcm_played == AS->pcm_wr) {
+            AS->pcm_wr += 2u;
+            AS->underruns++;
+            s_resync = 1;
+        }
         AS->pcm_played++;
     }
 }
@@ -301,11 +317,19 @@ static void block_done(void)
 
 /* End the DMA chain after the block being written: shorten it to what it holds
  * (one silent frame if it is empty, as a block cannot be empty) and give its LLI no
- * successor. The DMA plays it and stops; nothing stale or padded is ever heard. */
+ * successor. The DMA plays it and stops; nothing stale or padded is ever heard.
+ * A track that ends exactly on a block boundary leaves its last block full and
+ * still open (produce()), so it is that block that ends the chain, not an empty one. */
 static void end_chain(void)
 {
-    volatile uint32_t *l = (volatile uint32_t *)AS_LLI + (AS->pcm_wr % AS_PCM_BLOCKS) * LLI_WORDS;
+    volatile uint32_t *l;
 
+    __asm__ volatile ("cpsid i" ::: "memory");
+    if (s_resync) {
+        s_resync = 0;
+        s_fill = 0;
+    }
+    l = (volatile uint32_t *)AS_LLI + (AS->pcm_wr % AS_PCM_BLOCKS) * LLI_WORDS;
     if (!s_fill) {
         cur_block()[0] = cur_block()[1] = 0;
         s_fill = 1;
@@ -315,6 +339,7 @@ static void end_chain(void)
     l[4] = s_fill * 2u;                              /* block size in words, DONE clear */
     block_done();
     AS->pcm_end = AS->pcm_wr;
+    __asm__ volatile ("cpsie i" ::: "memory");
 }
 
 /* Enough input to decode without stalling mid-frame: the rest of the track, or
@@ -345,6 +370,16 @@ static int produce(void)
                 AS->state = AS_B_RATE;
                 return 1;
             }
+            if (s_fill == AS_BLOCK_FRAMES) {         /* the last track's full last block: the */
+                __asm__ volatile ("cpsid i" ::: "memory");   /* stream goes on, so commit it */
+                if (s_resync)
+                    s_resync = 0;
+                else
+                    block_done();
+                s_fill = 0;
+                __asm__ volatile ("cpsie i" ::: "memory");
+                return 1;
+            }
             if (AS->in_wr - AS->in_rd < 64u && n->bytes > 64u)
                 return 0;                            /* header not there yet */
             if (track_open() != 0) {                 /* unplayable: skip it, keep the stream */
@@ -364,6 +399,12 @@ static int produce(void)
     }
     if (!input_ready())
         return 0;
+    if (s_resync) {                                  /* SysTick moved pcm_wr on since the last step */
+        __asm__ volatile ("cpsid i" ::: "memory");
+        s_resync = 0;
+        s_fill = 0;
+        __asm__ volatile ("cpsie i" ::: "memory");
+    }
     dst = cur_block() + 2 * s_fill;
     want = AS_BLOCK_FRAMES - s_fill;
     if (b_trk.frames && b_trk.frames - AS->cur_frames < want)
@@ -373,12 +414,19 @@ static int produce(void)
         for (uint32_t i = got; i-- > 0; )
             dst[2 * i] = dst[2 * i + 1] = dst[i];
     }
-    s_fill += got;
     AS->cur_frames += got;
     if (got == 0 || (b_trk.frames && AS->cur_frames >= b_trk.frames))
         track_close();                               /* the next track fills the same block */
-    if (s_fill == AS_BLOCK_FRAMES)
-        block_done();
+    __asm__ volatile ("cpsid i" ::: "memory");
+    if (s_resync) {                                  /* the DMA passed this block meanwhile */
+        s_resync = 0;
+        s_fill = 0;
+    } else {
+        s_fill += got;
+        if (s_fill == AS_BLOCK_FRAMES && s_dec)
+            block_done();                            /* (at a track's end: next step decides) */
+    }
+    __asm__ volatile ("cpsie i" ::: "memory");
     return 1;
 }
 
@@ -388,7 +436,7 @@ static void stop_all(void)
         track_close();
     AS->q_rd = AS->q_wr;
     AS->in_rd = AS->in_wr;
-    s_fill = 0;
+    s_fill = s_resync = 0;
     AS->state = AS_B_READY;
 }
 
@@ -412,7 +460,7 @@ int b_main(void)
                 __asm__ volatile ("wfi");            /* until core A resets us */
         } else if (AS->cmd == AS_CMD_RESTART) {        /* A re-clocked / swapped images, DMA re-armed */
             AS->pcm_wr = AS->pcm_played = AS->pcm_end = 0;
-            s_fill = 0;
+            s_fill = s_resync = 0;
             AS->state = AS_B_PLAYING;
             AS->cmd = AS_CMD_NONE;
         }
