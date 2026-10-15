@@ -80,6 +80,7 @@ static int ext_is(const char *name, const char *ext)
 static int playable(const char *name)
 {
     return ext_is(name, "flac") || ext_is(name, "wav") || ext_is(name, "mp3") || ext_is(name, "mp2") ||
+           ext_is(name, "aif") || ext_is(name, "aiff") || ext_is(name, "aifc") ||
            ext_is(name, "m4a") || ext_is(name, "m4b") || ext_is(name, "mp4") || ext_is(name, "alac") ||
            ext_is(name, "ogg") || ext_is(name, "oga") || ext_is(name, "opus");
 }
@@ -128,47 +129,107 @@ static int open_flac(fs_file_t *f, as_track_t *t)
     return 0;
 }
 
-/* WAV: fmt + data chunk -> track; raw PCM is streamed as is. */
+/* WAV: fmt + data chunk -> track; raw PCM is streamed as is. PCM 8..32 bit,
+ * IEEE float 32 (core B converts), WAVE_FORMAT_EXTENSIBLE of either; a data
+ * length of 0 or ~0 (written by a recorder that never finished) = to the end. */
 static int open_wav(fs_file_t *f, as_track_t *t)
 {
-    uint8_t b[24];
-    uint32_t pos = 12;
-    int fmt = 0;
+    uint8_t b[40];
+    uint32_t pos = 12, size = (uint32_t)fs_file_size(f), fmt = 0, len;
 
     if (fs_read(f, b, 12) != 12 || memcmp(b, "RIFF", 4) || memcmp(b + 8, "WAVE", 4))
         return -1;
     for (;;) {
-        uint32_t len;
-
         if (fs_read(f, b, 8) != 8)
             return -1;
         len = le32(b + 4);
         pos += 8;
         if (!memcmp(b, "fmt ", 4)) {
-            if (fs_read(f, b, 16) != 16)
+            uint32_t n = len < sizeof b ? len : sizeof b;
+
+            if (n < 16 || fs_read(f, b, n) != (long)n)
                 return -1;
+            fmt = le16(b);
+            if (fmt == 0xFFFEu && n >= 26)
+                fmt = le16(b + 24);                  /* EXTENSIBLE: the subformat GUID's first word */
             t->channels = le16(b + 2);
             t->rate = le32(b + 4);
             t->bits = le16(b + 14);
-            fmt = 1;
         } else if (!memcmp(b, "data", 4)) {
             break;
         }
         pos += len + (len & 1u);
-        if (fs_seek(f, (long)pos) < 0)
+        if (pos >= size || fs_seek(f, (long)pos) < 0)
             return -1;
     }
-    if (!fmt || !t->channels)
+    if (!(fmt == 1u || (fmt == 3u && t->bits == 32u)) || !t->channels || t->channels > 2 || !t->rate)
         return -1;
-    t->codec = AS_CODEC_WAV;
+    t->codec = fmt == 3u ? AS_CODEC_WAVF : AS_CODEC_WAV;
     s_hdr_len = 0;
     s_data_off = pos;
-    s_left = (uint32_t)fs_file_size(f) - pos;
-    {
-        uint32_t len = le32(b + 4);
-        if (len < s_left)
-            s_left = len;
+    s_left = size - pos;
+    if (len && len != 0xFFFFFFFFu && len < s_left)
+        s_left = len;
+    s_left -= s_left % (t->channels * (t->bits / 8u));
+    t->frames = s_left / (t->channels * (t->bits / 8u));
+    t->bytes = s_left;
+    return 0;
+}
+
+/* AIFF / AIFC: COMM (channels, frames, bits, 80-bit float rate), SSND (offset,
+ * then big-endian PCM); AIFC 'NONE' or 'sowt' (little-endian). */
+static int open_aiff(fs_file_t *f, as_track_t *t)
+{
+    uint8_t b[26];
+    uint32_t pos = 12, size = (uint32_t)fs_file_size(f), len, frames = 0;
+    int comm = 0, aifc, sowt = 0;
+
+    if (fs_read(f, b, 12) != 12 || memcmp(b, "FORM", 4) || (memcmp(b + 8, "AIFF", 4) && memcmp(b + 8, "AIFC", 4)))
+        return -1;
+    aifc = !memcmp(b + 8, "AIFC", 4);
+    for (;;) {
+        if (fs_read(f, b, 8) != 8)
+            return -1;
+        len = be32(b + 4);
+        pos += 8;
+        if (!memcmp(b, "COMM", 4)) {
+            uint32_t e, m;
+
+            if (len < 18 || fs_read(f, b, len < sizeof b ? len : sizeof b) < 18)
+                return -1;
+            t->channels = (uint32_t)b[0] << 8 | b[1];
+            frames = be32(b + 2);
+            t->bits = (uint32_t)b[6] << 8 | b[7];
+            e = ((uint32_t)b[8] << 8 | b[9]) & 0x7FFFu;    /* 80-bit extended: rate */
+            m = be32(b + 10);
+            t->rate = e >= 16383u && e < 16383u + 32u ? m >> (16383u + 31u - e) : 0;
+            if (aifc && len >= 22) {
+                if (!memcmp(b + 18, "sowt", 4))
+                    sowt = 1;
+                else if (memcmp(b + 18, "NONE", 4))
+                    return -1;                       /* compressed AIFC */
+            }
+            comm = 1;
+        } else if (!memcmp(b, "SSND", 4)) {
+            if (fs_read(f, b, 8) != 8)
+                return -1;
+            pos += 8 + be32(b);                     /* offset (block alignment) */
+            break;
+        }
+        pos += len + (len & 1u);
+        if (pos >= size || fs_seek(f, (long)pos) < 0)
+            return -1;
     }
+    if (!comm || !t->channels || t->channels > 2 || !t->rate || fs_seek(f, (long)pos) < 0)
+        return -1;
+    t->bits = (t->bits + 7u) & ~7u;                  /* e.g. 20-bit samples in 3 bytes */
+    t->codec = sowt ? AS_CODEC_AIFF_LE : AS_CODEC_AIFF;
+    s_hdr_len = 0;
+    s_data_off = pos;
+    s_left = size - pos;
+    if (frames && frames * t->channels * (t->bits / 8u) < s_left)
+        s_left = frames * t->channels * (t->bits / 8u);
+    s_left -= s_left % (t->channels * (t->bits / 8u));
     t->frames = s_left / (t->channels * (t->bits / 8u));
     t->bytes = s_left;
     return 0;
@@ -352,6 +413,8 @@ static int open_next(void)
         s_mp4 = 0;
         if ((ext_is(ent.name, "flac") ? open_flac(s_file, &t) :
              ext_is(ent.name, "wav") ? open_wav(s_file, &t) :
+             (ext_is(ent.name, "aif") || ext_is(ent.name, "aiff") || ext_is(ent.name, "aifc")) ?
+                 open_aiff(s_file, &t) :
              (ext_is(ent.name, "mp3") || ext_is(ent.name, "mp2")) ? open_mp3(s_file, &t) :
              (ext_is(ent.name, "ogg") || ext_is(ent.name, "oga") || ext_is(ent.name, "opus")) ?
                  open_ogg(s_file, &t) :

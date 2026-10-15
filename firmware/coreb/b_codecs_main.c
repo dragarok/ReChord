@@ -14,6 +14,8 @@ const b_codec_t b_codecs[] = {
     { AS_CODEC_FLAC, b_flac_open, b_flac_read },
     { AS_CODEC_WAV, b_pcm_open, b_pcm_read },
     { AS_CODEC_AIFF, b_pcm_open, b_pcm_read },
+    { AS_CODEC_AIFF_LE, b_pcm_open, b_pcm_read },
+    { AS_CODEC_WAVF, b_pcm_open, b_pcm_read },
     { AS_CODEC_MP3, b_mp3_open, b_mp3_read },
     { AS_CODEC_ALAC, b_alac_open, b_alac_read },
     { 0, 0, 0 },
