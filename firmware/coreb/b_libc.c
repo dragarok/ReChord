@@ -76,3 +76,25 @@ void qsort(void *base, size_t n, size_t sz, int (*cmp)(const void *, const void 
             memcpy(b + (j - 1) * sz, tmp, sz);
         }
 }
+
+long labs(long v)
+{
+    return v < 0 ? -v : v;
+}
+
+void *memchr(const void *s, int c, size_t n)
+{
+    const uint8_t *p = s;
+
+    for (; n; n--, p++)
+        if (*p == (uint8_t)c)
+            return (void *)p;
+    return NULL;
+}
+
+/* vorbisfile reads errno after a short read; ours never sets it */
+static int s_errno;
+int *__errno(void)
+{
+    return &s_errno;
+}

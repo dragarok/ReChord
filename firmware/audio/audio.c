@@ -80,7 +80,8 @@ static int ext_is(const char *name, const char *ext)
 static int playable(const char *name)
 {
     return ext_is(name, "flac") || ext_is(name, "wav") || ext_is(name, "mp3") || ext_is(name, "mp2") ||
-           ext_is(name, "m4a") || ext_is(name, "m4b") || ext_is(name, "mp4") || ext_is(name, "alac");
+           ext_is(name, "m4a") || ext_is(name, "m4b") || ext_is(name, "mp4") || ext_is(name, "alac") ||
+           ext_is(name, "ogg") || ext_is(name, "oga") || ext_is(name, "opus");
 }
 
 /* FLAC: STREAMINFO -> track, synthesized header in s_hdr, file left at the first frame. */
@@ -253,6 +254,58 @@ static int open_m4a(fs_file_t *f, const char *path, as_track_t *t)
     return 0;
 }
 
+/* Ogg (Vorbis, Opus): core B gets the whole file and its decoder trims by granule
+ * positions; here: the codec, rate, channels from the first page's packet, and the
+ * length from the last page's granule position (Opus: less the pre-skip). */
+static int open_ogg(fs_file_t *f, as_track_t *t)
+{
+    uint8_t b[64], tail[512];
+    uint32_t size = (uint32_t)fs_file_size(f), last = 0, from;
+    long n;
+
+    if (mp3_rd(f, 0, b, sizeof b) != sizeof b || memcmp(b, "OggS", 4) || b[26] < 1)
+        return -1;
+    {
+        const uint8_t *p = b + 27 + b[26];          /* the first packet */
+
+        if (p + 19 > b + sizeof b)
+            return -1;
+        if (p[0] == 1 && !memcmp(p + 1, "vorbis", 6)) {
+            t->codec = AS_CODEC_VORBIS;
+            t->channels = p[11];
+            t->rate = le32(p + 12);
+        } else if (!memcmp(p, "OpusHead", 8)) {
+            t->codec = AS_CODEC_OPUS;
+            t->channels = p[9];
+            t->rate = 48000;
+            t->trim = le16(p + 10);                  /* pre-skip (opusfile applies it) */
+        } else {
+            return -1;
+        }
+    }
+    if (t->channels < 1 || t->channels > 2 || !t->rate)
+        return -1;
+    /* last page: scan back from the end for its capture pattern */
+    for (from = size > sizeof tail ? size - sizeof tail : 0; ; from = from > 448u ? from - 448u : 0) {
+        n = (long)mp3_rd(f, from, tail, sizeof tail);
+        for (long i = n - 14; i >= 0; i--)
+            if (!memcmp(tail + i, "OggS", 4) && (tail[i + 5] & 4u)) {   /* end of stream */
+                last = le32(tail + i + 6);
+                break;
+            }
+        if (last || from == 0 || size - from > 0x10000u)
+            break;
+    }
+    t->frames = t->codec == AS_CODEC_OPUS ? (last > t->trim ? last - t->trim : 0) : last;
+    t->trim = 0;                                     /* the decoder does it */
+    t->bits = 16;
+    s_hdr_len = 0;
+    s_data_off = 0;
+    s_left = size;
+    t->bytes = size;
+    return fs_seek(f, 0) < 0 ? -1 : 0;
+}
+
 static void close_track(void)
 {
     if (s_file)
@@ -300,6 +353,8 @@ static int open_next(void)
         if ((ext_is(ent.name, "flac") ? open_flac(s_file, &t) :
              ext_is(ent.name, "wav") ? open_wav(s_file, &t) :
              (ext_is(ent.name, "mp3") || ext_is(ent.name, "mp2")) ? open_mp3(s_file, &t) :
+             (ext_is(ent.name, "ogg") || ext_is(ent.name, "oga") || ext_is(ent.name, "opus")) ?
+                 open_ogg(s_file, &t) :
              open_m4a(s_file, path, &t)) != 0) {
             log_printf("audio: %s: not a playable stream (size %ld)", ent.name, fs_file_size(s_file));
             close_track();
@@ -451,7 +506,8 @@ static void refill(void)
 /* Core-B images: one per codec family (Makefile COREB_FAMILIES). */
 static const char *family_of(uint32_t codec)
 {
-    return codec == AS_CODEC_AAC ? "baac" : "bmain";
+    return codec == AS_CODEC_AAC ? "baac" : codec == AS_CODEC_VORBIS ? "bogg" :
+           codec == AS_CODEC_OPUS ? "bopus" : "bmain";
 }
 
 static const char *s_b_image;            /* module now in core B, NULL: none */

@@ -1,0 +1,4 @@
+Tremor (https://gitlab.xiph.org/xiph/tremor, 820fb32, BSD-3-Clause): integer
+Ogg Vorbis decoder, unmodified. libogg 1.3.5 (BSD-3-Clause) in ../ogg, with our
+own ogg/config_types.h (ogg_int32_t = int: newlib's int32_t is long, and Tremor
+mixes int* with ogg_int32_t* on the same buffers).
