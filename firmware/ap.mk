@@ -90,7 +90,8 @@ AP_SERVICE_SRCS := \
   firmware/services/modules.c \
   firmware/services/dirlist.c \
   firmware/services/queue.c \
-  firmware/services/config.c
+  firmware/services/config.c \
+  firmware/services/power.c
 
 # Theme module (same set as $(THEME_SRCS) in firmware/theme/theme.mk).
 AP_THEME_SRCS := \

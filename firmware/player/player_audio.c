@@ -14,8 +14,11 @@
 #include "services/queue.h"
 #include "services/log.h"
 #include "services/config.h"
+#include "services/tags.h"
 
 static char s_name[FS_NAME_MAX];
+static tag_info_t s_tags;                    /* of the heard track, when cfg tags=on */
+static uint32_t s_tags_seq;
 static int s_open;
 static char s_src[150];                      /* where the queue came from (for resume) */
 static int s_tree;
@@ -172,13 +175,50 @@ int player_resume(const char *track)
 }
 int player_get_volume(void) { return audio_get_volume_db(); }
 
+static uint32_t tag_read_at(void *u, uint32_t off, void *buf, uint32_t n)
+{
+    long got;
+
+    if (fs_seek((fs_file_t *)u, (long)off) < 0)
+        return 0;
+    got = fs_read((fs_file_t *)u, buf, n);
+    return got > 0 ? (uint32_t)got : 0u;
+}
+
+/* The heard track's tags, read once per track (a few small reads: covers are
+ * seeked over). Kinds tags.c knows: ID3v2/ID3v1/APEv2 (MP3, APE, WavPack, ...),
+ * FLAC Vorbis comments, WAV chunks, MP4 ilst (M4A, ALAC), Ogg Vorbis/Opus. */
+static void load_tags(const audio_track_t *t)
+{
+    int kind = dirlist_kind(t->name);
+    fs_file_t *f;
+
+    memset(&s_tags, 0, sizeof s_tags);
+    if (kind == DL_WMA || kind == DL_DSF || kind == DL_DFF || !(f = fs_open_ref(&t->ref)))
+        return;
+    tags_read(tag_read_at, f, (uint32_t)fs_file_size(f),
+              kind == DL_FLAC ? TAGS_FLAC : kind == DL_WAV ? TAGS_WAV : kind == DL_M4A ? TAGS_MP4 :
+              kind == DL_OGG || kind == DL_OPUS ? TAGS_OGG : TAGS_MP3, &s_tags);
+    fs_close(f);
+}
+
 int player_get_track(track_info_t *out)
 {
     audio_status_t st;
 
     memset(out, 0, sizeof *out);
     audio_status(&st);
-    strncpy(out->title, st.seq ? st.track.name : s_name, sizeof out->title - 1);
+    if (st.seq && g_cfg.tags && st.seq != s_tags_seq) {
+        s_tags_seq = st.seq;
+        load_tags(&st.track);
+    }
+    if (st.seq && g_cfg.tags && s_tags.title[0]) {
+        strncpy(out->title, s_tags.title, sizeof out->title - 1);
+        strncpy(out->artist, s_tags.artist, sizeof out->artist - 1);
+        out->track_no = s_tags.track;
+    } else {
+        strncpy(out->title, st.seq ? st.track.name : s_name, sizeof out->title - 1);
+    }
     if (st.track.rate)
         out->duration_ms = (long)((uint64_t)st.track.frames * 1000u / st.track.rate);
     out->total_samples = (long)st.track.frames;

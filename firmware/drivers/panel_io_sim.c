@@ -91,6 +91,16 @@ void backlight_on(void)
 {
 }
 
+void backlight_set(int duty)
+{
+    (void)duty;
+}
+
+int adc_value(unsigned ch)
+{
+    return ch == 0 ? 800 : 1023;     /* 3906 mV battery, idle ladders */
+}
+
 int keys_adc(void)
 {
     return 1023;   /* idle ladder */

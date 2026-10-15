@@ -267,5 +267,25 @@ write("tiny.mp3", b"ID3")
 write("empty.mp3", b"")
 write("bad_riff.wav", b"RIFF\xff\xff\xff\xffWAVELIST\xff\xff\xff\xffINFOINAM\xff\xff\xff\x7f")
 
+# ---- MP4 (iTunes ilst) and Ogg (Vorbis comment header), as ffmpeg writes them --
+run("ffmpeg", "-y", "-i", path("_base.wav"), "-c:a", "aac", "-b:a", "64k",          # moov after mdat
+    "-metadata", "title=M4A Títle 東京", "-metadata", "artist=M4A Artist", "-metadata", "album=M4A Album",
+    "-metadata", "track=3/12", path("aac_end.m4a"))
+run("ffmpeg", "-y", "-i", path("_base.wav"), "-f", "lavfi", "-i", "color=c=red:s=64x64:d=0.1",
+    "-map", "0:a", "-map", "1:v", "-frames:v", "1", "-c:v", "png", "-disposition:v", "attached_pic",
+    "-c:a", "alac", "-movflags", "+faststart",                                      # moov first, a cover
+    "-metadata", "title=Alac Title", "-metadata", "artist=Alac Artist", "-metadata", "track=7",
+    path("alac_fast.m4a"))
+run("ffmpeg", "-y", "-i", path("_base.wav"), "-ac", "2", "-c:a", "vorbis", "-strict", "-2",
+    "-metadata", "title=Ogg Títle", "-metadata", "artist=Ogg Artist", "-metadata", "album=Ogg Album",
+    "-metadata", "track=5", path("vorbis.ogg"))
+run("ffmpeg", "-y", "-i", path("_base.wav"), "-c:a", "libopus",                      # the packet spans pages
+    "-metadata", "LYRICS=" + "lyrics " * 20000, "-metadata", "title=Opus Títle",
+    "-metadata", "artist=Opus Artist", "-metadata", "track=2", path("opus_long.opus"))
+run("ffmpeg", "-y", "-i", path("_base.wav"), "-c:a", "libopus", "-map_metadata", "-1",
+    "-fflags", "+bitexact", path("ogg_none.ogg"))
+write("bad_mp4.m4a", struct.pack(">I", 0xFFFFFFF0) + b"moov" + bytes(64))
+write("bad_ogg.ogg", b"OggS\0\2" + bytes(20) + b"\xff" + b"\xff" * 255 + b"\x03vorbis" + struct.pack("<I", 0xFFFFFF00))
+
 for f in ("_base.wav", "_base.mp3", "_base.flac", "_cover.jpg"):
     os.remove(path(f))

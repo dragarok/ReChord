@@ -20,12 +20,14 @@
 #include "services/config.h"
 #include "services/queue.h"
 #include "services/log.h"
+#include "services/power.h"
 #include "audio/audio.h"
 #include "player.h"
 #include "ui/ui.h"
 #include "ui/screens/screens.h"
 
 static int s_adc = 1023, s_adc2 = 1023, s_power, s_cable;
+static int s_power_press_ok;  /* the power key's current press began after boot's was released */
 static uint32_t s_power_down_ms;     /* time_ms() when the power key went down */
 static int s_power_armed;    /* power key seen released since boot */
 static uint32_t s_user;              /* user volume start, 0 = unknown */
@@ -128,7 +130,7 @@ static int ask(int any_key)
     for (;;) {
         input_scan(keys_adc(), keys_power());
         while (input_poll(&ev) > 0) {
-            static const char *const k_names[] = { "none", "up", "down", "select", "back", "menu", "power" };
+            static const char *const k_names[] = { "none", "up", "down", "select", "back", "power", "menu" };
 
             log_printf("ui: key %s%s on %s", ev.type >= 0 && ev.type < 7 ? k_names[ev.type] : "?",
                        ev.adc_value == INPUT_ADC_LONG ? " (hold)" : ev.adc_value == INPUT_ADC_REPEAT ? " (repeat)" : "",
@@ -142,7 +144,7 @@ static int ask(int any_key)
     }
 }
 
-static void power_off(void);
+static void power_off(const char *why);
 
 /* After a USB session: offer an update image (fw_update.c names) if present. */
 static void update_prompt(void)
@@ -195,7 +197,7 @@ static void update_prompt(void)
     line(5, "press power to turn off, then on");
     display_flush_rows(0, DISPLAY_H - 1);
     ask(1);                              /* no working warm reboot yet */
-    power_off();
+    power_off(NULL);
 }
 
 /* Before anything that ends the session (power off, USB disk): the settings and
@@ -212,12 +214,25 @@ static void save_state(const char *why)
     log_flush(why);
 }
 
-static void power_off(void)
+/* RECHO's order (docs/RECHO_POWER_CFG.md C.6): stop, save, say so, 500 ms,
+ * backlight off, cut the supply. why: shown for a moment first (low battery). */
+static void power_off(const char *why)
 {
+    player_stop();
+    log_printf("ui: power off%s%s", why ? ": " : "", why ? why : "");
     save_state("power off");
+    if (why) {
+        power_screen(1);
+        screen(why);
+        display_flush_rows(0, DISPLAY_H - 1);
+        delay_ms(1500);
+    }
     screen("Powering off");
+    display_flush_rows(0, DISPLAY_H - 1);
     while (keys_power())
         cpu_wait_tick();
+    delay_ms(500);
+    backlight_set(0);
     display_clear(0x0000);
     display_flush_rows(0, DISPLAY_H - 1);
     board_power_off();
@@ -263,6 +278,7 @@ static void usb_session(void)
  * policy arrive with the power work; the play mode applies in settings_screen). */
 void settings_apply(void)
 {
+    power_brightness_changed();
     config_save_later();
 }
 
@@ -544,6 +560,58 @@ static void usb_storage_run(void)
     usb_session();
 }
 
+/* RECHO's Debug > Power page: the battery state and rates, the clocks. Refreshed
+ * once a second; any key returns. */
+static void battery_info_run(void)
+{
+    input_event_t ev;
+    uint32_t shown = 0;
+
+    while (keys_power())
+        cpu_wait_tick();
+    input_mock_clear();
+    for (;;) {
+        if (!shown || time_ms() - shown >= 1000u) {
+            const power_battery_t *b = power_battery();
+            char buf[40];
+
+            shown = time_ms() | 1u;
+            screen("Power");
+            snprintf(buf, sizeof buf, "%u mV  %u.%u %%  level %u", b->mv, b->pct10 / 10u, b->pct10 % 10u, b->level);
+            line(1, b->mv ? buf : "battery: measuring");
+            line(2, !b->vbus ? "on battery" : b->full ? "cable, full" : "cable, charging");
+            if (b->rate_ok) {
+                snprintf(buf, sizeof buf, "%d mV/min", b->mv_min);
+                line(3, buf);
+                snprintf(buf, sizeof buf, "%%/h 1m %d.%u 5m %d.%u 30m %d.%u", b->pct_h10[0] / 10,
+                         (unsigned)(b->pct_h10[0] < 0 ? -b->pct_h10[0] : b->pct_h10[0]) % 10u, b->pct_h10[1] / 10,
+                         (unsigned)(b->pct_h10[1] < 0 ? -b->pct_h10[1] : b->pct_h10[1]) % 10u, b->pct_h10[2] / 10,
+                         (unsigned)(b->pct_h10[2] < 0 ? -b->pct_h10[2] : b->pct_h10[2]) % 10u);
+                line(4, buf);
+            } else {
+                line(3, b->vbus ? "rates: on battery only" : "rates: after 90 s on battery");
+            }
+            if (b->left_min)
+                snprintf(buf, sizeof buf, "time left %u h %02u min", b->left_min / 60u, b->left_min % 60u);
+            else
+                snprintf(buf, sizeof buf, "time left: not yet");
+            line(5, buf);
+            snprintf(buf, sizeof buf, "A %u MHz  B %u MHz", (unsigned)(clock_core_hz() / 1000000u),
+                     (unsigned)(clock_core_b_hz() / 1000000u));
+            line(6, buf);
+            display_flush_rows(0, DISPLAY_H - 1);
+        }
+        (void)player_process();          /* the music goes on meanwhile */
+        input_scan(keys_adc(), keys_power());
+        if (input_poll(&ev) > 0) {
+            power_activity();
+            break;
+        }
+        cpu_wait_tick();
+    }
+    ui_invalidate_all();
+}
+
 static const menu_item_t k_root_items[] = {
     { "DAC test",    NULL,      dac_test_run },
     { "USB console", NULL,      usb_console_run },
@@ -557,11 +625,69 @@ static const menu_item_t k_root_items[] = {
     { "SD",          sd_text,   NULL },
     { "USB",         usb_text,  NULL },
     { "USB diag",    usbd_text, NULL },
+    { "Battery",     power_battery_text, battery_info_run },
 };
 #define ROOT_CPU_ROW 6               /* index of "CPU" in k_root_items */
+#define ROOT_BAT_ROW 12
 #define RC_BUILD "m7a"
 static const menu_model_t k_root = { "ReChord " RC_BUILD, k_root_items,
                                       sizeof k_root_items / sizeof k_root_items[0] };
+
+/* A key restarts the screen and idle timers. The power key's short press turns
+ * the screen off and on. With the screen off (RECHO, C.6): VOL+/VOL- and PLAY
+ * work as on Now Playing, MENU and BACK only turn it on. Returns 1 if the event
+ * still goes to the screen on top. */
+static int dark_or_power_key(const input_event_t *ev)
+{
+    int on = power_screen_on();
+
+    power_activity();
+    if (ev->type == KEY_POWER) {
+        if (ev->adc_value != INPUT_ADC_LONG) {
+            power_screen(!on);
+            if (on)
+                config_save();           /* RECHO saves at screen off */
+            else
+                ui_invalidate_all();
+        }
+        return 0;
+    }
+    if (on)
+        return 1;
+    if (ev->type == KEY_UP || ev->type == KEY_DOWN || ev->type == KEY_SELECT)
+        player_screen.handle_event(ev);
+    else if (ev->type == KEY_MENU || ev->type == KEY_BACK) {
+        if (ev->adc_value != INPUT_ADC_LONG) {
+            power_screen(1);
+            ui_invalidate_all();
+        }
+    }
+    return 0;
+}
+
+/* RECHO's "On USB connect" (cfg usb): ask, disk, DAC, charge only. The USB DAC
+ * is not there yet: it charges. The CDC console stays in the main menu. */
+static void cable_connected(void)
+{
+    int disk = g_cfg.usb == CFG_USB_DISK;
+
+    log_printf("usb: cable in (%s)", g_cfg.usb == CFG_USB_ASK ? "ask" : g_cfg.usb == CFG_USB_DISK ? "disk" :
+               g_cfg.usb == CFG_USB_DAC ? "dac: not available, charging" : "charge");
+    if (g_cfg.usb == CFG_USB_ASK) {
+        power_screen(1);
+        screen("Cable connected");
+        line(2, "PLAY: USB disk");
+        line(3, "BACK: charge only");
+        display_flush_rows(0, DISPLAY_H - 1);
+        disk = ask(0);
+        ui_invalidate_all();
+    }
+    if (disk) {
+        power_screen(1);
+        usb_session();
+    }
+    power_activity();
+}
 
 void ap_ui_loop(void)
 {
@@ -576,6 +702,7 @@ void ap_ui_loop(void)
     audio_set_volume_db(g_cfg.volume == CFG_VOLUME_MUTE ? -90 : g_cfg.volume);
     log_printf("cfg: play %s, volume %d, resume %u", queue_mode_name(g_cfg.play), g_cfg.volume, g_cfg.resume);
     log_flush("boot");
+    power_init();
     ui_init();
     menu_screen_bind(&k_root);
     ui_push_screen(&menu_screen);
@@ -601,22 +728,22 @@ void ap_ui_loop(void)
             ui_invalidate_all();
         }
 
-        /* VBUS edge: the CDC-ACM console is the default cable action —
-         * MSC no longer hijacks the DWC2 core; it runs from the "USB
-         * storage" menu entry when actually wanted. */
-        if (cable && !s_cable)
-            usb_console_run();
+        if (cable && !s_cable)           /* the cable in (also at boot) */
+            cable_connected();
         s_cable = cable;
 
         /* hold power 2 s to switch off; the press that switched us on may
-         * still be held, so arm only after the key has been released once */
+         * still be held, so arm only after the key has been released once
+         * (and that press's release is not a short press either) */
+        if (power && !s_power)
+            s_power_press_ok = s_power_armed;
         s_power_armed |= !power;
         if (!power || !s_power_armed)
             s_power_down_ms = 0;
         else if (!s_power_down_ms)
             s_power_down_ms = time_ms() | 1u;
         else if (time_ms() - s_power_down_ms >= 2000u)
-            power_off();
+            power_off(NULL);
 
         /* live "Keys" row on the root menu: hardware check without a log */
         if ((adc - s_adc > 8 || s_adc - adc > 8 || power != s_power ||
@@ -627,6 +754,7 @@ void ap_ui_loop(void)
         if (time_ms() - s_cpu_shown_ms >= 1000u) {
             s_cpu_shown_ms = time_ms();  /* CPU row: once a second */
             menu_screen_invalidate_item(ROOT_CPU_ROW);
+            menu_screen_invalidate_item(ROOT_BAT_ROW);
         }
         s_adc = adc;
         s_adc2 = adc2;
@@ -634,11 +762,15 @@ void ap_ui_loop(void)
         input_scan(adc, power);
 
         while (input_poll(&ev) > 0) {
-            static const char *const k_names[] = { "none", "up", "down", "select", "back", "menu", "power" };
+            static const char *const k_names[] = { "none", "up", "down", "select", "back", "power", "menu" };
 
             log_printf("ui: key %s%s on %s", ev.type >= 0 && ev.type < 7 ? k_names[ev.type] : "?",
                        ev.adc_value == INPUT_ADC_LONG ? " (hold)" : ev.adc_value == INPUT_ADC_REPEAT ? " (repeat)" : "",
                        ui_top_screen() ? ui_top_screen()->name : "-");
+            if (ev.type == KEY_POWER && !s_power_press_ok)
+                continue;                /* the release of the press that switched us on */
+            if (!dark_or_power_key(&ev))
+                continue;
             if (ev.adc_value == INPUT_ADC_LONG && ev.type != KEY_MENU &&
                 ui_top_screen() != &player_screen && ui_top_screen() != &browser_screen)
                 continue;                /* holds mean something on Now Playing and Files (and MENU) */
@@ -669,6 +801,16 @@ void ap_ui_loop(void)
         /* audio pump + Now Playing sync (no-ops without a playing track) */
         (void)player_process();
         config_poll();
+        switch (power_poll(player_get_state() == PLAYER_PLAYING, 0)) {
+        case POWER_OFF_IDLE:
+            power_off(NULL);
+            break;
+        case POWER_OFF_BATTERY:
+            power_off("Battery low");
+            break;
+        default:
+            break;
+        }
         {
             static uint32_t heard;
             audio_status_t st;
@@ -679,10 +821,12 @@ void ap_ui_loop(void)
                 player_note_track(st.track.ref.clus);
             }
         }
-        if (ui_top_screen() == &player_screen)
+        if (!power_screen_on())
+            ;                            /* backlight off: nothing to draw */
+        else if (ui_top_screen() == &player_screen)
             player_screen_refresh();     /* only while it is on screen */
-
-        ui_render();
+        if (power_screen_on())
+            ui_render();
         cpu_wait_tick();                 /* sleep (WFI) until the next 10 ms tick */
     }
 }

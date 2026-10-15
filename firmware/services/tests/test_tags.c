@@ -61,7 +61,8 @@ static int kind_of(const char *name)
 {
     const char *e = strrchr(name, '.');
 
-    return !e ? TAGS_MP3 : !strcmp(e, ".flac") ? TAGS_FLAC : !strcmp(e, ".wav") ? TAGS_WAV : TAGS_MP3;
+    return !e ? TAGS_MP3 : !strcmp(e, ".flac") ? TAGS_FLAC : !strcmp(e, ".wav") ? TAGS_WAV :
+           !strcmp(e, ".m4a") ? TAGS_MP4 : !strcmp(e, ".ogg") || !strcmp(e, ".opus") ? TAGS_OGG : TAGS_MP3;
 }
 
 static int load(file_t *f, const char *dir, const char *name)
@@ -129,6 +130,8 @@ static int run(file_t *f, uint32_t size, tag_info_t *t)
 #define V1    TAGS_SRC_ID3V1
 #define VORB  TAGS_SRC_VORBIS
 #define RIFF  TAGS_SRC_RIFF
+#define MP4   TAGS_SRC_MP4
+#define OGG   TAGS_SRC_OGG
 
 typedef struct {
     int gapless;                       /* 0: fixtures dir, 1: GAPLESS dir */
@@ -188,6 +191,13 @@ static const case_t k_cases[] = {
     { 0, "bad_ape.mp3", "", "", "", 0, 0 },
     { 0, "bad_vorbis.flac", "", "", "", 0, 0 },
     { 0, "bad_riff.wav", "", "", "", 0, 0 },
+    { 0, "aac_end.m4a", "M4A Títle 東京", "M4A Artist", "M4A Album", 3, MP4 },
+    { 0, "alac_fast.m4a", "Alac Title", "Alac Artist", "", 7, MP4 },
+    { 0, "vorbis.ogg", "Ogg Títle", "Ogg Artist", "Ogg Album", 5, OGG },
+    { 0, "opus_long.opus", "Opus Títle", "Opus Artist", "", 2, OGG },
+    { 0, "ogg_none.ogg", "", "", "", 0, 0 },
+    { 0, "bad_mp4.m4a", "", "", "", 0, 0 },
+    { 0, "bad_ogg.ogg", "", "", "", 0, 0 },
     { 0, "tiny.mp3", "", "", "", 0, 0 },
     { 0, "empty.mp3", "", "", "", 0, 0 },
 };
