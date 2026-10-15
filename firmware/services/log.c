@@ -33,6 +33,11 @@ unsigned log_pending(void)
     return (unsigned)s_lines;
 }
 
+unsigned log_bytes(void)
+{
+    return (unsigned)log_ring_len;
+}
+
 void log_printf(const char *fmt, ...)
 {
     char line[LOG_LINE_MAX];

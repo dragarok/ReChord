@@ -47,6 +47,9 @@ typedef unsigned long (*log_clock_fn)(void);
 /* Install the ms clock source (NULL = frozen at 0.000). */
 void log_init(log_clock_fn clock_ms);
 
+/* Bytes waiting in the RAM ring (of 4096). */
+unsigned log_bytes(void);
+
 /* Format one timestamped line into the ring buffer. Overflows are dropped
  * and counted (see log_dropped()). */
 #if defined(__GNUC__)

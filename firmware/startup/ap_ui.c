@@ -29,6 +29,7 @@
 
 static int s_adc = 1023, s_adc2 = 1023, s_power, s_cable;
 static int s_power_press_ok;
+static uint32_t s_log_flushed;  /* time_ms() of the last periodic log write */
 static uint32_t s_shortcut_at;  /* VOL+/VOL- chord: a shortcut key may follow within 2 s */
 static uint32_t s_vol_at;       /* the last volume key press, and the volume before it */
 static int s_vol_before;  /* the power key's current press began after boot's was released */
@@ -837,6 +838,12 @@ void ap_ui_loop(void)
         /* audio pump + Now Playing sync (no-ops without a playing track) */
         (void)player_process();
         config_poll();
+        /* the RAM ring keeps the oldest lines when full: write it out once half full
+         * (at most once a minute), so a long session's log reaches ECHOLOG.TXT whole */
+        if (log_bytes() > 2048u && time_ms() - s_log_flushed >= 60000u) {
+            s_log_flushed = time_ms();
+            log_flush(NULL);
+        }
         switch (power_poll(player_get_state() == PLAYER_PLAYING, 0)) {
         case POWER_OFF_IDLE:
             power_off(NULL);
