@@ -82,7 +82,7 @@ static int playable(const char *name)
     return ext_is(name, "flac") || ext_is(name, "wav") || ext_is(name, "mp3") || ext_is(name, "mp2") ||
            ext_is(name, "aif") || ext_is(name, "aiff") || ext_is(name, "aifc") ||
            ext_is(name, "m4a") || ext_is(name, "m4b") || ext_is(name, "mp4") || ext_is(name, "alac") ||
-           ext_is(name, "ogg") || ext_is(name, "oga") || ext_is(name, "opus");
+           ext_is(name, "ogg") || ext_is(name, "oga") || ext_is(name, "opus") || ext_is(name, "wv");
 }
 
 /* FLAC: STREAMINFO -> track, synthesized header in s_hdr, file left at the first frame. */
@@ -315,6 +315,34 @@ static int open_m4a(fs_file_t *f, const char *path, as_track_t *t)
     return 0;
 }
 
+/* WavPack: core B gets the whole file. Rate, channels, sample size and length come
+ * from the first block header ("wvpk"); custom rates, DSD and v3 files are refused. */
+static int open_wv(fs_file_t *f, as_track_t *t)
+{
+    static const uint32_t k_rates[15] = { 6000, 8000, 9600, 11025, 12000, 16000, 22050, 24000,
+                                          32000, 44100, 48000, 64000, 88200, 96000, 192000 };
+    uint8_t b[32];
+    uint32_t fl, ri, total;
+
+    if (fs_read(f, b, 32) != 32 || memcmp(b, "wvpk", 4) || le16(b + 8) < 0x402)
+        return -1;
+    fl = le32(b + 24);
+    ri = fl >> 23 & 15u;
+    if (ri == 15u || (fl & 0x80000000u))         /* custom rate in metadata; DSD */
+        return -1;
+    total = le32(b + 12);
+    t->codec = AS_CODEC_WAVPACK;
+    t->rate = k_rates[ri];
+    t->channels = (fl & 4u) ? 1u : 2u;
+    t->bits = (fl & 0x80u) ? 32u : ((fl & 3u) + 1u) * 8u;
+    t->frames = total == 0xFFFFFFFFu || b[11] ? 0u : total;
+    s_hdr_len = 0;
+    s_data_off = 0;
+    s_left = (uint32_t)fs_file_size(f);
+    t->bytes = s_left;
+    return fs_seek(f, 0) < 0 ? -1 : 0;
+}
+
 /* Ogg (Vorbis, Opus): core B gets the whole file and its decoder trims by granule
  * positions; here: the codec, rate, channels from the first page's packet, and the
  * length from the last page's granule position (Opus: less the pre-skip). */
@@ -418,6 +446,7 @@ static int open_next(void)
              (ext_is(ent.name, "mp3") || ext_is(ent.name, "mp2")) ? open_mp3(s_file, &t) :
              (ext_is(ent.name, "ogg") || ext_is(ent.name, "oga") || ext_is(ent.name, "opus")) ?
                  open_ogg(s_file, &t) :
+             ext_is(ent.name, "wv") ? open_wv(s_file, &t) :
              open_m4a(s_file, path, &t)) != 0) {
             log_printf("audio: %s: not a playable stream (size %ld)", ent.name, fs_file_size(s_file));
             close_track();
@@ -570,7 +599,7 @@ static void refill(void)
 static const char *family_of(uint32_t codec)
 {
     return codec == AS_CODEC_AAC ? "baac" : codec == AS_CODEC_VORBIS ? "bogg" :
-           codec == AS_CODEC_OPUS ? "bopus" : "bmain";
+           codec == AS_CODEC_OPUS ? "bopus" : codec == AS_CODEC_WAVPACK ? "bwv" : "bmain";
 }
 
 static const char *s_b_image;            /* module now in core B, NULL: none */

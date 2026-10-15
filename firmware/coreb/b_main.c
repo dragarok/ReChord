@@ -128,14 +128,26 @@ void b_in_copy(void *out, uint32_t n)
 
 uint32_t b_in_read(void *out, uint32_t n)
 {
-    uint32_t a;
+    uint8_t *o = out;
+    uint32_t got = 0;
 
-    while ((a = b_in_avail()) < n && AS->in_rd + a < b_trk_end && !AS->cmd)
+    /* copy what is there and wait for more: a read may be larger than the ring
+     * (a WavPack block at 24/96 is ~80 KiB) */
+    while (got < n) {
+        uint32_t a = b_in_avail();
+
+        if (a) {
+            if (a > n - got)
+                a = n - got;
+            b_in_copy(o + got, a);
+            got += a;
+            continue;
+        }
+        if (AS->in_rd >= b_trk_end || AS->cmd)
+            break;                       /* the end of the track, or A wants us */
         cpu_idle();                      /* core A refills every 10 ms */
-    if (n > a)
-        n = a;
-    b_in_copy(out, n);
-    return n;
+    }
+    return got;
 }
 
 uint32_t b_in_pos(void)

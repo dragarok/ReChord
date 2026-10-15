@@ -29,7 +29,8 @@ extern uint32_t b_trk_start, b_trk_end;          /* its span of the input stream
 
 uint32_t b_in_avail(void);                       /* bytes of this track in the ring now */
 void b_in_copy(void *out, uint32_t n);           /* n <= b_in_avail() */
-/* Up to n bytes, waiting (WFI) for core A's refills; short only at the track end. */
+/* n bytes, waiting (WFI) for core A's refills (n may exceed the ring); short only
+ * at the track end or when core A sends a command. */
 uint32_t b_in_read(void *out, uint32_t n);
 uint32_t b_in_pos(void);                         /* bytes of the track consumed */
 /* Input one decode step may need (a frame or packet); the runtime decodes only once

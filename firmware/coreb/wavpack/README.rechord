@@ -1,0 +1,3 @@
+WavPack 5.9.0 (https://github.com/dbry/WavPack, BSD-3-Clause): the decoder
+subset of src/ (no tags, seeking, legacy v3 or DSD), unmodified; built with
+-DNO_TAGS -DNO_SEEKING (Makefile COREB_WV_DEFS).
