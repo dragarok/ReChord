@@ -21,13 +21,17 @@
 #include "services/queue.h"
 #include "services/log.h"
 #include "services/power.h"
+#include "services/screenshot.h"
 #include "audio/audio.h"
 #include "player.h"
 #include "ui/ui.h"
 #include "ui/screens/screens.h"
 
 static int s_adc = 1023, s_adc2 = 1023, s_power, s_cable;
-static int s_power_press_ok;  /* the power key's current press began after boot's was released */
+static int s_power_press_ok;
+static uint32_t s_shortcut_at;  /* VOL+/VOL- chord: a shortcut key may follow within 2 s */
+static uint32_t s_vol_at;       /* the last volume key press, and the volume before it */
+static int s_vol_before;  /* the power key's current press began after boot's was released */
 static uint32_t s_power_down_ms;     /* time_ms() when the power key went down */
 static int s_power_armed;    /* power key seen released since boot */
 static uint32_t s_user;              /* user volume start, 0 = unknown */
@@ -130,9 +134,9 @@ static int ask(int any_key)
     for (;;) {
         input_scan(keys_adc(), keys_power());
         while (input_poll(&ev) > 0) {
-            static const char *const k_names[] = { "none", "up", "down", "select", "back", "power", "menu" };
+            static const char *const k_names[] = { "none", "up", "down", "select", "back", "power", "menu", "chord" };
 
-            log_printf("ui: key %s%s on %s", ev.type >= 0 && ev.type < 7 ? k_names[ev.type] : "?",
+            log_printf("ui: key %s%s on %s", ev.type >= 0 && ev.type < 8 ? k_names[ev.type] : "?",
                        ev.adc_value == INPUT_ADC_LONG ? " (hold)" : ev.adc_value == INPUT_ADC_REPEAT ? " (repeat)" : "",
                        ui_top_screen() ? ui_top_screen()->name : "-");
             if (any_key || ev.type == KEY_SELECT)
@@ -665,6 +669,32 @@ static int dark_or_power_key(const input_event_t *ev)
     return 0;
 }
 
+/* RECHO's shortcuts (0x0305b3cc): VOL+ and VOL- together arm them, and the next
+ * key within 2 s picks one: PLAY saves the screen as /Internal/SHOTn.BMP. The
+ * chord undoes a volume step its first key made in the last 500 ms. Returns 1 if
+ * the event was taken. */
+static int shortcut_key(const input_event_t *ev)
+{
+    uint32_t armed = s_shortcut_at;
+
+    if (ev->type == KEY_CHORD) {
+        power_activity();
+        if (time_ms() - s_vol_at < 500u && player_get_volume() != s_vol_before)
+            player_set_volume(s_vol_before);
+        s_shortcut_at = time_ms() | 1u;
+        log_printf("ui: shortcut: play = screenshot");
+        return 1;
+    }
+    if (!armed)
+        return 0;
+    s_shortcut_at = 0;
+    if (time_ms() - armed > 2000u || ev->type != KEY_SELECT || ev->adc_value == INPUT_ADC_LONG)
+        return 0;
+    power_activity();
+    log_printf("ui: screenshot: %d", screenshot_save());
+    return 1;
+}
+
 /* RECHO's "On USB connect" (cfg usb): ask, disk, DAC, charge only. The USB DAC
  * is not there yet: it charges. The CDC console stays in the main menu. */
 static void cable_connected(void)
@@ -762,13 +792,19 @@ void ap_ui_loop(void)
         input_scan(adc, power);
 
         while (input_poll(&ev) > 0) {
-            static const char *const k_names[] = { "none", "up", "down", "select", "back", "power", "menu" };
+            static const char *const k_names[] = { "none", "up", "down", "select", "back", "power", "menu", "chord" };
 
-            log_printf("ui: key %s%s on %s", ev.type >= 0 && ev.type < 7 ? k_names[ev.type] : "?",
+            log_printf("ui: key %s%s on %s", ev.type >= 0 && ev.type < 8 ? k_names[ev.type] : "?",
                        ev.adc_value == INPUT_ADC_LONG ? " (hold)" : ev.adc_value == INPUT_ADC_REPEAT ? " (repeat)" : "",
                        ui_top_screen() ? ui_top_screen()->name : "-");
             if (ev.type == KEY_POWER && !s_power_press_ok)
                 continue;                /* the release of the press that switched us on */
+            if (shortcut_key(&ev))
+                continue;
+            if ((ev.type == KEY_UP || ev.type == KEY_DOWN) && ev.adc_value != INPUT_ADC_REPEAT) {
+                s_vol_before = player_get_volume();
+                s_vol_at = time_ms();
+            }
             if (!dark_or_power_key(&ev))
                 continue;
             if (ev.adc_value == INPUT_ADC_LONG && ev.type != KEY_MENU &&

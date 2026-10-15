@@ -32,7 +32,7 @@ static void test_queue_fifo(void)
 
     /* Invalid event types are rejected. */
     CHECK(input_push(KEY_NONE, 0) == INPUT_ERR_ARG);
-    CHECK(input_push(KEY_MENU + 1, 0) == INPUT_ERR_ARG);
+    CHECK(input_push(KEY_CHORD + 1, 0) == INPUT_ERR_ARG);
     CHECK(input_push(-1, 0) == INPUT_ERR_ARG);
 
     CHECK(input_push(KEY_UP, 100) == INPUT_OK);
@@ -140,8 +140,39 @@ static void test_hold(void)
     input_mock_clear();
 }
 
+/* VOL+ held, then the ladder reads VOL-: one KEY_CHORD, nothing more until all keys are up. */
+static void test_chord(void)
+{
+    input_event_t ev;
+    int i;
+
+    input_mock_clear();
+    CHECK(input_scan(130, 0) == 0);
+    CHECK(input_scan(130, 0) == 1);          /* VOL+ press */
+    for (i = 0; i < 3; i++)
+        CHECK(input_scan(130, 0) == 0);
+    CHECK(input_scan(30, 0) == 0);
+    CHECK(input_scan(30, 0) == 1);           /* the other volume key: the chord */
+    CHECK(input_scan(130, 0) == 0);
+    CHECK(input_scan(130, 0) == 0);          /* VOL- up, VOL+ still down: nothing */
+    CHECK(input_scan(1023, 0) == 0);
+    CHECK(input_scan(1023, 0) == 0);
+    CHECK(input_pending() == 2);
+    CHECK(input_poll(&ev) == 1 && ev.type == KEY_UP);
+    CHECK(input_poll(&ev) == 1 && ev.type == KEY_CHORD);
+    /* a quick slide from one volume key to the other is two presses */
+    CHECK(input_scan(130, 0) == 0);
+    CHECK(input_scan(130, 0) == 1);
+    CHECK(input_scan(30, 0) == 0);
+    CHECK(input_scan(30, 0) == 1);
+    CHECK(input_poll(&ev) == 1 && ev.type == KEY_UP);
+    CHECK(input_poll(&ev) == 1 && ev.type == KEY_DOWN);
+    input_mock_clear();
+}
+
 int main(void)
 {
+    test_chord();
     test_queue_fifo();
     test_hold();
     test_overflow();

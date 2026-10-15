@@ -57,7 +57,7 @@ int input_push(int type, int adc_value)
 {
     input_event_t *slot;
 
-    if (type < KEY_UP || type > KEY_MENU) {
+    if (type < KEY_UP || type > KEY_CHORD) {
         return INPUT_ERR_ARG;
     }
     if (s_count >= (unsigned)INPUT_QUEUE_LEN) {
@@ -101,6 +101,13 @@ int input_scan(int adc_value, int power)
         s_scan_last = key;
         return 0;
     }
+    if (s_scan_held == KEY_CHORD) {    /* nothing more until every key is up */
+        if (key == KEY_NONE) {
+            s_scan_held = KEY_NONE;
+            s_held_scans = 0;
+        }
+        return 0;
+    }
     if (key == s_scan_held) {
         if (key == KEY_NONE)
             return 0;
@@ -115,6 +122,12 @@ int input_scan(int adc_value, int power)
         return 0;
     }
     prev = s_scan_held;
+    /* RECHO's chord: one volume key held (3 scans), then the ladder reads the other */
+    if (((prev == KEY_UP && key == KEY_DOWN) || (prev == KEY_DOWN && key == KEY_UP)) && s_held_scans >= 3) {
+        s_scan_held = KEY_CHORD;
+        s_held_scans = 0;
+        return input_push(KEY_CHORD, adc_value) == INPUT_OK;
+    }
     if (prev != KEY_NONE && !acts_on_press(prev) && s_held_scans < INPUT_LONG_SCANS)
         r = input_push(prev, prev == KEY_POWER ? -1 : 0) == INPUT_OK;       /* short press, on release */
     s_scan_held = key;

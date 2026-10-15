@@ -23,7 +23,8 @@ typedef enum input_key {
     KEY_SELECT = 3,
     KEY_BACK = 4,
     KEY_POWER = 5,
-    KEY_MENU = 6
+    KEY_MENU = 6,
+    KEY_CHORD = 7   /* VOL+ and VOL- together (RECHO's key 7: shortcuts) */
 } input_key_t;
 
 /* One key event.
