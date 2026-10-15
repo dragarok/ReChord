@@ -66,7 +66,10 @@ COREB_OPUS := $(patsubst firmware/coreb/%.c,%,$(wildcard firmware/coreb/opus/cel
                  firmware/coreb/opus/silk/fixed/*.c firmware/coreb/opus/src/*.c firmware/coreb/opus/opusfile/*.c))
 COREB_WAVPACK := $(patsubst %,wavpack/%,common_utils decorr_utils entropy_utils open_utils read_words unpack unpack_utils unpack_floats)
 COREB_DEMAC := $(patsubst %,demac/%,decoder entropy predictor filter_16_11 filter_64_11 filter_32_10 filter_256_13 filter_1280_15)
-COREB_FAMILIES := main aac ogg opus wv dsd ape
+COREB_WMA  := $(patsubst %,wma/%,wmadeci wmafixed mdct fft-ffmpeg mdct_lookup ffmpeg_bitstream)
+COREB_WMAPRO := $(patsubst %,wma/pro/%,wmaprodec wma mdct_tables) $(patsubst %,wma/%,mdct fft-ffmpeg mdct_lookup ffmpeg_bitstream)
+COREB_WMALL := wma/lossless/wmalldec wma/pro/wma wma/ffmpeg_bitstream
+COREB_FAMILIES := main aac ogg opus wv dsd ape wma wmapro wmall
 COREB_FAM_main := b_codecs_main b_flac b_pcm b_mp3 b_alac $(COREB_MAD) $(COREB_ALAC)
 COREB_FAM_aac  := b_codecs_aac b_aac $(COREB_FAAD)
 COREB_FAM_ogg  := b_codecs_ogg b_vorbis $(COREB_TREMOR) $(COREB_OGG)
@@ -74,6 +77,9 @@ COREB_FAM_opus := b_codecs_opus b_opus $(COREB_OPUS) $(COREB_OGG)
 COREB_FAM_wv   := b_codecs_wv b_wavpack $(COREB_WAVPACK)
 COREB_FAM_dsd  := b_codecs_dsd b_dsd dsd/dsd_dec
 COREB_FAM_ape  := b_codecs_ape b_ape $(COREB_DEMAC)
+COREB_FAM_wma  := b_codecs_wma b_wma b_asf asf $(COREB_WMA)
+COREB_FAM_wmapro := b_codecs_wmapro b_wmapro b_asf asf $(COREB_WMAPRO)
+COREB_FAM_wmall := b_codecs_wmall b_wmall b_asf asf $(COREB_WMALL)
 # stack reserve per image (bytes): FAAD2 nests up to ~93 KiB of locals (HE-AAC v2)
 COREB_STACK_main := 0x5000
 COREB_STACK_aac  := 0x18000
@@ -82,6 +88,9 @@ COREB_STACK_opus := 0x8000
 COREB_STACK_wv   := 0x4000
 COREB_STACK_dsd  := 0x2000
 COREB_STACK_ape  := 0x1000
+COREB_STACK_wma  := 0x2000
+COREB_STACK_wmapro := 0x2000
+COREB_STACK_wmall := 0x2000
 COREB_CFLAGS := $(AP_ARCH_FLAGS) -O2 -Wall -Wno-unused-function -ffreestanding \
                 -fno-tree-loop-distribute-patterns -ffunction-sections -fdata-sections -MMD -MP \
                 -Ifirmware -Ifirmware/coreb -Ifirmware/coreb/libmad -DOPT_ACCURACY -DNDEBUG
@@ -102,6 +111,15 @@ $(COREB_DIR)/tremor/%.o $(COREB_DIR)/ogg/%.o $(COREB_DIR)/b_vorbis.o: COREB_CFLA
 $(COREB_DIR)/b_alac.o: COREB_CFLAGS += -Ifirmware/coreb/alac
 $(COREB_DIR)/dsd/%.o: COREB_CFLAGS += -O3
 $(COREB_DIR)/demac/%.o: COREB_CFLAGS += -Wno-unused-variable
+# Rockbox libwma / libwmapro (fixed point, C paths: Rockbox's ARM asm is ARM-mode), FFmpeg's
+# WMA Lossless decoder made standalone (integer). No strict
+# aliasing: the vendored code mixes int32_t (long on newlib) and int pointers.
+$(COREB_DIR)/wma/%.o $(COREB_DIR)/b_wma.o $(COREB_DIR)/b_wmapro.o $(COREB_DIR)/b_wmall.o: COREB_CFLAGS += -Ifirmware/coreb/wma -fno-strict-aliasing -Wno-pointer-sign
+$(COREB_DIR)/wma/lossless/%.o: COREB_CFLAGS += -Wno-parentheses
+# the ASF packet parser is core A's file (audio/asf.c), built into the image too
+$(COREB_DIR)/asf.o: firmware/audio/asf.c Makefile
+	@$(MKDIR_P) $(dir $@)
+	$(CC) $(COREB_CFLAGS) -c $< -o $@
 $(COREB_DIR)/%.o: firmware/coreb/%.c Makefile
 	@$(MKDIR_P) $(dir $@)
 	$(CC) $(COREB_CFLAGS) -c $< -o $@

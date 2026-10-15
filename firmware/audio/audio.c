@@ -19,6 +19,7 @@
 #include "ape_info.h"
 #include "mp3_info.h"
 #include "mp4.h"
+#include "asf.h"
 #include "drivers/clock.h"
 #include "drivers/dac_cs43131.h"
 #include "services/fs.h"
@@ -503,6 +504,43 @@ static int open_ape(fs_file_t *f, as_track_t *t)
     return 0;
 }
 
+/* WMA (ASF): core B gets "u32 length + asf_cfg_t" (the stream's WAVEFORMATEX and the
+ * packet size), then the data packets as stored -- all of one size, so the count fixes
+ * the length and whole sectors go straight to the ring; core B takes the payloads
+ * apart (asf.c). WMA has no gapless trim: every decoded frame plays (t->frames = 0);
+ * the play duration less the preroll is only shown. */
+static uint32_t s_show_frames;             /* frames to show when t->frames is 0 */
+
+static int open_wma(fs_file_t *f, as_track_t *t)
+{
+    asf_info_t ai;
+
+    _Static_assert(4u + sizeof(asf_cfg_t) <= sizeof s_hdr, "s_hdr holds the ASF config");
+    if (asf_info(mp3_rd, f, (uint32_t)fs_file_size(f), &ai) != 0 || fs_seek(f, (long)ai.data_off) < 0)
+        return -1;
+    if (ai.cfg.codec_id == ASF_WMAV1 || ai.cfg.codec_id == ASF_WMAV2)
+        t->codec = AS_CODEC_WMA;
+    else if (ai.cfg.codec_id == ASF_WMAPRO)
+        t->codec = AS_CODEC_WMAPRO;
+    else
+        t->codec = AS_CODEC_WMALOSSLESS;
+    if (ai.cfg.channels < 1 || ai.cfg.channels > 2)
+        return -1;
+    t->rate = ai.cfg.rate;
+    t->channels = ai.cfg.channels;
+    t->bits = t->codec != AS_CODEC_WMA && ai.cfg.bits > 16 ? 24 : 16;     /* Pro, Lossless: 24-bit sources */
+    t->frames = 0;
+    s_show_frames = ai.frames;
+    s_hdr[0] = (uint8_t)sizeof ai.cfg;
+    s_hdr[1] = s_hdr[2] = s_hdr[3] = 0;
+    memcpy(s_hdr + 4, &ai.cfg, sizeof ai.cfg);
+    s_hdr_len = 4u + sizeof ai.cfg;
+    s_data_off = ai.data_off;
+    s_left = ai.data_bytes;
+    t->bytes = s_hdr_len + s_left;
+    return 0;
+}
+
 static void close_track(void)
 {
     if (s_file)
@@ -536,6 +574,7 @@ static int open_next(void)
         memset(&t, 0, sizeof t);
         s_kbps = 0;
         s_mp4 = 0;
+        s_show_frames = 0;
         if ((kind == DL_FLAC ? open_flac(s_file, &t) :
              kind == DL_WAV ? open_wav(s_file, &t) :
              kind == DL_AIFF ? open_aiff(s_file, &t) :
@@ -545,6 +584,7 @@ static int open_next(void)
              kind == DL_DSF ? open_dsf(s_file, &t) :
              kind == DL_DFF ? open_dff(s_file, &t) :
              kind == DL_APE ? open_ape(s_file, &t) :
+             kind == DL_WMA ? open_wma(s_file, &t) :
              kind == DL_M4A ? open_m4a(s_file, &ref, &t) : -1) != 0) {
             log_printf("audio: %s: not a playable stream (size %ld)", name, fs_file_size(s_file));
             close_track();
@@ -564,7 +604,7 @@ static int open_next(void)
             u->rate = t.rate;
             u->bits = t.bits;
             u->channels = t.channels;
-            u->frames = t.frames;
+            u->frames = t.frames ? t.frames : s_show_frames;
             u->codec = t.codec;
             u->kbps = s_kbps;
             u->index = (uint32_t)pos;
@@ -699,7 +739,8 @@ static const char *family_of(uint32_t codec)
 {
     return codec == AS_CODEC_AAC ? "baac" : codec == AS_CODEC_VORBIS ? "bogg" :
            codec == AS_CODEC_OPUS ? "bopus" : codec == AS_CODEC_WAVPACK ? "bwv" :
-           codec == AS_CODEC_DSD ? "bdsd" : codec == AS_CODEC_APE ? "bape" : "bmain";
+           codec == AS_CODEC_DSD ? "bdsd" : codec == AS_CODEC_APE ? "bape" : codec == AS_CODEC_WMA ? "bwma" :
+           codec == AS_CODEC_WMAPRO ? "bwmapro" : codec == AS_CODEC_WMALOSSLESS ? "bwmall" : "bmain";
 }
 
 static const char *s_b_image;            /* module now in core B, NULL: none */
