@@ -1,0 +1,61 @@
+libdemac -- Monkey's Audio (APE) decoder, for core B's "bape" image
+====================================================================
+
+Origin
+  Rockbox, lib/rbcodec/codecs/demac/libdemac (https://github.com/Rockbox/rockbox)
+  commit f2eaa15ac2cb0fe97b58d9c69e43777f9eb94cb4 (2026-10-14).
+  Copy of the fetched tree: /Volumes/Kai/snowsky_echo_mini/sdk/downloads/rockbox/src.
+
+License
+  GPL-2.0-or-later (COPYING, from lib/rbcodec/codecs/demac). (C) 2007 Dave Chapman and
+  the Rockbox contributors; the range decoder in entropy.c is (C) 1997-2000 Michael
+  Schindler, also GPL.
+
+Vendored
+  decoder.[ch] demac.h demac_config.h entropy.[ch] filter.[ch] filter_{16_11,32_10,
+  64_11,256_13,1280_15}.c parser.h predictor.[ch] vector_math_generic.h
+  vector_math32_armv4.h, unchanged unless listed below.
+  Not taken: parser.c (core A parses the file: firmware/audio/ape_info.c), crc.c (no
+  per-frame CRC check, as dr_flac runs with DR_FLAC_NO_CRC), the ARM-mode / ColdFire
+  assembly (predictor-arm.S etc.), the other vector_math headers, demac.c/wavwrite.c.
+
+Local changes (marked "ReChord" in the source)
+  demac_config.h  FILTER_BITS 32 on every non-Rockbox build (core B and the host
+                  reference tests/aperef), so both run the same arithmetic.
+  filter.c        - on Cortex-M3 (__ARM_ARCH_7M__) use vector_math32_armv4.h: its
+                    LDM/MLA routines are unified syntax and assemble as Thumb-2
+                    (~3 instructions per filter tap instead of ~7);
+                  - SATURATE with SSAT on ARMv7-M;
+                  - exactness: Monkey's Audio keeps the NN-filter coefficients in 16
+                    bits and lets them wrap; 32-bit coefficients do not. An update
+                    moves a coefficient by at most 32 (3.97: 4), so coeffs_safe()
+                    checks at each call that no coefficient can leave the 16-bit range
+                    within `count` samples; if one could, the call runs
+                    sp_adapt_wrap(), which wraps like the reference. On the test
+                    corpus the guard never trips; forcing the wrap path on every call
+                    gives identical output (both bit-exact).
+
+Use (firmware/coreb/b_ape.c)
+  Core A sends a 24-byte "MACb" header (version, level, blocks per frame, final
+  frame blocks, frames, bits, channels: audio/ape_info.h), then only the frame bytes.
+  The frames are decoded in order from one buffer (each starts where the previous
+  frame's range decoder stopped), 256 blocks per decode_chunk(); output is the sample
+  left-justified in the 32-bit I2S word.
+
+Supported
+  File versions 3.97 .. 3.99 (libdemac's range; current MAC still writes 3.99; only
+  3.99 files from MAC SDK 13.28 are in the test corpus). Compression levels fast,
+  normal, high, extra high, insane. 8-, 16- and 24-bit, mono and stereo, any rate.
+  Leading ID3v2 tag(s), trailing APEv2 and ID3v1 tags (core A skips them).
+
+Not supported
+  - Insane in real time: it decodes bit-exactly but needs ~10,000 core-B instructions
+    per stereo frame (~440 M/s at 44.1 kHz); core A skips any APE stream whose
+    estimated cost exceeds 240 M instructions/s (audio.c k_ape_cost), so insane is
+    skipped, and extra high above 96 kHz stereo.
+  - Versions before 3.97, float ("MACF"),
+    32-bit integer, more than 2 channels.
+  - 24-bit files from the MAC versions that encoded with 64-bit "interim" arithmetic
+    (from the addition of 32-bit support up to 8.50; MAC decodes them only by retrying
+    a frame after its CRC fails): they decode with errors.
+  - Seeking (the player never seeks; the seek table is not read).
