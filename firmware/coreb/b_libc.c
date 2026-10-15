@@ -38,10 +38,25 @@ void *memmove(void *d, const void *s, size_t n)
     return d;
 }
 
+/* Words once aligned: FFmpeg's WMA Lossless clears up to 1 KiB of LMS history per
+ * sample and filter (a byte loop made it 3x slower than real time). */
 void *memset(void *d, int c, size_t n)
 {
     uint8_t *o = d;
 
+    for (; n && ((uintptr_t)o & 3u); n--)
+        *o++ = (uint8_t)c;
+    if (n >= 4) {
+        uint32_t v = (uint8_t)c * 0x01010101u, *w = (uint32_t *)o;
+
+        for (; n >= 16; n -= 16) {
+            w[0] = v; w[1] = v; w[2] = v; w[3] = v;
+            w += 4;
+        }
+        for (; n >= 4; n -= 4)
+            *w++ = v;
+        o = (uint8_t *)w;
+    }
     while (n--)
         *o++ = (uint8_t)c;
     return d;

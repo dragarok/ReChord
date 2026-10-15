@@ -508,12 +508,12 @@ static int open_wma(fs_file_t *f, as_track_t *t)
     else if (ai.cfg.codec_id == ASF_WMAPRO)
         t->codec = AS_CODEC_WMAPRO;
     else
-        return -1;                               /* WMA Lossless (0x163): no decoder */
+        t->codec = AS_CODEC_WMALOSSLESS;
     if (ai.cfg.channels < 1 || ai.cfg.channels > 2)
         return -1;
     t->rate = ai.cfg.rate;
     t->channels = ai.cfg.channels;
-    t->bits = 16;
+    t->bits = t->codec != AS_CODEC_WMA && ai.cfg.bits > 16 ? 24 : 16;     /* Pro, Lossless: 24-bit sources */
     t->frames = 0;
     s_show_frames = ai.frames;
     s_hdr[0] = (uint8_t)sizeof ai.cfg;
@@ -736,7 +736,7 @@ static const char *family_of(uint32_t codec)
     return codec == AS_CODEC_AAC ? "baac" : codec == AS_CODEC_VORBIS ? "bogg" :
            codec == AS_CODEC_OPUS ? "bopus" : codec == AS_CODEC_WAVPACK ? "bwv" :
            codec == AS_CODEC_DSD ? "bdsd" : codec == AS_CODEC_WMA ? "bwma" :
-           codec == AS_CODEC_WMAPRO ? "bwmapro" : "bmain";
+           codec == AS_CODEC_WMAPRO ? "bwmapro" : codec == AS_CODEC_WMALOSSLESS ? "bwmall" : "bmain";
 }
 
 static const char *s_b_image;            /* module now in core B, NULL: none */

@@ -5,6 +5,7 @@ f2eaa15ac2cb0fe97b58d9c69e43777f9eb94cb4, fetched 2026-10-15):
   pro/      lib/rbcodec/codecs/libwmapro  WMA Pro (0x162), fixed point, mono/stereo
   shared    lib/rbcodec/codecs/lib        mdct.c, fft-ffmpeg.c, mdct_lookup.c,
                                           ffmpeg_bitstream.c and their headers
+and WMA Lossless (0x163) from FFmpeg (below).
 
 Both are ports of FFmpeg's decoders (wmadec.c by the FFmpeg project, wmaprodec.c by
 Baptiste Coudurier, Benjamin Larsson, Ulion, Sascha Sommer), LGPL-2.1-or-later as the
@@ -32,8 +33,20 @@ Local changes (each marked "ReChord" in the source):
 - ffmpeg_bitstream.c: the VLC code sort is a Shell sort on the code (qsort's comparator
   took an int difference of two 31-bit keys, which can overflow); same order, no libc.
 
-Output scale (firmware/coreb/b_wma.c, b_wmapro.c): libwma gives 2.29 fixed point
+lossless/wmalldec.c: FFmpeg n7.1 libavcodec/wmalosslessdec.c (Baptiste Coudurier,
+Benjamin Larsson, Ulion, Sascha Sommer, Andreas Oman, Mashiat Sarker Shakkhar;
+LGPL-2.1-or-later), with the C lossless_audiodsp routines, made standalone (marked
+"ReChord"): wmall_init()/wmall_decode() instead of the AVCodec callbacks, the frame
+and sample buffers from the caller's allocator sized to the stream (FFmpeg: fixed
+16384-sample arrays), Rockbox's bit reader/writer, mono/stereo only, the decode loop
+of FFmpeg's decode.c (a packet is fed again from where the last call stopped; the
+end of the stream is drained) in firmware/coreb/b_wmall.c. Bit exact against ffmpeg
+on whole files (16 and 24 bit); on a cut file the last frame, read past the data,
+may differ (both decoders then read what follows in their buffers).
+
+Output scale (firmware/coreb/b_wma.c, b_wmapro.c, b_wmall.c): libwma gives 2.29 fixed point
 (Rockbox sample depth 29) with inverted polarity, libwmapro 2.25 (depth 25); both are
-clipped to +-1.0 and left-justified in the 32-bit I2S word. Checked against FFmpeg's
+clipped to +-1.0 and left-justified in the 32-bit I2S word; WMA Lossless 16-bit
+samples << 16, 24-bit << 8. Checked against FFmpeg's
 float decoders: 92-105 dB SNR on ffmpeg-encoded WMA v1/v2, 58-86 dB on Windows-encoded
 WMA v2 (bit reservoir, block switching), 90-99 dB on WMA Pro (16-96 kHz).
