@@ -82,7 +82,8 @@ static int playable(const char *name)
     return ext_is(name, "flac") || ext_is(name, "wav") || ext_is(name, "mp3") || ext_is(name, "mp2") ||
            ext_is(name, "aif") || ext_is(name, "aiff") || ext_is(name, "aifc") ||
            ext_is(name, "m4a") || ext_is(name, "m4b") || ext_is(name, "mp4") || ext_is(name, "alac") ||
-           ext_is(name, "ogg") || ext_is(name, "oga") || ext_is(name, "opus") || ext_is(name, "wv");
+           ext_is(name, "ogg") || ext_is(name, "oga") || ext_is(name, "opus") || ext_is(name, "wv") ||
+           ext_is(name, "dsf") || ext_is(name, "dff");
 }
 
 /* FLAC: STREAMINFO -> track, synthesized header in s_hdr, file left at the first frame. */
@@ -343,6 +344,97 @@ static int open_wv(fs_file_t *f, as_track_t *t)
     return fs_seek(f, 0) < 0 ? -1 : 0;
 }
 
+/* DSD: DSF (blocks of each channel, usually LSB first) or DFF/DSDIFF (bytes
+ * interleaved, MSB first; DST-compressed refused). Core B gets a small layout
+ * header, then the sound data, and makes 176.4 kHz PCM of it. */
+static uint64_t le64(const uint8_t *p) { return le32(p) | (uint64_t)le32(p + 4) << 32; }
+static uint64_t be64(const uint8_t *p) { return (uint64_t)be32(p) << 32 | be32(p + 4); }
+
+static int dsd_track(as_track_t *t, uint32_t layout, uint32_t ch, uint32_t dsd_rate, uint32_t block,
+                     uint64_t samples, uint32_t off, uint32_t len)
+{
+    uint32_t mult = dsd_rate / 2822400u, h[5] = { 0x31445344u, layout, ch, mult, block };
+
+    if (dsd_rate % 2822400u || (mult != 1 && mult != 2 && mult != 4) || ch < 1 || ch > 2 || !len)
+        return -1;
+    t->codec = AS_CODEC_DSD;
+    t->rate = mult == 4u ? 88200u : 176400u;     /* DSD256 at 176.4k is beyond core B */
+    t->channels = ch;
+    t->bits = 24;
+    t->frames = (uint32_t)(samples / (mult == 4u ? 128u : 16u * mult));
+    memcpy(s_hdr, h, 20);
+    s_hdr_len = 20;
+    s_data_off = off;
+    s_left = len;
+    t->bytes = 20 + len;
+    return 0;
+}
+
+static int open_dsf(fs_file_t *f, as_track_t *t)
+{
+    uint8_t b[80];
+    uint64_t dsd_sz, fmt_sz, data_sz;
+
+    if (fs_read(f, b, 28) != 28 || memcmp(b, "DSD ", 4) || (dsd_sz = le64(b + 4)) > 64u ||
+        fs_seek(f, (long)dsd_sz) < 0 || fs_read(f, b, 52) != 52 || memcmp(b, "fmt ", 4) || le32(b + 16))
+        return -1;                               /* format id 0 = raw DSD */
+    fmt_sz = le64(b + 4);
+    {
+        uint32_t ch = le32(b + 24), rate = le32(b + 28), bits = le32(b + 32), block = le32(b + 44);
+        uint64_t samples = le64(b + 36);
+        uint32_t off = (uint32_t)(dsd_sz + fmt_sz) + 12u;
+
+        if (fs_seek(f, (long)(dsd_sz + fmt_sz)) < 0 || fs_read(f, b, 12) != 12 || memcmp(b, "data", 4))
+            return -1;
+        data_sz = le64(b + 4) - 12u;
+        if (bits != 1 && bits != 8)
+            return -1;
+        if (dsd_track(t, bits == 1 ? 0u : 1u, ch, rate, block, samples, off, (uint32_t)data_sz))
+            return -1;
+        return fs_seek(f, (long)off) < 0 ? -1 : 0;
+    }
+}
+
+static int open_dff(fs_file_t *f, as_track_t *t)
+{
+    uint8_t b[16];
+    uint32_t pos = 16, ch = 0, rate = 0, size = (uint32_t)fs_file_size(f);
+
+    if (fs_read(f, b, 16) != 16 || memcmp(b, "FRM8", 4) || memcmp(b + 12, "DSD ", 4))
+        return -1;
+    while (pos + 12u <= size) {
+        uint64_t n;
+
+        if (fs_seek(f, (long)pos) < 0 || fs_read(f, b, 12) != 12)
+            return -1;
+        n = be64(b + 4);
+        if (!memcmp(b, "PROP", 4)) {
+            uint32_t q = pos + 16;               /* after "SND " */
+
+            while (q + 12u <= pos + 12u + n) {
+                uint64_t m;
+
+                if (fs_seek(f, (long)q) < 0 || fs_read(f, b, 16) != 16)
+                    return -1;
+                m = be64(b + 4);
+                if (!memcmp(b, "FS  ", 4))
+                    rate = be32(b + 12);
+                else if (!memcmp(b, "CHNL", 4))
+                    ch = (uint32_t)b[12] << 8 | b[13];
+                else if (!memcmp(b, "CMPR", 4) && memcmp(b + 12, "DSD ", 4))
+                    return -1;                   /* DST */
+                q += 12u + (uint32_t)m + (uint32_t)(m & 1u);
+            }
+        } else if (!memcmp(b, "DSD ", 4)) {
+            if (!ch || dsd_track(t, 2, ch, rate, 0, n / ch * 8u, pos + 12u, (uint32_t)n))
+                return -1;
+            return fs_seek(f, (long)(pos + 12u)) < 0 ? -1 : 0;
+        }
+        pos += 12u + (uint32_t)n + (uint32_t)(n & 1u);
+    }
+    return -1;
+}
+
 /* Ogg (Vorbis, Opus): core B gets the whole file and its decoder trims by granule
  * positions; here: the codec, rate, channels from the first page's packet, and the
  * length from the last page's granule position (Opus: less the pre-skip). */
@@ -447,6 +539,8 @@ static int open_next(void)
              (ext_is(ent.name, "ogg") || ext_is(ent.name, "oga") || ext_is(ent.name, "opus")) ?
                  open_ogg(s_file, &t) :
              ext_is(ent.name, "wv") ? open_wv(s_file, &t) :
+             ext_is(ent.name, "dsf") ? open_dsf(s_file, &t) :
+             ext_is(ent.name, "dff") ? open_dff(s_file, &t) :
              open_m4a(s_file, path, &t)) != 0) {
             log_printf("audio: %s: not a playable stream (size %ld)", ent.name, fs_file_size(s_file));
             close_track();
@@ -599,7 +693,8 @@ static void refill(void)
 static const char *family_of(uint32_t codec)
 {
     return codec == AS_CODEC_AAC ? "baac" : codec == AS_CODEC_VORBIS ? "bogg" :
-           codec == AS_CODEC_OPUS ? "bopus" : codec == AS_CODEC_WAVPACK ? "bwv" : "bmain";
+           codec == AS_CODEC_OPUS ? "bopus" : codec == AS_CODEC_WAVPACK ? "bwv" :
+           codec == AS_CODEC_DSD ? "bdsd" : "bmain";
 }
 
 static const char *s_b_image;            /* module now in core B, NULL: none */
@@ -611,6 +706,7 @@ static int b_load(const char *image)
     uint32_t t0;
     int n;
 
+    clock_set_core_b_div(1);                 /* start at full speed; B scales down from its load */
     t0 = time_ms();
     if (s_b_up) {                            /* park B first: no exception may be half-handled */
         AS->cmd = AS_CMD_PARK;
@@ -770,6 +866,10 @@ int audio_play_dir(const char *dir, uint32_t index)
     if (!s_b_up || s_b_image != image) {
         if (b_load(image) != 0)
             return -1;
+    } else if (AS->b_div != 1u) {            /* same image: back to full speed for the start */
+        clock_set_core_b_div(1);
+        AS->b_hz = clock_core_b_hz();
+        AS->b_div = AS->b_div_req = 1;
     }
     if (!s_dac_up) {
         if (dac_init(s_rate) != 0)
@@ -881,6 +981,11 @@ static void stream_switch(void)
             halt();
             return;
         }
+    }
+    if (s_b_up && AS->b_div != 1u) {         /* full speed while the ring refills */
+        clock_set_core_b_div(1);
+        AS->b_hz = clock_core_b_hz();
+        AS->b_div = AS->b_div_req = 1;
     }
     if (rate != s_rate) {
         log_printf("audio: rate %u -> %u Hz", (unsigned)s_rate, (unsigned)rate);
