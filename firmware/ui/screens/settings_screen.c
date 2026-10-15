@@ -86,10 +86,10 @@ static const menu_item_t k_items[] = {
     { "Screen off after", v_screen, s_screen },
     { "Auto power off", v_auto, s_auto },
     { "On USB connect", v_usb, s_usb },
-    { "DAC power", v_dacpow, s_dacpow },
     { "Resume at power-on", v_resume, s_resume },
     { "Debug strip", v_strip, s_strip },
     { "CPU clock", v_cpu, s_cpu },
+    { "DAC power", v_dacpow, s_dacpow },
     { "Restore defaults", v_restore, s_restore },
     { "About", v_about, NULL },
 };
