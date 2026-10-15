@@ -37,8 +37,8 @@
 #define USB_IRQ     5u
 
 enum {
-    GAHBCFG = 0x08, GRSTCTL = 0x10, GINTSTS = 0x14, GINTMSK = 0x18, GRXSTSP = 0x20, GHWCFG4 = 0x50,
-    DIEPTXF1 = 0x104, DIEPTXF2 = 0x108,
+    GAHBCFG = 0x08, GRSTCTL = 0x10, GINTSTS = 0x14, GINTMSK = 0x18, GRXSTSP = 0x20, GRXFSIZ = 0x24,
+    GNPTXFSIZ = 0x28, GHWCFG3 = 0x4C, DIEPTXF1 = 0x104, DIEPTXF2 = 0x108,
     DCFG = 0x800, DCTL = 0x804, DSTS = 0x808, DAINTMSK = 0x81C,
 };
 
@@ -420,7 +420,33 @@ static void pcm_in(uint32_t n)
     s.wt += frames;
 }
 
+/* All TX FIFOs (a few PHY clocks; bounded: a stuck core must not hang the player). */
+static void fifo_flush(void)
+{
+    OTG(GRSTCTL) = 0x10u << 6 | 0x20u;
+    for (uint32_t n = 0; n < 100000u && (OTG(GRSTCTL) & 0x20u); n++)
+        ;
+}
+
 /* ---- media keys (HID) ----------------------------------------------------------- */
+
+/* Off (bus reset, a new configuration): an armed report is disabled, not just
+ * forgotten (writing 0 does not clear EPENA), and its FIFO emptied. */
+static void hid_off(void)
+{
+    if (DIEPCTL(EP_HID) & EP_ENA) {
+        DIEPCTL(EP_HID) |= EP_SNAK;
+        DIEPCTL(EP_HID) |= EP_DIS;
+        for (uint32_t n = 0; n < 10000u && (DIEPCTL(EP_HID) & EP_ENA); n++)
+            ;
+        DIEPINT(EP_HID) = 0xFFu;
+        OTG(GRSTCTL) = EP_HID << 6 | 0x20u;
+        for (uint32_t n = 0; n < 100000u && (OTG(GRSTCTL) & 0x20u); n++)
+            ;
+    }
+    DIEPCTL(EP_HID) = 0;
+    s.hid_n = s.hid_busy = 0;
+}
 
 /* The next queued report onto the interrupt endpoint (the host polls it every 8 ms).
  * From the interrupt, or with it masked. */
@@ -472,8 +498,7 @@ static void bus_reset(void)
     OTG(DAINTMSK) = 0x10001u;
     s.configured = 0;
     s.in_busy = s.out_wait = 0;
-    s.hid_n = s.hid_busy = 0;
-    DIEPCTL(EP_HID) = 0;
+    hid_off();
     arm_ep0_out();
 }
 
@@ -663,8 +688,9 @@ static void handle_setup(void)
             stream_off();
         s.configured = val == 1u;
         s.st.configured = s.configured;
-        s.hid_n = s.hid_busy = 0;
-        DIEPCTL(EP_HID) = s.configured ? 1u | EP_INTR | EP_ACTIVE | EP_HID << 22 | EP_SNAK | EP_SD0PID : 0u;
+        hid_off();
+        if (s.configured)
+            DIEPCTL(EP_HID) = 1u | EP_INTR | EP_ACTIVE | EP_HID << 22 | EP_SNAK | EP_SD0PID;
         if (s.configured)
             OTG(DAINTMSK) |= 1u << EP_HID;
         ep0_status_in();
@@ -829,12 +855,12 @@ int usb_uac_run(int (*tick)(void), void (*status)(const usb_uac_status_t *))
         return USB_EXIT_IO;
     dac_apply_volume();
     usb_dwc2_init_hs();
-    if ((OTG(GHWCFG4) >> 25) & 1u) {         /* dedicated TX FIFOs: small ones for the feedback (4 B) */
-        OTG(DIEPTXF1) = 0x00100140u;         /* and the media keys (1 B), after EP0's */
-        OTG(DIEPTXF2) = 0x00100150u;
-        OTG(GRSTCTL) = 0x10u << 6 | 0x20u;   /* flush them all (a few PHY clocks; bounded) */
-        for (uint32_t n = 0; n < 100000u && (OTG(GRSTCTL) & 0x20u); n++)
-            ;
+    if ((OTG(GHWCFG3) >> 16) >= 0x160u) {    /* the FIFO RAM, in words, either FIFO mode: */
+        OTG(GRXFSIZ) = 0x120u;               /* RX 1152 B (a 192 kHz 32-bit packet is 200 B), */
+        OTG(GNPTXFSIZ) = 0x00200120u;        /* EP0 IN 128 B, the feedback (4 B) and the media */
+        OTG(DIEPTXF1) = 0x00100140u;         /* keys (1 B) 64 B each (DIEPTXFn: in shared-FIFO */
+        OTG(DIEPTXF2) = 0x00100150u;         /* mode the same registers are DPTXFSIZn) */
+        fifo_flush();
     }
     OTG(GINTMSK) |= GI_INCOMPISOIN | GI_INCOMPISOOUT;
     OTG(GAHBCFG) |= 1u;                      /* global interrupt */
