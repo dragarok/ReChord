@@ -693,6 +693,16 @@ void usb_dwc2_init_hs(void)
  * PHY and USB clocks down. The next usb_dwc2_init() re-runs core_init():
  * GRSTCTL core soft reset + GRXFSIZ/GNPTXFSIZ/DIEPTXF reallocation + EP0
  * re-arm is the "re-allocate everything" side of the mode switch. */
+void usb_dwc2_phy_on(void)
+{
+    hw_on();
+}
+
+void usb_dwc2_phy_off(void)
+{
+    hw_off();
+}
+
 void usb_dwc2_stop(void)
 {
     OTG(DCTL) |= 2u;                                 /* soft disconnect */

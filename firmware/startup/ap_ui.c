@@ -14,6 +14,7 @@
 #include "drivers/usb_msc.h"
 #include "drivers/usb_cdc.h"
 #include "drivers/usb_uac.h"
+#include "drivers/usb_probe.h"
 #include "drivers/dac_cs43131.h"
 #include "services/fs_target.h"
 #include "services/fw_update.h"
@@ -622,6 +623,70 @@ static void battery_info_run(void)
 
 static void usb_dac_session(void);
 
+/* USB-C probe: which of the player's own pins puts voltage on VBUS (usb_probe.h), and
+ * whether a USB-C earphone plugged in then connects. A row per step: the comparators'
+ * trip masks over their eight reference codes (v VBUS valid, b B-session, a A-session,
+ * e session end); "dev" = a device pulled D+ up while the player was host. */
+static void usb_probe_screen(int step, const char *name)
+{
+    char buf[40];
+
+    snprintf(buf, sizeof buf, "%d/%d %s", step + 1, USB_PROBE_STEPS, name);
+    line(2, buf);
+    display_flush_rows(0, DISPLAY_H - 1);
+}
+
+static void usb_probe_menu(void)
+{
+    static usb_probe_step_t st[USB_PROBE_STEPS];
+    char buf[64], up[40] = "", dev[40] = "";
+    input_event_t ev;
+    int n;
+
+    player_stop();
+    screen("USB-C probe");
+    line(1, "no cable; an earphone may be in");
+    display_flush_rows(0, DISPLAY_H - 1);
+    n = usb_probe_run(st, usb_probe_screen);
+    screen("USB-C probe");
+    if (n < 0) {
+        line(2, "unplug the cable first");
+        log_printf("probe: VBUS present, not run");
+    }
+    for (int i = 0; i < n; i++) {
+        const usb_probe_step_t *s = &st[i];
+
+        snprintf(buf, sizeof buf, "%-12.12s v%02x b%02x a%02x e%02x%s", s->name, s->vbus, s->bsess, s->asess,
+                 s->sessend, s->host < 0 ? "" : s->host ? " dev" : " -");
+        line(1 + i, buf);
+        log_printf("probe: %s: vbus %02x bsess %02x asess %02x sessend %02x, adc %d %d %d %d%s%s", s->name,
+                   s->vbus, s->bsess, s->asess, s->sessend, s->adc[0], s->adc[1], s->adc[2], s->adc[3],
+                   s->host < 0 ? "" : s->host ? ", device connected, lines " : ", no device, lines ",
+                   s->host < 0 ? "" : s->linestate == 1 ? "J" : s->linestate == 2 ? "K" : s->linestate ? "SE1" : "SE0");
+        if (i > 0 && i < n - 1 && (s->vbus != st[0].vbus || s->bsess != st[0].bsess || s->asess != st[0].asess ||
+                                   s->sessend != st[0].sessend))
+            snprintf(up + strlen(up), sizeof up - strlen(up), "%s%s", up[0] ? ", " : "", s->name);
+        if (s->host > 0)
+            snprintf(dev + strlen(dev), sizeof dev - strlen(dev), "%s%s", dev[0] ? ", " : "", s->name);
+    }
+    if (n > 0) {
+        snprintf(buf, sizeof buf, "VBUS up: %s", up[0] ? up : "none");
+        line(1 + n, buf);
+        snprintf(buf, sizeof buf, "device: %s", dev[0] ? dev : "none");
+        line(2 + n, buf);
+        log_printf("probe: VBUS raised by: %s; a device connected in: %s", up[0] ? up : "none", dev[0] ? dev : "none");
+    }
+    display_flush_rows(0, DISPLAY_H - 1);
+    log_flush("probe");
+    for (;;) {                               /* any key */
+        input_scan(keys_adc(), keys_power());
+        if (input_poll(&ev) > 0 && ev.adc_value != INPUT_ADC_REPEAT)
+            break;
+        cpu_wait_tick();
+    }
+    ui_invalidate_all();
+}
+
 static const menu_item_t k_root_items[] = {
     { "DAC test",    NULL,      dac_test_run },
     { "USB console", NULL,      usb_console_run },
@@ -636,7 +701,8 @@ static const menu_item_t k_root_items[] = {
     { "USB",         usb_text,  NULL },
     { "USB diag",    usbd_text, NULL },
     { "Battery",     power_battery_text, battery_info_run },
-    { "USB DAC",     NULL,      usb_dac_session },       /* (last: tests count rows to Files) */
+    { "USB DAC",     NULL,      usb_dac_session },       /* (last but one: tests count rows to Files) */
+    { "USB-C probe", NULL,      usb_probe_menu },
 };
 #define ROOT_CPU_ROW 6               /* index of "CPU" in k_root_items */
 #define ROOT_BAT_ROW 12

@@ -26,6 +26,11 @@ void usb_dwc2_init_hs(void);         /* the same, allowing high speed (the USB D
  * past the hub debounce) + FIFO flush + PHY/clock power-down. */
 void usb_dwc2_stop(void);
 
+/* Just the PHY and the USB clocks (and the pins the reference drives with them), for
+ * the core in host mode and the VBUS probe; usb_dwc2_phy_off() undoes it. */
+void usb_dwc2_phy_on(void);
+void usb_dwc2_phy_off(void);
+
 /* Last session: [7:0] last SCSI opcode, [15:8] last START STOP byte 4,
  * [19:16] GINTSTS bits 10..13 ever seen (early suspend, suspend, reset, enum). */
 extern uint32_t usb_msc_diag;
