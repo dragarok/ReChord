@@ -840,7 +840,8 @@ void ap_ui_loop(void)
         config_poll();
         /* the RAM ring keeps the oldest lines when full: write it out once half full
          * (at most once a minute), so a long session's log reaches ECHOLOG.TXT whole */
-        if (log_bytes() > 2048u && time_ms() - s_log_flushed >= 60000u) {
+        if ((log_bytes() > 2048u && time_ms() - s_log_flushed >= 60000u) ||
+            (log_bytes() > 3072u && time_ms() - s_log_flushed >= 5000u)) {   /* (a burst) */
             s_log_flushed = time_ms();
             log_flush(NULL);
         }

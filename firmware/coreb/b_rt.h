@@ -38,7 +38,10 @@ uint32_t b_in_pos(void);                         /* bytes of the track consumed 
 extern uint32_t b_in_need;
 
 /* Heap over the decoder arena, emptied when a track opens (8-byte aligned). */
+/* Out of heap: the decoder call is abandoned (b_abort), never handed NULL. */
 void *b_alloc(size_t n);
+/* Give up on the track from inside a decoder call: back in b_main, the track ends. */
+void b_abort(uint32_t code) __attribute__((noreturn));
 void *b_calloc(size_t n);
 void b_free(void *p);
 void *b_realloc(void *p, size_t n);

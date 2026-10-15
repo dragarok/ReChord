@@ -186,6 +186,40 @@ static void heap_reset(void)
     s_heap_used = 0;
 }
 
+/* ---- giving up on a track from inside a decoder ------------------------- */
+
+/* setjmp/longjmp of our own (no libc here): r4-r11, sp, lr. */
+typedef uint32_t b_jmp_buf[10];
+
+__attribute__((naked, returns_twice)) static int b_setjmp(b_jmp_buf b)
+{
+    (void)b;
+    __asm__ volatile ("mov ip, sp\n stmia r0!, {r4-r11, ip, lr}\n movs r0, #0\n bx lr");
+}
+
+__attribute__((naked, noreturn)) static void b_longjmp(b_jmp_buf b, int v)
+{
+    (void)b;
+    (void)v;
+    __asm__ volatile ("ldmia r0!, {r4-r11, ip, lr}\n mov sp, ip\n movs r0, r1\n bne 1f\n movs r0, #1\n"
+                      "1: bx lr");
+}
+
+static b_jmp_buf s_jmp;
+static volatile int s_jmp_armed;
+
+void b_abort(uint32_t code)
+{
+    AS->aborts++;
+    AS->abort_code = code;
+    if (s_jmp_armed) {
+        s_jmp_armed = 0;
+        b_longjmp(s_jmp, 1);
+    }
+    for (;;)                              /* outside a decoder call: A's supervisor reloads B */
+        __asm__ volatile ("wfi");
+}
+
 void *b_alloc(size_t n)
 {
     uint8_t *p = _b_heap, *end = _b_heap + ((uint32_t)(_b_stack_limit - _b_heap) & ~7u);
@@ -212,8 +246,7 @@ void *b_alloc(size_t n)
         }
         p += sz;
     }
-    AS->err = 0xA110Cu;                          /* out of heap: the decoder fails */
-    return NULL;
+    b_abort(0xA110Cu);                           /* out of heap: never hand a decoder NULL */
 }
 
 void b_free(void *q)
@@ -273,6 +306,29 @@ static const b_codec_t *codec_find(uint32_t codec)
 
 /* ---- tracks ------------------------------------------------------------- */
 
+/* The decoder's open/read, from which b_abort() returns here: -1 = gave up. */
+static int guarded_open(void)
+{
+    int r;
+
+    if (b_setjmp(s_jmp))
+        return -1;
+    s_jmp_armed = 1;
+    r = s_dec->open();
+    s_jmp_armed = 0;
+    return r;
+}
+
+static int guarded_read(int32_t *dst, uint32_t want, uint32_t *got)
+{
+    if (b_setjmp(s_jmp))
+        return -1;
+    s_jmp_armed = 1;
+    *got = s_dec->read(dst, want);
+    s_jmp_armed = 0;
+    return 0;
+}
+
 static int track_open(void)
 {
     b_trk = AS->q[AS->q_rd % AS_QUEUE];
@@ -284,7 +340,7 @@ static int track_open(void)
     heap_reset();
     s_dec = codec_find(b_trk.codec);
     b_in_need = 0x8000u;
-    if (!s_dec || b_trk.channels < 1 || b_trk.channels > 2 || s_dec->open() != 0) {
+    if (!s_dec || b_trk.channels < 1 || b_trk.channels > 2 || guarded_open() != 0) {
         AS->err = b_trk.codec;
         s_dec = NULL;
         return -1;
@@ -292,10 +348,42 @@ static int track_open(void)
     return 0;
 }
 
+static uint32_t s_discard_seq, s_discard_to;   /* dropping the rest of a track's input */
+
+/* The decoder is done with the track: skip whatever it left unread. If A has not
+ * written all of it yet, drop it as it comes (produce()) and ask A to stop reading. */
+static void discard_rest(void)
+{
+    if (AS->in_wr - AS->in_rd >= b_trk_end - AS->in_rd) {
+        AS->in_rd = b_trk_end;
+        return;
+    }
+    s_discard_seq = b_trk.seq;
+    s_discard_to = b_trk_end;
+    AS->abandon_seq = b_trk.seq;
+}
+
+/* 1 while the rest of an abandoned track is still being dropped. */
+static int discarding(void)
+{
+    uint32_t end, avail, need;
+
+    if (!s_discard_seq)
+        return 0;
+    end = AS->cut_seq == s_discard_seq ? AS->cut_end : s_discard_to;
+    avail = AS->in_wr - AS->in_rd;
+    need = end - AS->in_rd;
+    AS->in_rd += avail < need ? avail : need;
+    if (AS->in_rd != end)
+        return 1;
+    s_discard_seq = 0;
+    return 0;
+}
+
 static void track_close(void)
 {
     s_dec = NULL;
-    AS->in_rd = b_trk_end;               /* skip whatever the decoder left unread */
+    discard_rest();
     AS->done_seq = b_trk.seq;
     AS->q_rd++;
 }
@@ -369,8 +457,12 @@ static int produce(void)
     uint32_t want, got;
     int32_t *dst;
 
-    if (!AS->run || AS->pcm_wr - AS->pcm_played >= AS_PCM_BLOCKS)
-        return 0;                                    /* stopped, or ring full */
+    if (!AS->run)
+        return 0;
+    if (discarding())
+        return 0;                                    /* (until A has written, or cut, the rest) */
+    if (AS->pcm_wr - AS->pcm_played >= AS_PCM_BLOCKS)
+        return 0;                                    /* ring full */
     if (!s_dec) {
         if (AS->state == AS_B_ENDED || AS->state == AS_B_RATE)
             return 0;                                /* waiting for A */
@@ -396,7 +488,7 @@ static int produce(void)
                 return 0;                            /* header not there yet */
             if (track_open() != 0) {                 /* unplayable: skip it, keep the stream */
                 AS->q_rd++;
-                AS->in_rd = b_trk_end;
+                discard_rest();
                 AS->done_seq = b_trk.seq;
                 return 1;
             }
@@ -409,6 +501,7 @@ static int produce(void)
             return 0;
         }
     }
+    AS->in_need = b_in_need;
     if (!input_ready())
         return 0;
     if (s_resync) {                                  /* SysTick moved pcm_wr on since the last step */
@@ -421,7 +514,10 @@ static int produce(void)
     want = AS_BLOCK_FRAMES - s_fill;
     if (b_trk.frames && b_trk.frames - AS->cur_frames < want)
         want = b_trk.frames - AS->cur_frames;
-    got = s_dec->read(dst, want);
+    if (guarded_read(dst, want, &got) != 0) {       /* the decoder gave up: end the track */
+        track_close();
+        return 1;
+    }
     if (b_trk.channels == 1) {                       /* mono: L = R, expand in place */
         for (uint32_t i = got; i-- > 0; )
             dst[2 * i] = dst[2 * i + 1] = dst[i];
@@ -449,6 +545,7 @@ static void stop_all(void)
     AS->q_rd = AS->q_wr;
     AS->in_rd = AS->in_wr;
     s_fill = s_resync = 0;
+    s_discard_seq = 0;
     AS->state = AS_B_READY;
 }
 

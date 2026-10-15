@@ -62,6 +62,7 @@ static int s_b_up, s_dac_up, s_dma_on, s_playing, s_paused;
 static uint32_t s_underruns, s_underrun_log;   /* B's count when last seen; ms of the last log */
 static uint32_t s_rate, s_rate_changes;
 static audio_track_t s_tracks[AS_QUEUE];   /* titles/durations by seq, for the UI */
+static uint32_t s_sv_ticks, s_sv_ticks_at, s_sv_pcm, s_sv_pcm_at, s_sv_done, s_sv_fails, s_sv_aborts;
 
 static uint32_t be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
 static uint32_t le32(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
@@ -590,6 +591,22 @@ static int open_next(void)
             close_track();
             continue;
         }
+        if (!s_mp4) {                        /* every format: the data lies inside the file */
+            uint32_t size = (uint32_t)fs_file_size(s_file);
+
+            if (s_left && s_data_off >= size) {
+                log_printf("audio: %s: data at %u, past the end (%u B)", name, (unsigned)s_data_off,
+                           (unsigned)size);
+                close_track();
+                continue;
+            }
+            if (s_left > size - s_data_off) {    /* cut short: play what is there */
+                s_left = size - s_data_off;
+                t.bytes = s_hdr_len + s_left;
+                if (t.codec != AS_CODEC_WAVPACK && t.codec != AS_CODEC_VORBIS && t.codec != AS_CODEC_OPUS)
+                    t.frames = 0;            /* the count no longer holds: play what decodes */
+            }
+        }
         t.seq = ++s_seq;
         /* file byte p lands at ring offset in_wr + skip + hdr + (p - start): make that
          * congruent to p mod 4, so whole sectors can be read straight into the ring */
@@ -645,6 +662,17 @@ static void refill(void)
                 AS->in_closed = 1;           /* end of the playlist */
                 return;
             }
+            continue;
+        }
+        if (AS->abandon_seq == s_seq) {      /* B gave up on this track: stop reading it */
+            log_printf("audio: track %u abandoned by core B (damaged?), %u bytes not read",
+                       (unsigned)s_seq, (unsigned)(s_mp4 ? s_stream_left : s_left + s_skip_left));
+            close_track();
+            s_left = s_stream_left = s_skip_left = 0;
+            s_hdr_len = s_hdr_pos = 0;
+            AS->cut_end = AS->in_wr;
+            __asm__ volatile ("dmb" ::: "memory");
+            AS->cut_seq = s_seq;
             continue;
         }
         if (free < 512u)
@@ -713,7 +741,12 @@ static void refill(void)
                 k = 16384u;                 /* bound the time spent per tick */
             n = fs_read(s_file, ring + off, k);
             if (n <= 0) {                   /* read error: B was promised the bytes, */
-                log_printf("audio: read error %ld, %u bytes left of track %u", n, (unsigned)s_left, (unsigned)s_seq);
+                static uint32_t logged;     /* (once per track: a bad card would flood the log) */
+
+                if (logged != s_seq)
+                    log_printf("audio: read error %ld, %u bytes left of track %u", n, (unsigned)s_left,
+                               (unsigned)s_seq);
+                logged = s_seq;
                 memset(ring + off, 0, k);   /* so the rest of the track reads as zeros */
                 n = (long)k;
             }
@@ -892,7 +925,11 @@ int audio_play(int pos)
     AS->in_closed = 0;
     AS->pcm_wr = AS->pcm_played = AS->pcm_end = 0;
     AS->underruns = AS->err = 0;
+    AS->abandon_seq = AS->cut_seq = 0;
+    AS->fault_pc = AS->fault_lr = 0;
+    s_sv_aborts = AS->aborts;
     s_underruns = 0;
+    s_sv_ticks_at = s_sv_pcm_at = time_ms();
     AS->cur_seq = AS->done_seq = 0;
     dma_prepare();
     refill();
@@ -986,8 +1023,70 @@ static void check_underrun(void)
     s_underruns = n;
 }
 
+/* ---- the core-B supervisor ----------------------------------------------- */
+
+/* Core B faulted, locked up or stopped making progress on a track (a decoder gone
+ * wrong on damaged data): reload its image and go on with the track after the one
+ * it was decoding. Gives up after as many failures in a row as the queue is long. */
+static void b_recover(const char *why)
+{
+    uint32_t seq = AS->cur_seq;
+    const audio_track_t *t = &s_tracks[seq % AS_QUEUE];
+    int pos = seq && t->seq == seq ? (int)t->index + 1 : queue_pos() + 1;
+
+    log_printf("audio: core B %s on track %u '%s' (pc %08x lr %08x): reloading it", why, (unsigned)seq,
+               seq && t->seq == seq ? t->name : "?", (unsigned)AS->fault_pc, (unsigned)AS->fault_lr);
+    if (pos >= queue_count())
+        pos = queue_mode() == Q_REPEAT_ALL ? 0 : -1;
+    s_b_up = 0;                              /* audio_play() loads a fresh image */
+    if (pos < 0 || ++s_sv_fails > (uint32_t)queue_count() || audio_play(pos) != 0) {
+        log_printf("audio: stopped after core B failed");
+        halt();
+    }
+}
+
+static void supervise(void)
+{
+    uint32_t now = time_ms();
+
+    if (!s_b_up || s_paused)
+        return;
+    if (AS->aborts != s_sv_aborts) {         /* a decoder gave up on a track (it ended there) */
+        s_sv_aborts = AS->aborts;
+        log_printf("audio: decoder gave up on track %u (code %x)", (unsigned)AS->cur_seq,
+                   (unsigned)AS->abort_code);
+    }
+    if (AS->done_seq != s_sv_done) {         /* a track decoded to its end: B is fine */
+        s_sv_done = AS->done_seq;
+        s_sv_fails = 0;
+    }
+    if (AS->state == AS_B_FAULT) {
+        b_recover("faulted");
+        return;
+    }
+    if (AS->ticks != s_sv_ticks) {
+        s_sv_ticks = AS->ticks;
+        s_sv_ticks_at = now;
+    } else if (now - s_sv_ticks_at > 1000u) {
+        b_recover("stopped (no heartbeat)");
+        return;
+    }
+    /* progress = frames decoded (pcm_wr also moves on underruns, while B is stuck) */
+    if (AS->cur_frames + AS->cur_seq != s_sv_pcm || AS->state != AS_B_PLAYING ||
+        AS->pcm_wr - AS->pcm_played >= AS_PCM_BLOCKS ||
+        (AS->in_wr - AS->in_rd < AS->in_need && !AS->in_closed)) {   /* (waiting for input: a slow card) */
+        s_sv_pcm = AS->cur_frames + AS->cur_seq;   /* progressing, or waiting for good reason */
+        s_sv_pcm_at = now;
+    } else if (now - s_sv_pcm_at > 3000u) {
+        b_recover("made no progress for 3 s");
+    }
+}
+
 void audio_poll(void)
 {
+    if (!s_playing)
+        return;
+    supervise();
     if (!s_playing)
         return;
     check_underrun();

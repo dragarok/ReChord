@@ -41,7 +41,7 @@
 #define AS_LLI            (AS_PCM_RING - 0x100u)   /* 8 x 28 B, just below the ring (SRAM ends at 0x030A0000) */
 
 #define AS_MAGIC          0x4F445541u   /* "AUDO" */
-#define AS_VERSION        6u
+#define AS_VERSION        8u
 #define AS_QUEUE          4u
 
 enum { AS_CODEC_FLAC = 1, AS_CODEC_WAV = 2, AS_CODEC_MP3 = 3, AS_CODEC_AIFF = 4, AS_CODEC_AAC = 5, AS_CODEC_ALAC = 6,
@@ -55,7 +55,8 @@ enum { AS_CODEC_FLAC = 1, AS_CODEC_WAV = 2, AS_CODEC_MP3 = 3, AS_CODEC_AIFF = 4,
  * (that LLI has no successor), so the DMA stops by itself once it has played it.
  * ENDED = the stream is over; RATE = the next track needs another sample rate:
  * A re-clocks, then sends AS_CMD_RESTART. */
-enum { AS_B_BOOT = 0, AS_B_READY, AS_B_PLAYING, AS_B_ENDED, AS_B_ERROR, AS_B_RATE, AS_B_PARKED };
+enum { AS_B_BOOT = 0, AS_B_READY, AS_B_PLAYING, AS_B_ENDED, AS_B_ERROR, AS_B_RATE, AS_B_PARKED,
+       AS_B_FAULT /* B took a fault and stopped: A reloads it */ };
 
 /* A -> B commands (cmd field, B clears it to 0 when done) */
 /* PARK: B stops its SysTick, masks interrupts and idles in thread mode, so core A
@@ -96,6 +97,16 @@ typedef struct {
     volatile uint32_t cur_seq;       /* B: track now being decoded */
     volatile uint32_t cur_frames;    /* B: frames of cur_seq decoded so far */
     volatile uint32_t done_seq;      /* B: last track fully decoded */
+    /* A track B stopped decoding early (damaged data) while A still reads it: B asks
+     * A to stop reading (abandon_seq); A answers where its input now ends (cut_end,
+     * then cut_seq). B drops input only as far as A has written, never past it. */
+    volatile uint32_t abandon_seq;   /* B */
+    volatile uint32_t cut_end;       /* A: absolute input position, valid when cut_seq matches */
+    volatile uint32_t cut_seq;       /* A */
+    volatile uint32_t aborts;        /* B: tracks a decoder gave up on mid-call (out of memory, ...) */
+    volatile uint32_t abort_code;    /* B: why the last one */
+    volatile uint32_t fault_pc, fault_lr;   /* B: where its fault happened (state AS_B_FAULT) */
+    volatile uint32_t in_need;       /* B: input bytes its decoder wants before a step */
     volatile uint32_t err;           /* B: decoder error code */
     volatile uint32_t b_hz;          /* B: its clock; A writes the boot value */
     volatile uint32_t b_load_pm;     /* B: busy share last second, 0..1000 */

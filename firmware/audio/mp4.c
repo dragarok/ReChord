@@ -407,6 +407,32 @@ int mp4_info(mp4_read_at_t rd, void *u, uint32_t size, mp4_info_t *mi)
             i += k;
         }
     }
+    /* A cut (or damaged) file whose tables still name samples past its end: keep the
+     * samples that lie inside it, and play whatever they decode to (frames unknown).
+     * One read when the last chunk starts inside the file; a walk only otherwise. */
+    {
+        uint8_t b[8];
+        uint32_t last, w = mi->co64 ? 8u : 4u;
+
+        if (!mi->stco_n || rd_at(&io, mi->stco_off + (mi->stco_n - 1u) * w, b, w))
+            return -3;
+        last = mi->co64 ? (be32(b) ? 0xFFFFFFFFu : be32(b + 4)) : be32(b);
+        if (last >= size || mi->data_bytes > size) {
+            mp4_cur_t c;
+            uint32_t n = 0, bytes = 0, o, sz;
+
+            mp4_cursor(&c);
+            while (mp4_next(rd, u, mi, &c, &o, &sz) == 1 && o <= size && sz <= size - o) {
+                n++;
+                bytes += sz;
+            }
+            if (!n)
+                return -3;
+            mi->nsamples = n;
+            mi->data_bytes = bytes;
+            mi->frames = 0;
+        }
+    }
     return 0;
 }
 
