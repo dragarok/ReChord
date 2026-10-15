@@ -819,10 +819,14 @@ static int b_load(const char *image)
 
 /* ---- DMA + I2S ------------------------------------------------------------ */
 
+static uint32_t s_blk_words = LLI_CTL_H;  /* block size of the chain dma_start() runs */
+static void halt(void);
+
 static void dma_prepare(void)
 {
     volatile uint32_t *lli = (volatile uint32_t *)AS_LLI;
 
+    s_blk_words = LLI_CTL_H;
     for (uint32_t i = 0; i < AS_PCM_BLOCKS; i++) {
         volatile uint32_t *l = lli + i * 7u;
 
@@ -842,7 +846,7 @@ static void dma_start(void)
     DMA_CHR(0x08) = I2S_TXDR;
     DMA_CHR(0x10) = AS_LLI;                  /* first LLI is fetched at enable */
     DMA_CHR(0x18) = LLI_CTL_L;
-    DMA_CHR(0x1C) = LLI_CTL_H;
+    DMA_CHR(0x1C) = s_blk_words;
     DMA_CHR(0x40) = 0x840u;
     DMA_CHR(0x44) = 0x1007u;                 /* dest handshake 2 = I2S1 TX */
     DMA_CHEN = (1u << (DMA_CH + 8u)) | (1u << DMA_CH);
@@ -887,6 +891,98 @@ int audio_set_volume_db(int db)
 int audio_get_volume_db(void)
 {
     return s_vol_db;
+}
+
+/* ---- external PCM source (the USB DAC) -------------------------------------
+ * The DMA plays a short ring that someone else fills (I2S words, L then R):
+ * AUDIO_EXT_BLOCKS blocks of AUDIO_EXT_FRAMES frames at AS_PCM_RING. The player
+ * stops and core B is held in reset: nothing decodes. */
+
+static int s_ext;
+
+static void ext_prepare(void)
+{
+    volatile uint32_t *lli = (volatile uint32_t *)AS_LLI;
+
+    s_blk_words = AUDIO_EXT_FRAMES * 2u;
+    for (uint32_t i = 0; i < AUDIO_EXT_BLOCKS; i++) {
+        volatile uint32_t *l = lli + i * 7u;
+
+        l[0] = AS_PCM_RING + i * AUDIO_EXT_FRAMES * 8u;
+        l[1] = I2S_TXDR;
+        l[2] = AS_LLI + ((i + 1u) % AUDIO_EXT_BLOCKS) * 28u;
+        l[3] = LLI_CTL_L;
+        l[4] = s_blk_words;
+        l[5] = l[6] = 0;
+    }
+    memset((void *)AS_PCM_RING, 0, AUDIO_EXT_BLOCKS * AUDIO_EXT_FRAMES * 8u);
+}
+
+int32_t *audio_ext_ring(void)
+{
+    return (int32_t *)AS_PCM_RING;
+}
+
+int audio_ext_start(uint32_t rate)
+{
+    if (s_playing || s_b_up)
+        halt();
+    if (s_b_up) {                            /* core B: parked, then held in reset */
+        uint32_t t0 = time_ms();
+
+        AS->cmd = AS_CMD_PARK;
+        while (AS->state != AS_B_PARKED && time_ms() - t0 < 100u)
+            cpu_wait_tick();
+        REG(CRU_SOFTRST3) = (CAL_CORE_RST << 16) | CAL_CORE_RST;
+        s_b_up = 0;
+        s_b_image = NULL;
+    }
+    if (!s_dac_up) {
+        if (dac_init(rate) != 0)
+            return -4;
+        s_dac_up = 1;
+    } else if (dac_set_rate(rate) != 0) {
+        return -4;
+    }
+    dac_volume();
+    s_rate = rate;
+    ext_prepare();
+    dma_start();
+    s_ext = 1;
+    log_printf("audio: external source at %u Hz", (unsigned)rate);
+    return 0;
+}
+
+int audio_ext_rate(uint32_t rate)
+{
+    if (!s_ext)
+        return -1;
+    if (rate == s_rate)
+        return 0;
+    dma_stop();
+    if (dac_set_rate(rate) != 0)
+        return -4;
+    log_printf("audio: external source %u -> %u Hz", (unsigned)s_rate, (unsigned)rate);
+    s_rate = rate;
+    ext_prepare();
+    dma_start();
+    return 0;
+}
+
+uint32_t audio_ext_pos(void)
+{
+    uint32_t off = DMA_CHR(0x00) - AS_PCM_RING;
+
+    return off / 8u % (AUDIO_EXT_BLOCKS * AUDIO_EXT_FRAMES);
+}
+
+void audio_ext_stop(void)
+{
+    if (!s_ext)
+        return;
+    dma_stop();
+    s_ext = 0;
+    log_printf("audio: external source off");
 }
 
 /* ---- API ---------------------------------------------------------------- */

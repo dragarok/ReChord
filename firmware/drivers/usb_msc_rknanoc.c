@@ -56,6 +56,7 @@ static struct {
 } s;
 
 uint32_t usb_msc_diag;
+static int s_want_hs;                /* core_init(): allow high speed (DCFG speed 0) */
 
 static const uint8_t k_dev[18] = {
     0x12, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x40,
@@ -627,10 +628,9 @@ static void core_init(void)
     rk_delay_us(10000);
     OTG(PCGCCTL) = 0;
     OTG(GAHBCFG) |= 0x80u;
-    /* ponytail: forced full speed (64-byte bulk, ~1 MB/s): the AHB clock
-     * is the uncalibrated boot clock, below what high speed needs. Drop
-     * the |1 once the PLL is set up (the reference runs high speed). */
-    OTG(DCFG) = (OTG(DCFG) & ~0x7F3u) | 1u;
+    /* Mass storage and the console stay at full speed (64-byte bulk, what
+     * the hardware runs today); the USB DAC asks for high speed (usb_dwc2_init_hs). */
+    OTG(DCFG) = (OTG(DCFG) & ~0x7F3u) | (s_want_hs ? 0u : 1u);
 
     s.dedicated = (int)((OTG(GHWCFG4) >> 25) & 1u);
     depth = OTG(GHWCFG3) >> 16;
@@ -675,6 +675,14 @@ static void core_init(void)
  * console driver so both devices use the exact init that enumerates. */
 void usb_dwc2_init(void)
 {
+    s_want_hs = 0;
+    hw_on();
+    core_init();
+}
+
+void usb_dwc2_init_hs(void)
+{
+    s_want_hs = 1;
     hw_on();
     core_init();
 }

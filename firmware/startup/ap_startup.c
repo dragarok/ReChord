@@ -106,6 +106,7 @@ const uint32_t ap_ram_vectors[2]
 #define WEAK_HANDLER(name) void name(void) __attribute__((weak, alias("Default_Handler")))
 WEAK_HANDLER(HardFault_Handler);
 WEAK_HANDLER(SysTick_Handler);
+WEAK_HANDLER(USBC_IRQHandler);         /* 5 */
 WEAK_HANDLER(DMA_IRQHandler);          /* 6 */
 WEAK_HANDLER(MAILBOX0_IRQHandler);     /* 9..12 */
 WEAK_HANDLER(MAILBOX1_IRQHandler);
@@ -136,7 +137,8 @@ const uint32_t ap_vectors[16 + AP_IRQS]
     D,                                      /* PendSV                        */
     (uint32_t)&SysTick_Handler,             /* 0x3C SysTick                  */
     /* IRQ 0..40 */
-    D, D, D, D, D, D,                       /* SFC SYNTH EBC EMMC SDMMC USBC */
+    D, D, D, D, D,                          /* SFC SYNTH EBC EMMC SDMMC      */
+    (uint32_t)&USBC_IRQHandler,             /* 5  USB OTG                    */
     (uint32_t)&DMA_IRQHandler,              /* 6  DMA                        */
     D, D,                                   /* IMDCT WDT                     */
     (uint32_t)&MAILBOX0_IRQHandler,         /* 9                             */

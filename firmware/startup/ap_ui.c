@@ -13,6 +13,7 @@
 #include "drivers/panel_io.h"
 #include "drivers/usb_msc.h"
 #include "drivers/usb_cdc.h"
+#include "drivers/usb_uac.h"
 #include "drivers/dac_cs43131.h"
 #include "services/fs_target.h"
 #include "services/fw_update.h"
@@ -619,6 +620,8 @@ static void battery_info_run(void)
     ui_invalidate_all();
 }
 
+static void usb_dac_session(void);
+
 static const menu_item_t k_root_items[] = {
     { "DAC test",    NULL,      dac_test_run },
     { "USB console", NULL,      usb_console_run },
@@ -633,6 +636,7 @@ static const menu_item_t k_root_items[] = {
     { "USB",         usb_text,  NULL },
     { "USB diag",    usbd_text, NULL },
     { "Battery",     power_battery_text, battery_info_run },
+    { "USB DAC",     NULL,      usb_dac_session },       /* (last: tests count rows to Files) */
 };
 #define ROOT_CPU_ROW 6               /* index of "CPU" in k_root_items */
 #define ROOT_BAT_ROW 12
@@ -698,24 +702,118 @@ static int shortcut_key(const input_event_t *ev)
     return 1;
 }
 
+/* The USB DAC's screen, refreshed by usb_uac_run() about once a second (not
+ * while the screen is off). */
+static void uac_status(const usb_uac_status_t *st)
+{
+    char b[40];
+
+    if (!power_screen_on())
+        return;
+    screen("USB DAC");
+    if (!st->configured) {
+        line(1, "waiting for the host");
+    } else if (!st->bits) {
+        snprintf(b, sizeof b, "%s speed, idle", st->high_speed ? "high" : "full");
+        line(1, b);
+    } else {
+        snprintf(b, sizeof b, "%u Hz  %u-bit", (unsigned)st->rate, (unsigned)st->bits);
+        line(1, b);
+    }
+    if (st->mute)
+        line(2, "muted");
+    else {
+        snprintf(b, sizeof b, "volume %d.%d dB", (int)(st->volume_256db / 256),
+                 (int)((st->volume_256db < 0 ? -st->volume_256db : st->volume_256db) % 256 * 10 / 256));
+        line(2, b);
+    }
+    snprintf(b, sizeof b, "buffer %u  late %u  lost %u", (unsigned)st->fill, (unsigned)st->underruns,
+             (unsigned)(st->dropped + st->missed));
+    line(3, b);
+    line(5, "BACK: leave  power: screen");
+    display_flush_rows(0, DISPLAY_H - 1);
+}
+
+/* Every tick of the DAC session: keys (power toggles the screen, BACK leaves),
+ * the screen-off timer, the battery. Nonzero = leave. */
+static int uac_tick(void)
+{
+    input_event_t ev;
+    int leave = 0;
+
+    input_scan(keys_adc(), keys_power());
+    while (input_poll(&ev) > 0) {
+        int was_on = power_screen_on();
+
+        power_activity();
+        if (ev.type == KEY_POWER && ev.adc_value != INPUT_ADC_LONG) {
+            power_screen(!was_on);
+        } else if (ev.type == KEY_BACK && ev.adc_value != INPUT_ADC_LONG && was_on) {
+            leave = 1;
+        } else if (!was_on) {
+            power_screen(1);             /* any other key just lights it */
+        }
+    }
+    if (power_poll(1, 1) == POWER_OFF_BATTERY)   /* (no auto power off: the cable is in) */
+        leave = 1;
+    return leave;
+}
+
+static void usb_dac_session(void)
+{
+    int r;
+
+    player_stop();
+    save_state("usb dac");
+    power_screen(1);
+    while (keys_power())                 /* the press that got us here (or switched us on) */
+        cpu_wait_tick();
+    input_mock_clear();
+    r = usb_uac_run(uac_tick, uac_status);
+    log_printf("ui: USB DAC ended (%d)", r);
+    while (keys_power())                 /* don't leak the exit press */
+        cpu_wait_tick();
+    power_activity();
+    ui_invalidate_all();
+}
+
 /* RECHO's "On USB connect" (cfg usb): ask, disk, DAC, charge only. The USB DAC
  * is not there yet: it charges. The CDC console stays in the main menu. */
 static void cable_connected(void)
 {
-    int disk = g_cfg.usb == CFG_USB_DISK;
+    int disk = g_cfg.usb == CFG_USB_DISK, dac = g_cfg.usb == CFG_USB_DAC;
 
     log_printf("usb: cable in (%s)", g_cfg.usb == CFG_USB_ASK ? "ask" : g_cfg.usb == CFG_USB_DISK ? "disk" :
-               g_cfg.usb == CFG_USB_DAC ? "dac: not available, charging" : "charge");
+               g_cfg.usb == CFG_USB_DAC ? "dac" : "charge");
     if (g_cfg.usb == CFG_USB_ASK) {
+        input_event_t ev;
+
         power_screen(1);
         screen("Cable connected");
         line(2, "PLAY: USB disk");
-        line(3, "BACK: charge only");
+        line(3, "MENU: USB DAC");
+        line(4, "BACK: charge only");
         display_flush_rows(0, DISPLAY_H - 1);
-        disk = ask(0);
+        while (keys_power())
+            cpu_wait_tick();
+        input_mock_clear();
+        for (;;) {                       /* PLAY, MENU or BACK/power */
+            input_scan(keys_adc(), keys_power());
+            if (input_poll(&ev) > 0 && ev.adc_value != INPUT_ADC_REPEAT) {
+                disk = ev.type == KEY_SELECT;
+                dac = ev.type == KEY_MENU;
+                if (disk || dac || ev.type == KEY_BACK || ev.type == KEY_POWER)
+                    break;
+            }
+            if (!usb_cable())
+                break;
+            cpu_wait_tick();
+        }
         ui_invalidate_all();
     }
-    if (disk) {
+    if (dac && usb_cable()) {
+        usb_dac_session();
+    } else if (disk) {
         power_screen(1);
         usb_session();
     }

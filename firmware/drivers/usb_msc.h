@@ -20,6 +20,7 @@ int usb_cable(void);         /* 1 = VBUS present */
 
 /* Shared DWC2 bring-up (PHY + core + FIFOs + EP0) used by MSC and CDC. */
 void usb_dwc2_init(void);
+void usb_dwc2_init_hs(void);         /* the same, allowing high speed (the USB DAC) */
 
 /* Shared teardown between USB modes: soft-disconnect (host-visible, held
  * past the hub debounce) + FIFO flush + PHY/clock power-down. */

@@ -73,6 +73,7 @@ AP_DRIVER_SRCS := \
   firmware/drivers/emmc_rknanoc.c \
   firmware/drivers/usb_msc_rknanoc.c \
   firmware/drivers/usb_cdc_rknanoc.c \
+  firmware/drivers/usb_uac_rknanoc.c \
   firmware/drivers/dac_cs43131.c \
   firmware/drivers/board_rknanoc.c \
   firmware/drivers/clock_rknanoc.c

@@ -34,6 +34,17 @@ int audio_status(audio_status_t *st);
 /* DAC volume in dB, clamped to -60..0 (default -40); returns the value set. */
 int audio_set_volume_db(int db);
 int audio_get_volume_db(void);
+
+/* External PCM source (the USB DAC): the player stops, core B is held in reset,
+ * the DMA plays a ring of AUDIO_EXT_BLOCKS x AUDIO_EXT_FRAMES I2S frames (two
+ * int32 words each, L then R) that the caller fills. */
+#define AUDIO_EXT_BLOCKS 8u
+#define AUDIO_EXT_FRAMES 256u
+int audio_ext_start(uint32_t rate);     /* 0, or < 0 (DAC) */
+int audio_ext_rate(uint32_t rate);      /* re-clock: the ring restarts silent */
+int32_t *audio_ext_ring(void);
+uint32_t audio_ext_pos(void);           /* the frame the DMA reads now (block granular) */
+void audio_ext_stop(void);
 /* +1: next track; -1: previous (or the start of this one if more than 3 s in).
  * Returns audio_play()'s result. */
 int audio_skip(int dir);

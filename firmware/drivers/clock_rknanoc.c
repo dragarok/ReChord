@@ -100,12 +100,26 @@ uint64_t time_us(void)
     return r;
 }
 
-/* From time_us(), so it shares its never-backwards correction: a millisecond
- * clock of its own read the reload race a tick in the past, and timers comparing
- * "now - then" saw ~49 days elapsed (screen off and auto power off at boot). */
+/* Its own arithmetic (32-bit: the M3 divides those in hardware; time_us()'s
+ * 64-bit / 1000 is a library call, and the UI loop asks the time many times per
+ * pass), with the same never-backwards rule: the reload race reads a tick in the
+ * past, and timers comparing "now - then" then saw ~49 days elapsed. */
+static uint32_t s_base_ms, s_last_ms;
+
 uint32_t time_ms(void)
 {
-    return (uint32_t)(time_us() / 1000u);
+    uint32_t el, t, r;
+
+    if (!s_reload)
+        return 0;
+    t = now_parts(&el);
+    r = s_base_ms + t * (TICK_US / 1000u) + (uint32_t)(((uint64_t)el * s_us_frac) >> 32) / 1000u;
+    if ((int32_t)(r - s_last_ms) < -(int32_t)(TICK_US / 2000u))
+        r += TICK_US / 1000u;                /* the race: count the tick */
+    if ((int32_t)(r - s_last_ms) < 0)
+        r = s_last_ms;                        /* never backwards */
+    s_last_ms = r;
+    return r;
 }
 
 /* Counts SysTick cycles directly, so it also works with interrupts off
@@ -157,6 +171,14 @@ void cpu_wait_tick(void)
         cpu_idle();
 }
 
+void cpu_wait_tick_or(volatile const int *flag)
+{
+    uint32_t t = s_ticks;
+
+    while (s_ticks == t && !*flag)
+        cpu_idle();
+}
+
 unsigned cpu_load_permille(void)
 {
     return s_load_pm;
@@ -193,6 +215,7 @@ static void apply_dividers(unsigned a_div, unsigned b_div)
 static void retime(void)
 {
     s_base_us = time_us();
+    s_base_ms = time_ms();
     systick_start();
 }
 
@@ -233,6 +256,7 @@ void clock_set_core_a_div(unsigned div)
         return;
     __asm__ volatile ("cpsid i" ::: "memory");
     s_base_us = time_us();
+    s_base_ms = time_ms();
     apply_dividers(div, s_pll_hz / s_b_hz);
     systick_start();
     __asm__ volatile ("cpsie i" ::: "memory");

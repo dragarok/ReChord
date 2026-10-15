@@ -49,6 +49,8 @@ void delay_ms(uint32_t ms);
 void cpu_idle(void);
 /* Sleep until the next SysTick (other IRQs are serviced meanwhile). */
 void cpu_wait_tick(void);
+/* The same, or until *flag is set (by an interrupt handler). */
+void cpu_wait_tick_or(volatile const int *flag);
 /* Core A busy share over the last full second, 0..1000. */
 unsigned cpu_load_permille(void);
 
