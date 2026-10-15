@@ -1,0 +1,7 @@
+libopus 1.5.2 (BSD-3-Clause): celt/, silk/, silk/fixed/, decoder parts of src/,
+include/ — unmodified; built fixed point, decoder only (Makefile COREB_OPUS_DEFS).
+opusfile 0.12 (BSD-3-Clause): opusfile.c, info.c, internal.c. Local change: in a
+non-seekable stream the decode buffer is sized for the stream's channel count
+instead of 8 (92 KiB less RAM); a later chained link with more channels is
+rejected (od_nchannels_max).
+libopus: celt/arch.h OPUS_FAST_INT64 may be preset (tests/opusref builds with 0, as core B).

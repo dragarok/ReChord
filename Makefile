@@ -62,14 +62,18 @@ COREB_ALAC := $(patsubst %,alac/%,ag_dec dp_dec ALACBitUtilities alac_dec)
 COREB_FAAD := $(patsubst firmware/coreb/%.c,%,$(wildcard firmware/coreb/faad/*.c))
 COREB_TREMOR := $(patsubst %,tremor/%,block codebook floor0 floor1 info mapping0 mdct registry res012 sharedbook synthesis vorbisfile window)
 COREB_OGG := ogg/framing ogg/bitwise
-COREB_FAMILIES := main aac ogg
+COREB_OPUS := $(patsubst firmware/coreb/%.c,%,$(wildcard firmware/coreb/opus/celt/*.c firmware/coreb/opus/silk/*.c \
+                 firmware/coreb/opus/silk/fixed/*.c firmware/coreb/opus/src/*.c firmware/coreb/opus/opusfile/*.c))
+COREB_FAMILIES := main aac ogg opus
 COREB_FAM_main := b_codecs_main b_flac b_pcm b_mp3 b_alac $(COREB_MAD) $(COREB_ALAC)
 COREB_FAM_aac  := b_codecs_aac b_aac $(COREB_FAAD)
 COREB_FAM_ogg  := b_codecs_ogg b_vorbis $(COREB_TREMOR) $(COREB_OGG)
+COREB_FAM_opus := b_codecs_opus b_opus $(COREB_OPUS) $(COREB_OGG)
 # stack reserve per image (bytes): FAAD2 nests up to ~93 KiB of locals (HE-AAC v2)
 COREB_STACK_main := 0x5000
 COREB_STACK_aac  := 0x18000
 COREB_STACK_ogg  := 0x4000
+COREB_STACK_opus := 0x8000
 COREB_CFLAGS := $(AP_ARCH_FLAGS) -O2 -Wall -Wno-unused-function -ffreestanding \
                 -fno-tree-loop-distribute-patterns -ffunction-sections -fdata-sections -MMD -MP \
                 -Ifirmware -Ifirmware/coreb -Ifirmware/coreb/libmad -DOPT_ACCURACY -DNDEBUG
@@ -79,6 +83,11 @@ $(COREB_DIR)/faad/%.o: COREB_CFLAGS += $(COREB_FAAD_DEFS) -Os
 $(COREB_DIR)/faad/common.o: COREB_CFLAGS += -Dfaad_malloc=faad_malloc_unused -Dfaad_free=faad_free_unused
 $(COREB_DIR)/b_aac.o: COREB_CFLAGS += $(COREB_FAAD_DEFS)
 $(COREB_DIR)/alac/%.o: COREB_CFLAGS += -Ifirmware/coreb/alac -w
+COREB_OPUS_DEFS := -DOPUS_BUILD -DFIXED_POINT -DDISABLE_FLOAT_API -DVAR_ARRAYS -DOP_FIXED_POINT \
+                   -DOP_DISABLE_FLOAT_API -DOP_DISABLE_HTTP -Ifirmware/coreb/opus/include -Ifirmware/coreb/opus/celt \
+                   -Ifirmware/coreb/opus/silk -Ifirmware/coreb/opus/silk/fixed -Ifirmware/coreb/opus/src \
+                   -Ifirmware/coreb/opus/opusfile -Ifirmware/coreb/ogg -w
+$(COREB_DIR)/opus/%.o $(COREB_DIR)/b_opus.o: COREB_CFLAGS += $(COREB_OPUS_DEFS)
 $(COREB_DIR)/tremor/%.o $(COREB_DIR)/ogg/%.o $(COREB_DIR)/b_vorbis.o: COREB_CFLAGS += -Ifirmware/coreb/tremor -Ifirmware/coreb/ogg -w -Dalloca=__builtin_alloca
 $(COREB_DIR)/b_alac.o: COREB_CFLAGS += -Ifirmware/coreb/alac
 $(COREB_DIR)/%.o: firmware/coreb/%.c Makefile

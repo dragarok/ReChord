@@ -276,7 +276,7 @@ static int open_ogg(fs_file_t *f, as_track_t *t)
             t->rate = le32(p + 12);
         } else if (!memcmp(p, "OpusHead", 8)) {
             t->codec = AS_CODEC_OPUS;
-            t->channels = p[9];
+            t->channels = p[9] ? 2u : 0u;          /* opusfile mixes any layout to stereo */
             t->rate = 48000;
             t->trim = le16(p + 10);                  /* pre-skip (opusfile applies it) */
         } else {
