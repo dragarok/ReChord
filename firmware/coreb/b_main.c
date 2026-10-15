@@ -329,6 +329,18 @@ static void end_chain(void)
         s_resync = 0;
         s_fill = 0;
     }
+    if (!s_fill && AS->pcm_wr - AS->pcm_played >= 4u) {
+        /* nothing in this block (a stream of unknown length ended on a block boundary):
+         * end at the previous one instead. The DMA is at least three blocks short of it
+         * (pcm_played lags the DMA by up to two at 192 kHz), so it has not fetched that
+         * LLI yet. */
+        l = (volatile uint32_t *)AS_LLI + ((AS->pcm_wr - 1u) % AS_PCM_BLOCKS) * LLI_WORDS;
+        l[2] = 0;
+        l[3] &= ~(3u << 27);
+        AS->pcm_end = AS->pcm_wr;
+        __asm__ volatile ("cpsie i" ::: "memory");
+        return;
+    }
     l = (volatile uint32_t *)AS_LLI + (AS->pcm_wr % AS_PCM_BLOCKS) * LLI_WORDS;
     if (!s_fill) {
         cur_block()[0] = cur_block()[1] = 0;
