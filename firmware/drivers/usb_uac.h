@@ -27,6 +27,10 @@ typedef struct {
  * screen. Returns USB_EXIT_* (usb_msc.h). */
 int usb_uac_run(int (*tick)(void), void (*status)(const usb_uac_status_t *));
 
+/* Before usb_uac_run(): 1 = the player runs on its own battery (draws nothing from
+ * VBUS): the configuration says self-powered, 2 mA; 0 = bus powered, 100 mA. */
+void usb_uac_self_powered(int on);
+
 /* A media key for the host (HID consumer control: press, then release), from
  * tick(). Ignored until the host has configured the device. */
 enum { USB_UAC_PLAY_PAUSE, USB_UAC_NEXT, USB_UAC_PREV };

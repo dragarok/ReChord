@@ -34,6 +34,17 @@ const char *board_name(void);
  * idle; -1 on the 8 GB board. */
 int board_adc_ch2(void);
 
+/* What the player draws from USB power (512 MB board, non-0x66666666 board only;
+ * stock MINIV390's "UAC charging" setting, USB handler seg09 0x0307CFAE):
+ *   NORMAL:  GPIO0.14 = 1 (charge enable), GPIO2.1 = !strap (the boot state);
+ *   BATTERY: GPIO0.14 = 0, GPIO2.1 = 0: no charging and no supply path from VBUS --
+ *            the player runs on its battery (stock's default "Turn off charging
+ *            power supply" for its USB DAC).
+ * 0, or -1 where the board cannot (the 0x66666666 board, GPIO2.9 strap low: stock
+ * keeps both pins high there; the 8 GB board). */
+enum { BOARD_SUPPLY_NORMAL = 0, BOARD_SUPPLY_BATTERY = 1 };
+int board_usb_supply(int mode);
+
 /* With USB power in: 1 = the battery is charged, 0 = charging (GPIO2.3). */
 int board_charge_done(void);
 

@@ -47,5 +47,8 @@ int keys_adc(void);
 int adc_value(unsigned ch);
 int keys_power(void);
 void board_power_off(void);   /* does not return */
+/* A GPIO0 pin that is not the panel's, set through the panel bus's shadow of the
+ * port (every panel byte rewrites the whole GPIO0 data register from it). */
+void panel_io_gpio0_pin(unsigned pin, int level);
 
 #endif /* RECHORD_PANEL_IO_H */

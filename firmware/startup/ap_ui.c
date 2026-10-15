@@ -784,7 +784,7 @@ static int uac_tick(void)
 
 static void usb_dac_session(void)
 {
-    int r;
+    int r, bat;
 
     player_stop();
     save_state("usb dac");
@@ -793,10 +793,22 @@ static void usb_dac_session(void)
         cpu_wait_tick();
     input_mock_clear();
     memset(&s_uac, 0, sizeof s_uac);
+    /* dac_charge=off: no charging, no supply from VBUS (stock's default): the phone or
+     * computer gives the player nothing but the audio. Before the USB core connects. */
+    bat = !g_cfg.dac_charge && board_usb_supply(BOARD_SUPPLY_BATTERY) == 0;
+    usb_uac_self_powered(bat);
+    power_usb_supply_off(bat);
+    log_printf("power: DAC supply %s", bat ? "battery (not charging, nothing drawn from USB)" :
+               g_cfg.dac_charge ? "USB (charging)" : "USB (charging: this board cannot switch it off)");
     (void)power_poll(1, POWER_SESSION_DAC);  /* its clock before the USB core runs on it */
     uac_draw(1);
     r = usb_uac_run(uac_tick, uac_status);
     log_printf("ui: USB DAC ended (%d)", r);
+    if (bat) {
+        board_usb_supply(BOARD_SUPPLY_NORMAL);   /* charging again */
+        power_usb_supply_off(0);
+        log_printf("power: USB supply normal");
+    }
     while (keys_power())                 /* don't leak the exit press */
         cpu_wait_tick();
     power_activity();

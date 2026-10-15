@@ -114,6 +114,7 @@ static struct {
     int suspended;
 } s;
 
+static int s_self_powered;            /* (usb_uac_self_powered(): kept across usb_uac_run's reset) */
 static uint8_t s_buf[256];            /* EP0 replies built at run time */
 static uint8_t s_cfg[320];
 static uint32_t s_cfg_len, s_cfg_hid;   /* (the HID descriptor's offset in it) */
@@ -148,7 +149,9 @@ static uint32_t build_cfg(int high, uint8_t type)
     uint8_t *p = s_cfg, *ac;
     uint32_t n;
 
-    p[0] = 9; p[1] = type; p[4] = 3; p[5] = 1; p[6] = 0; p[7] = 0x80; p[8] = 50;   /* 100 mA */
+    p[0] = 9; p[1] = type; p[4] = 3; p[5] = 1; p[6] = 0;
+    p[7] = s_self_powered ? 0xC0 : 0x80;                      /* self powered: */
+    p[8] = s_self_powered ? 1 : 50;                           /* 2 mA; else 100 mA */
     p += 9;
     memcpy(p, (const uint8_t[]){ 8, 0x0B, IF_AC, 2, 1, 0, 0x20, 0 }, 8);      /* IAD */
     p += 8;
@@ -470,6 +473,11 @@ static void hid_queue(uint8_t report)
     }
 }
 
+void usb_uac_self_powered(int on)
+{
+    s_self_powered = on;
+}
+
 void usb_uac_key(int key)
 {
     static const uint8_t bit[3] = { 1u << 0, 1u << 1, 1u << 2 };
@@ -628,7 +636,8 @@ static void handle_setup(void)
     }
     switch (req) {
     case 0:                                          /* GET_STATUS */
-        s_buf[0] = s_buf[1] = 0;
+        s_buf[0] = (type & 0x1Fu) == 0u && s_self_powered ? 1 : 0;   /* (device: self powered) */
+        s_buf[1] = 0;
         ep0_send(s_buf, 2, wlen);
         return;
     case 1:                                          /* CLEAR_FEATURE */

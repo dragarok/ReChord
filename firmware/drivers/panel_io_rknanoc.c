@@ -82,6 +82,18 @@ typedef struct {
  */
 static uint32_t bus_ctl;
 
+void panel_io_gpio0_pin(unsigned pin, int level)
+{
+    if (level)
+        bus_ctl |= 1u << pin;
+    else
+        bus_ctl &= ~(1u << pin);
+    if (level)
+        GPIO0->dr |= 1u << pin;
+    else
+        GPIO0->dr &= ~(1u << pin);
+}
+
 static void bus_write(uint8_t byte, uint32_t dc_bit)
 {
     uint32_t word = bus_ctl | ((uint32_t)byte << PIN_DATA_SHIFT) | dc_bit;

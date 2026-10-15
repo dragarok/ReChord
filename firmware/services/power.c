@@ -182,17 +182,24 @@ void power_brightness_changed(void)
         backlight_set(k_duty[(g_cfg.brightness - 1u) % 8u]);
 }
 
+static int s_supply_off;             /* the USB DAC on the battery: VBUS is in but feeds nothing */
+
+void power_usb_supply_off(int off)
+{
+    s_supply_off = off;
+}
+
 int power_poll(int playing, int usb_session)
 {
     uint32_t now = time_ms(), screen_s = config_screen_off_s(), off_min = config_auto_off_min();
-    int vbus = usb_cable(), low = 0;
+    int vbus = usb_cable() && !s_supply_off, low = 0;   /* (vbus: USB power feeds the player) */
 
     if (playing)
         s_idle_ms = now;
     if (vbus != s_bat.vbus) {                /* cable in or out: read now */
         s_bat.vbus = (uint8_t)vbus;
         s_sample_ms = now - SAMPLE_MS;
-        log_printf("bat: cable %s", vbus ? "in" : "out");
+        log_printf("bat: cable %s", vbus ? "in" : usb_cable() ? "in, not drawn from (battery)" : "out");
     }
     /* at boot three quick readings (the ADC refreshes channel 0 every 120 ms), then every 10 s */
     if (now - s_sample_ms >= (s_samples < LOW_COUNT ? 150u : SAMPLE_MS)) {

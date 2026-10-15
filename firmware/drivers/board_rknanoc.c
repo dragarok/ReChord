@@ -14,6 +14,7 @@
 #include <stdint.h>
 
 #include "board.h"
+#include "panel_io.h"
 
 typedef struct {
     volatile uint32_t dr;
@@ -41,17 +42,31 @@ static void out(board_gpio_t *g, unsigned port, unsigned pin, int level)
     g->ddr |= 1u << pin;
 }
 
+static int s_strap = -1;              /* GPIO2.9 at boot: 0 = the 0x66666666 board */
+
 void board_early_init(void)
 {
 #if BOARD == BOARD_512M
-    int strap;
-
     out(GPIO0, 0, 14, 1);
     out(GPIO2, 2, 1, 1);
     iomux_gpio(2, 9);
     GPIO2->ddr &= ~(1u << 9);
-    strap = (GPIO2->ext_porta >> 9) & 1u;
-    out(GPIO2, 2, 1, !strap);
+    s_strap = (int)((GPIO2->ext_porta >> 9) & 1u);
+    out(GPIO2, 2, 1, !s_strap);
+#endif
+}
+
+int board_usb_supply(int mode)
+{
+#if BOARD == BOARD_512M
+    if (s_strap != 1)                    /* the 0x66666666 board: what the pins do there is unknown */
+        return -1;
+    panel_io_gpio0_pin(14, mode != BOARD_SUPPLY_BATTERY);   /* (GPIO0 goes through the panel's shadow) */
+    out(GPIO2, 2, 1, 0);                 /* !strap = 0 in both modes on this board */
+    return 0;
+#else
+    (void)mode;
+    return -1;
 #endif
 }
 

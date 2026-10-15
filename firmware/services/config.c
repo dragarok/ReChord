@@ -35,7 +35,8 @@ void config_defaults(void)
     g_cfg.strip = 0;
     g_cfg.tags = 1;
     g_cfg.cpu = 0;
-    g_cfg.dac_mhz = 50;                      /* the DAC needs ~7-12 % of it (QEMU profile) */
+    g_cfg.dac_mhz = 50;
+    g_cfg.dac_charge = 0;                    /* a phone's battery is not the player's charger */                      /* the DAC needs ~7-12 % of it (QEMU profile) */
 }
 
 void config_reset(void)
@@ -86,6 +87,8 @@ static void set(const char *k, const char *v)
         g_cfg.tags = (uint8_t)i;
     else if (!strcmp(k, "cpu") && (i = pick(v, k_cpu, 2)) >= 0)
         g_cfg.cpu = (uint8_t)i;
+    else if (!strcmp(k, "dac_charge") && (i = pick(v, k_off_on, 2)) >= 0)
+        g_cfg.dac_charge = (uint8_t)i;
     else if (!strcmp(k, "dac_mhz") && ((i = atoi(v)) == 50 || i == 100 || i == 200))
         g_cfg.dac_mhz = (uint8_t)i;
     else if (!strcmp(k, "volume")) {
@@ -162,11 +165,11 @@ static int text_of(char *t, unsigned long cap)
     return snprintf(t, cap,
                     "# ReChord settings (RECHO's format): key=value, one per line. Unknown keys are ignored.\n"
                     "play=%s\nbrightness=%u\nscreen_off=%s\nauto_off=%s\nusb=%s\nresume=%s\nstrip=%s\n"
-                    "tags=%s\ncpu=%s\ndac_mhz=%u\nvolume=%s\n"
+                    "tags=%s\ncpu=%s\ndac_mhz=%u\ndac_charge=%s\nvolume=%s\n"
                     "# where the browser and the player were\nbrowse=%s\ncursor=%u\n%s%s%s",
                     k_play[g_cfg.play % 4u], g_cfg.brightness, so, ao, k_usb[g_cfg.usb % 4u],
                     k_resume[g_cfg.resume % 3u], k_off_on[g_cfg.strip & 1u], k_off_on[g_cfg.tags & 1u],
-                    k_cpu[g_cfg.cpu & 1u], g_cfg.dac_mhz, vol, g_cfg.browse, g_cfg.cursor,
+                    k_cpu[g_cfg.cpu & 1u], g_cfg.dac_mhz, k_off_on[g_cfg.dac_charge & 1u], vol, g_cfg.browse, g_cfg.cursor,
                     g_cfg.track[0] ? "track=" : "", g_cfg.track, g_cfg.track[0] ? "\n" : "");
 }
 

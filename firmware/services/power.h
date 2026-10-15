@@ -35,6 +35,9 @@ void power_init(void);           /* after config_load(): the backlight at g_cfg.
  * (the USB DAC: core A at g_cfg.dac_mhz). */
 #define POWER_SESSION_DAC 2
 int power_poll(int playing, int usb_session);
+/* 1: the cable is in but the player draws nothing from it (USB DAC, dac_charge=off): the
+ * battery is shown, rated and guarded as with no cable (a low battery ends the session). */
+void power_usb_supply_off(int off);
 void power_activity(void);       /* a key: restarts the screen-off and idle timers */
 int power_screen_on(void);
 void power_screen(int on);       /* backlight + core-A clock; logged */
