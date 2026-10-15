@@ -37,7 +37,8 @@
 #define USB_IRQ     5u
 
 enum {
-    GAHBCFG = 0x08, GINTSTS = 0x14, GINTMSK = 0x18, GRXSTSP = 0x20,
+    GAHBCFG = 0x08, GRSTCTL = 0x10, GINTSTS = 0x14, GINTMSK = 0x18, GRXSTSP = 0x20, GHWCFG4 = 0x50,
+    DIEPTXF1 = 0x104, DIEPTXF2 = 0x108,
     DCFG = 0x800, DCTL = 0x804, DSTS = 0x808, DAINTMSK = 0x81C,
 };
 
@@ -58,6 +59,8 @@ enum {
 #define EP_CNAK     0x04000000u
 #define EP_STALL    0x00200000u
 #define EP_ISO      0x00040000u   /* EPTYPE 01 */
+#define EP_INTR     0x000C0000u   /* EPTYPE 11 */
+#define EP_SD0PID   0x10000000u   /* (= SEVN: for interrupt/bulk endpoints the DATA0 toggle) */
 #define EP_ACTIVE   0x00008000u
 
 /* ---- the function: entity IDs, interfaces, rates, formats ----------------- */
@@ -69,6 +72,8 @@ enum {
 #define ID_FU   0x02
 #define ID_OT   0x03
 #define EP_AUDIO 1u                   /* OUT 0x01; its feedback IN 0x81 */
+#define IF_HID  2
+#define EP_HID  2u                    /* IN 0x82: media keys for the host */
 
 static const uint32_t k_rates[6] = { 44100, 48000, 88200, 96000, 176400, 192000 };
 static const uint8_t k_subslot[3] = { 4, 3, 2 };    /* alternate settings 1, 2, 3 */
@@ -95,6 +100,8 @@ static struct {
     volatile uint32_t last_pkt_ms;
     uint32_t drop_fill, drop_pos;     /* where the last drop happened (diagnostics) */
     uint8_t fb_odd;                   /* parity the feedback EP is armed for */
+    uint8_t hid_q[8];                 /* HID reports waiting for the endpoint (keys: press, release) */
+    volatile uint8_t hid_head, hid_n, hid_busy;
     usb_uac_status_t st;
     /* EP0 */
     uint8_t setup[8];
@@ -108,8 +115,8 @@ static struct {
 } s;
 
 static uint8_t s_buf[256];            /* EP0 replies built at run time */
-static uint8_t s_cfg[300];
-static uint32_t s_cfg_len;
+static uint8_t s_cfg[320];
+static uint32_t s_cfg_len, s_cfg_hid;   /* (the HID descriptor's offset in it) */
 static uint32_t s_pkt[1024 / 4];      /* one isochronous packet, as it left the FIFO */
 
 static const uint8_t k_dev[18] = {
@@ -119,6 +126,15 @@ static const uint8_t k_dev[18] = {
 };
 static const uint8_t k_qual[10] = { 10, 6, 0x00, 0x02, 0xEF, 0x02, 0x01, 64, 1, 0 };
 static const char *const k_str[4] = { 0, "ReChord", "ReChord USB DAC", "000000000002" };
+
+/* HID consumer control, one byte: bit 0 play/pause, 1 next track, 2 previous track
+ * (what stock's DAC sends too), 3 stop; the other four bits padding. */
+static const uint8_t k_hid_report[] = {
+    0x05, 0x0C, 0x09, 0x01, 0xA1, 0x01,             /* Consumer page, Consumer Control, application */
+    0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x04,  /* 4 one-bit fields */
+    0x09, 0xCD, 0x09, 0xB5, 0x09, 0xB6, 0x09, 0xB7,  /* play/pause, next, previous, stop */
+    0x81, 0x02, 0x95, 0x04, 0x81, 0x01, 0xC0,        /* input (var), 4 bits padding, end */
+};
 
 static void put16(uint8_t *p, uint32_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
 static void put32(uint8_t *p, uint32_t v) { put16(p, v); put16(p + 2, v >> 16); }
@@ -132,7 +148,7 @@ static uint32_t build_cfg(int high, uint8_t type)
     uint8_t *p = s_cfg, *ac;
     uint32_t n;
 
-    p[0] = 9; p[1] = type; p[4] = 2; p[5] = 1; p[6] = 0; p[7] = 0x80; p[8] = 50;   /* 100 mA */
+    p[0] = 9; p[1] = type; p[4] = 3; p[5] = 1; p[6] = 0; p[7] = 0x80; p[8] = 50;   /* 100 mA */
     p += 9;
     memcpy(p, (const uint8_t[]){ 8, 0x0B, IF_AC, 2, 1, 0, 0x20, 0 }, 8);      /* IAD */
     p += 8;
@@ -171,6 +187,14 @@ static uint32_t build_cfg(int high, uint8_t type)
         p[6] = high ? 4 : 1;                                                    /* 1 ms either way */
         p += 7;
     }
+    memcpy(p, (const uint8_t[]){ 9, 4, IF_HID, 0, 1, 3, 0, 0, 0 }, 9);        /* HID, no boot protocol */
+    p += 9;
+    s_cfg_hid = (uint32_t)(p - s_cfg);
+    memcpy(p, (const uint8_t[]){ 9, 0x21, 0x11, 0x01, 0, 1, 0x22, sizeof k_hid_report, 0 }, 9);
+    p += 9;
+    memcpy(p, (const uint8_t[]){ 7, 5, 0x80 | EP_HID, 0x03, 1, 0, 0 }, 7);  /* interrupt, 1 byte */
+    p[6] = high ? 7 : 8;                                                        /* every 8 ms */
+    p += 7;
     n = (uint32_t)(p - s_cfg);
     put16(s_cfg + 2, n);
     return n;
@@ -385,6 +409,44 @@ static void pcm_in(uint32_t n)
     s.wt += frames;
 }
 
+/* ---- media keys (HID) ----------------------------------------------------------- */
+
+/* The next queued report onto the interrupt endpoint (the host polls it every 8 ms).
+ * From the interrupt, or with it masked. */
+static void hid_next(void)
+{
+    if (s.hid_busy || !s.hid_n || !s.configured)
+        return;
+    DIEPTSIZ(EP_HID) = 1u | 1u << 19;
+    DIEPCTL(EP_HID) |= EP_ENA | EP_CNAK;
+    EPFIFO(EP_HID) = s.hid_q[s.hid_head];
+    s.hid_head = (uint8_t)((s.hid_head + 1u) % sizeof s.hid_q);
+    s.hid_n--;
+    s.hid_busy = 1;
+}
+
+static void hid_queue(uint8_t report)
+{
+    if (s.hid_n < sizeof s.hid_q) {
+        s.hid_q[(s.hid_head + s.hid_n) % sizeof s.hid_q] = report;
+        s.hid_n++;
+    }
+}
+
+void usb_uac_key(int key)
+{
+    static const uint8_t bit[3] = { 1u << 0, 1u << 1, 1u << 2 };
+
+    if (key < 0 || key > 2 || !s.configured)
+        return;
+    NVIC_ICER0 = 1u << USB_IRQ;
+    hid_queue(bit[key]);                             /* press, */
+    hid_queue(0);                                    /* release */
+    hid_next();
+    NVIC_ISER0 = 1u << USB_IRQ;
+    log_printf("uac: key %s to the host", key == USB_UAC_PLAY_PAUSE ? "play/pause" : key == USB_UAC_NEXT ? "next" : "previous");
+}
+
 /* ---- requests -------------------------------------------------------------------- */
 
 static void bus_reset(void)
@@ -399,6 +461,8 @@ static void bus_reset(void)
     OTG(DAINTMSK) = 0x10001u;
     s.configured = 0;
     s.in_busy = s.out_wait = 0;
+    s.hid_n = s.hid_busy = 0;
+    DIEPCTL(EP_HID) = 0;
     arm_ep0_out();
 }
 
@@ -495,6 +559,30 @@ static void handle_setup(void)
             class_request(r, 0);
             return;
         }
+        if ((type & 0x1Fu) == 1u && (idx & 0xFFu) == IF_HID) {
+            if (req == 0x0A || req == 0x0B) {        /* SET_IDLE, SET_PROTOCOL */
+                ep0_status_in();
+                return;
+            }
+            if (req == 0x01 || req == 0x02 || req == 0x03) {   /* GET_REPORT / IDLE / PROTOCOL */
+                s_buf[0] = req == 0x03 ? 1 : 0;     /* (report protocol) */
+                ep0_send(s_buf, 1, wlen);
+                return;
+            }
+        }
+        ep0_stall();
+        return;
+    }
+    if ((type & 0x60u) == 0u && (type & 0x1Fu) == 1u && req == 6 && (idx & 0xFFu) == IF_HID) {
+        if (val >> 8 == 0x22) {                      /* GET_DESCRIPTOR: the HID report descriptor */
+            ep0_send(k_hid_report, sizeof k_hid_report, wlen);
+            return;
+        }
+        if (val >> 8 == 0x21) {                      /* the HID descriptor (inside the configuration) */
+            build_cfg(s.high, 2);
+            ep0_send(s_cfg + s_cfg_hid, 9, wlen);
+            return;
+        }
         ep0_stall();
         return;
     }
@@ -564,6 +652,10 @@ static void handle_setup(void)
             stream_off();
         s.configured = val == 1u;
         s.st.configured = s.configured;
+        s.hid_n = s.hid_busy = 0;
+        DIEPCTL(EP_HID) = s.configured ? 1u | EP_INTR | EP_ACTIVE | EP_HID << 22 | EP_SNAK | EP_SD0PID : 0u;
+        if (s.configured)
+            OTG(DAINTMSK) |= 1u << EP_HID;
         ep0_status_in();
         return;
     case 10:                                         /* GET_INTERFACE */
@@ -665,6 +757,15 @@ void USBC_IRQHandler(void)
         DIEPINT(EP_AUDIO) = i1;
         if (i0 & 1u)
             ep0_in_next();
+        if (DIEPINT(EP_HID)) {                       /* (a media-key report went to the host) */
+            uint32_t i2 = DIEPINT(EP_HID);
+
+            DIEPINT(EP_HID) = i2;
+            if (i2 & 1u) {
+                s.hid_busy = 0;
+                hid_next();
+            }
+        }
         if ((i1 & 1u) && s.alt)                      /* the host read the feedback: its next poll */
             fb_arm(s.high ? s.fb_odd : !s.fb_odd);   /* is 8 microframes on (same parity) or 1 frame */
     }
@@ -717,6 +818,13 @@ int usb_uac_run(int (*tick)(void), void (*status)(const usb_uac_status_t *))
         return USB_EXIT_IO;
     dac_apply_volume();
     usb_dwc2_init_hs();
+    if ((OTG(GHWCFG4) >> 25) & 1u) {         /* dedicated TX FIFOs: small ones for the feedback (4 B) */
+        OTG(DIEPTXF1) = 0x00100140u;         /* and the media keys (1 B), after EP0's */
+        OTG(DIEPTXF2) = 0x00100150u;
+        OTG(GRSTCTL) = 0x10u << 6 | 0x20u;   /* flush them all (a few PHY clocks; bounded) */
+        for (uint32_t n = 0; n < 100000u && (OTG(GRSTCTL) & 0x20u); n++)
+            ;
+    }
     OTG(GINTMSK) |= GI_INCOMPISOIN | GI_INCOMPISOOUT;
     OTG(GAHBCFG) |= 1u;                      /* global interrupt */
     NVIC_ISER0 = 1u << USB_IRQ;

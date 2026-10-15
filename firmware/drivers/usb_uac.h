@@ -27,4 +27,9 @@ typedef struct {
  * screen. Returns USB_EXIT_* (usb_msc.h). */
 int usb_uac_run(int (*tick)(void), void (*status)(const usb_uac_status_t *));
 
+/* A media key for the host (HID consumer control: press, then release), from
+ * tick(). Ignored until the host has configured the device. */
+enum { USB_UAC_PLAY_PAUSE, USB_UAC_NEXT, USB_UAC_PREV };
+void usb_uac_key(int key);
+
 #endif

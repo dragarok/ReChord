@@ -733,7 +733,7 @@ static void uac_draw(int force)
     screen("USB DAC");
     for (int i = 0; i < 4; i++)
         line(1 + i, t[i]);
-    line(6, "VOL keys  BACK: leave  power: screen");
+    line(6, "PLAY/BACK: host  MENU: leave");
     display_flush_rows(0, DISPLAY_H - 1);
 }
 
@@ -743,9 +743,11 @@ static void uac_status(const usb_uac_status_t *st)
     uac_draw(0);
 }
 
-/* Every tick of the DAC session: keys (VOL+/VOL- the player's volume, on top of
- * the host's, also with the screen off; power toggles the screen; BACK leaves),
- * the screen-off timer, the battery. Nonzero = leave. */
+/* Every tick of the DAC session, keys as on Now Playing: VOL+/VOL- the player's
+ * volume (on top of the host's); PLAY play/pause on the host, held: next track;
+ * BACK previous track; MENU leaves; power toggles the screen. Volume and PLAY
+ * work with the screen off, BACK and MENU then only light it. Also the screen-off
+ * timer and the battery. Nonzero = leave. */
 static int uac_tick(void)
 {
     input_event_t ev;
@@ -753,21 +755,25 @@ static int uac_tick(void)
 
     input_scan(keys_adc(), keys_power());
     while (input_poll(&ev) > 0) {
-        int was_on = power_screen_on();
+        int was_on = power_screen_on(), hold = ev.adc_value == INPUT_ADC_LONG;
 
         power_activity();
-        if (ev.type == KEY_POWER && ev.adc_value != INPUT_ADC_LONG) {
+        if (ev.type == KEY_POWER && !hold) {
             power_screen(!was_on);
             if (!was_on)
                 uac_draw(1);
         } else if (ev.type == KEY_UP || ev.type == KEY_DOWN) {
             player_set_volume(player_get_volume() + (ev.type == KEY_UP ? 1 : -1));
             uac_draw(0);
-        } else if (ev.type == KEY_BACK && ev.adc_value != INPUT_ADC_LONG && was_on) {
-            leave = 1;
+        } else if (ev.type == KEY_SELECT && ev.adc_value != INPUT_ADC_REPEAT) {
+            usb_uac_key(hold ? USB_UAC_NEXT : USB_UAC_PLAY_PAUSE);
         } else if (!was_on) {
-            power_screen(1);             /* any other key just lights it */
+            power_screen(1);             /* BACK, MENU: just light it */
             uac_draw(1);
+        } else if (ev.type == KEY_BACK && !hold) {
+            usb_uac_key(USB_UAC_PREV);
+        } else if (ev.type == KEY_MENU && !hold) {
+            leave = 1;
         }
     }
     if (power_poll(1, 1) == POWER_OFF_BATTERY)   /* (no auto power off: the cable is in) */
