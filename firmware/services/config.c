@@ -26,6 +26,8 @@ static const char *const k_cpu[] = { "auto", "max" };
 
 static uint32_t s_hash, s_save_at;
 
+static int s_ready;                  /* settings loaded or defaulted: only then may they be written */
+
 void config_defaults(void)
 {
     g_cfg.play = Q_NORMAL;
@@ -46,6 +48,7 @@ void config_defaults(void)
 
 void config_reset(void)
 {
+    s_ready = 1;
     memset(&g_cfg, 0, sizeof g_cfg);
     config_defaults();
     g_cfg.volume = -40;
@@ -126,6 +129,7 @@ static uint32_t fnv(const char *s, unsigned long n)
 
 int config_load(void)
 {
+    s_ready = 1;
     char text[1024], *p, *e;
     fs_file_t *f;
     long n;
@@ -187,6 +191,8 @@ static int text_of(char *t, unsigned long cap)
 
 int config_save(void)
 {
+    if (!s_ready)
+        return -1;                       /* (recovery, before config_load(): never clobber the file) */
     char t[1024];
     int n = text_of(t, sizeof t);
     uint32_t h;

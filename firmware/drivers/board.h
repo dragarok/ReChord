@@ -47,6 +47,14 @@ int board_adc_ch2(void);
 enum { BOARD_SUPPLY_NORMAL = 0, BOARD_SUPPLY_BATTERY = 1, BOARD_SUPPLY_VBUS = 2 };
 int board_usb_supply(int mode);
 
+/* Reboot into the boot ROM's USB loader (rockusb, 2207:262d): the way back that needs none of our
+ * drivers -- the ROM drives the storage itself, and a computer reinstalls with rkdeveloptool
+ * (wl 0 MINIV390.IMG). The SDK's SysReboot(…, 0x02) with stock MINIV390's values (seg09 literal pool
+ * 0x0307D620..0x0307D650): clocks to the crystal, every clock gate open, soft resets released,
+ * pins back to GPIO inputs (that drops the power hold: on battery the player switches off, so
+ * only call this with USB power in), ROM remapped to 0, VTOR 0, PMU_SYS_REG3 = 0x18AF, reset. */
+void board_reboot_rockusb(void) __attribute__((noreturn));
+
 /* With USB power in: 1 = the battery is charged, 0 = charging (GPIO2.3). */
 int board_charge_done(void);
 

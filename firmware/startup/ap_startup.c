@@ -34,11 +34,22 @@ extern uint32_t _data_start, _data_end;
  * stack zone is 0x03000000..0x03004000 ONLY (firmware_ap.ld __stack_top). */
 #define AP_INITIAL_MSP 0x03004000u
 
+/* Every fault and every unexpected interrupt: never a silent hang (services/bootguard.h).
+ * The stacked frame (MSP or PSP, EXC_RETURN bit 2) and the exception number go to
+ * bootguard_fault(), which records them and resets. SP is moved to a known-good spot first:
+ * a fault from a stack overflow must not fault again here. */
 void Default_Handler(void) __attribute__((naked));
 void Default_Handler(void)
 {
-    for (;;)
-        __asm volatile("");
+    __asm__ volatile(
+        "tst lr, #4\n"
+        "ite eq\n"
+        "mrseq r0, msp\n"
+        "mrsne r0, psp\n"
+        "mrs r1, ipsr\n"
+        "ldr r2, =0x03003F00\n"                    /* inside the stack zone, below its top */
+        "mov sp, r2\n"
+        "b bootguard_fault\n");
 }
 
 /* Reset handler per the verified boot recipe (extracted from the reference

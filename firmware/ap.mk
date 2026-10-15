@@ -86,6 +86,7 @@ AP_SERVICE_SRCS := \
   firmware/services/log.c \
   firmware/services/input.c \
   firmware/services/fw_update.c \
+  firmware/services/bootguard.c \
   firmware/services/scratch.c \
   firmware/services/fs_target.c \
   firmware/services/screenshot.c \

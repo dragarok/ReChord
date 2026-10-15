@@ -270,54 +270,86 @@ int fw_update_find(uint32_t vol_lba, fw_image_t *img, fwu_progress_t progress)
     return FWU_NONE;
 }
 
-static int put(uint32_t rel, const uint32_t *src)
+static int put(uint32_t rel, uint32_t count, const uint32_t *src)
 {
-    if (emmc_fw_write(rel, BLK, src))
+    if (emmc_fw_write(rel, count, src))
         return FWU_EWRITE;
-    if (emmc_read(EMMC_FW_BASE + rel, BLK, s_chk))
+    if (emmc_read(EMMC_FW_BASE + rel, count, s_chk))
         return FWU_EIO;
-    return memcmp(src, s_chk, BLK * 512u) ? FWU_EVERIFY : 0;
+    return memcmp(src, s_chk, count * 512u) ? FWU_EVERIFY : 0;
 }
 
-/* Slot order and header-last writes are the reference's: at every point
- * one slot holds either the old or the new firmware, complete. */
+/* One slot (at firmware-area sector `dst`) from n sectors at absolute LBA `src`. The order is the
+ * one that survives a power cut at any point (docs/USB_COMPLIANCE.md, ROM research):
+ *   1. sector 0 alone erased: from here the slot is invalid, the boot ROM takes the other one;
+ *   2. sectors 1..n (the header copy at fw_end among them), each block verified;
+ *   3. sector 0 alone, last, verified: only now does the slot carry its tag.
+ * Writing sector 0 at the start of a multi-sector transfer (as before, and as stock's seg08
+ * does) could leave a tagged slot with its scatter table unwritten: a brick. */
+static int slot_write(uint32_t dst, uint32_t src, uint32_t n, const char *label, fwu_progress_t progress)
+{
+    uint32_t b;
+    int r;
+
+    memset(s_blk, 0xFF, 512);
+    if ((r = put(dst, 1, s_blk)))
+        return r;
+    for (b = 0; b < n; b += BLK) {
+        if (emmc_read(src + b, BLK, s_blk))
+            return FWU_EIO;
+        if ((r = b ? put(dst + b, BLK, s_blk) : put(dst + 1, BLK - 1u, s_blk + 128)))
+            return r;
+        if (progress)
+            progress(label, b, n);
+    }
+    if (emmc_read(src, 1, s_blk))
+        return FWU_EIO;
+    return put(dst, 1, s_blk);
+}
+
+/* FW2 first, then FW1: at every point one slot holds either the old or the new firmware,
+ * complete. */
 int fw_update_install(const fw_image_t *img, fwu_progress_t progress)
 {
-    uint32_t n = img->fw_end >> 9, s2 = emmc_fw_sectors() / 2u, b;
+    uint32_t n = img->fw_end >> 9, s2 = emmc_fw_sectors() / 2u;
     int r;
 
     if (n == 0u || n > s2)
         return FWU_EFIT;
-    memset(s_blk, 0xFF, sizeof s_blk);
-    if ((r = put(s2, s_blk)))
+    if ((r = slot_write(s2, img->lba, n + 1u, "slot 2", progress)))   /* (+1: the header copy at fw_end) */
         return r;
-    for (b = BLK; b < n; b += BLK) {
-        if (emmc_read(img->lba + b, BLK, s_blk))
-            return FWU_EIO;
-        if ((r = put(s2 + b, s_blk)))
-            return r;
-        if (progress)
-            progress("slot 2", b, n);
-    }
-    if (emmc_read(img->lba, BLK, s_blk))
-        return FWU_EIO;
-    if ((r = put(s2, s_blk)))
-        return r;
+    return slot_write(0, EMMC_FW_BASE + s2, n + 1u, "slot 1", progress);
+}
 
-    memset(s_blk, 0xFF, sizeof s_blk);
-    if ((r = put(0, s_blk)))
-        return r;
-    for (b = BLK; b < n; b += BLK) {
-        if (emmc_read(EMMC_FW_BASE + s2 + b, BLK, s_blk))
-            return FWU_EIO;
-        if ((r = put(b, s_blk)))
-            return r;
-        if (progress)
-            progress("slot 1", b, n);
+/* A slot as the boot checks it (stock seg01 FUN_0307b2cc): "RKnanoFW" at 0x1F8 of sector 0, and
+ * the 512-byte copy of sector 0 at fw_end. Returns fw_end's sector, or 0 if not valid. */
+static uint32_t slot_valid(uint32_t rel)
+{
+    const uint8_t *h = (const uint8_t *)s_blk;
+    uint32_t end;
+
+    if (emmc_read(EMMC_FW_BASE + rel, 1, s_blk) || memcmp(h + 0x1F8, "RKnanoFW", 8))
+        return 0;
+    end = le32(h + 0x1F4) >> 9;
+    if (!end || end >= emmc_fw_sectors() / 2u || emmc_read(EMMC_FW_BASE + rel + end, 1, s_chk))
+        return 0;
+    return memcmp(s_blk, s_chk, 512) ? 0 : end;
+}
+
+int fw_update_repair(fwu_progress_t progress)
+{
+    uint32_t s2 = emmc_fw_sectors() / 2u, e1 = slot_valid(0), e2 = slot_valid(s2);
+
+    if (e1 && e2)
+        return 0;
+    if (!e1 && !e2)
+        return FWU_EIO;                              /* (what booted us? nothing to copy from) */
+    {
+        int r = e1 ? slot_write(s2, EMMC_FW_BASE, e1 + 1u, "repair slot 2", progress)
+                   : slot_write(0, EMMC_FW_BASE + s2, e2 + 1u, "repair slot 1", progress);
+
+        return r ? r : e1 ? 2 : 1;
     }
-    if (emmc_read(EMMC_FW_BASE + s2, BLK, s_blk))
-        return FWU_EIO;
-    return put(0, s_blk);
 }
 
 /* Deletes the image: its (contiguous) clusters freed in every FAT copy,

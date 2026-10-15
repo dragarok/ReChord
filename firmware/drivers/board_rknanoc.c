@@ -86,6 +86,40 @@ int board_check(uint32_t emmc_sectors)
     return BOARD == BOARD_512M ? small : !small;
 }
 
+#define REG32(a) (*(volatile uint32_t *)(a))
+
+void board_reboot_rockusb(void)
+{
+    __asm__ volatile("cpsid i");
+    REG32(0xE000E010u) = 0;                          /* SysTick off */
+    REG32(0xE000E180u) = REG32(0xE000E184u) = 0xFFFFFFFFu;   /* every IRQ off, nothing pending */
+    REG32(0xE000E280u) = REG32(0xE000E284u) = 0xFFFFFFFFu;
+    REG32(0x40180010u) = 0x00010000u;                /* CRU_MODE_CON: cores on the crystal */
+    for (unsigned i = 0; i < 10u; i++)
+        REG32(0x40180080u + 4u * i) = 0xFFFF0000u;   /* CRU_CLKGATE_CON[i]: all clocks on */
+    for (volatile unsigned d = 0; d < 2000u; d++)
+        ;
+    REG32(0x401800CCu) = 0x00040004u;                /* core B held in reset (CAL_CORE_RST): it has no */
+    for (unsigned i = 0; i < 3u; i++)                /* program now -- the SDK releases it too, and it */
+        REG32(0x401800C0u + 4u * i) = 0xFFFF0000u;   /* would run from 0 until the reset; every other */
+    REG32(0x401800CCu) = 0xFFFB0000u;                /* block's soft reset released, as the SDK's */
+    for (unsigned i = 0; i < 4u; i++) {              /* GRF: every pad GPIO, default pulls */
+        REG32(0x50010000u + 4u * i) = REG32(0x50010010u + 4u * i) = 0xFFFF0000u;
+        REG32(0x50010020u + 4u * i) = REG32(0x50010030u + 4u * i) = 0xFFFF0000u;
+        REG32(0x50010040u + 4u * i) = REG32(0x50010050u + 4u * i) = 0xFFFF0000u;
+    }
+    GPIO0->ddr = 0;                                  /* all inputs */
+    REG32(0x40170004u) = 0;
+    GPIO2->ddr = 0;
+    REG32(0x500100C4u) = 0x01000000u;                /* GRF_INTER_CON0: boot ROM at 0 */
+    REG32(0xE000ED08u) = 0;                          /* VTOR */
+    REG32(0x5002004Cu) = 0xFFFF18AFu;                /* PMU_SYS_REG3: the loader flag */
+    __asm__ volatile("dsb");
+    REG32(0xE000ED0Cu) = 0x05FA0007u;                /* AIRCR: system reset */
+    for (;;)
+        ;
+}
+
 const char *board_name(void)
 {
     return BOARD == BOARD_512M ? "512M" : "8G";

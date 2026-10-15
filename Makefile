@@ -324,6 +324,10 @@ host-tests:
 	CC=$(HOSTCC) sh firmware/services/tests/run_tests.sh
 	CC=$(HOSTCC) sh firmware/drivers/tests/run_tests.sh
 	HOSTCC=$(HOSTCC) $(PYTHON) tools/test_fs_write.py
+	@mkdir -p build/host
+	$(HOSTCC) -O2 -Wall -Ifirmware -o build/host/test_fw_powercut firmware/services/test_fw_powercut.c \
+	  firmware/services/fw_update.c firmware/services/scratch.c
+	build/host/test_fw_powercut
 
 # Tag reader (firmware/services/tags.c): fixtures, expected fields, rd() cost,
 # fuzz under ASan/UBSan. FUZZ=<iterations> SEED=<n> GAPLESS=<dir> optional.

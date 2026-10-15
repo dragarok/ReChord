@@ -39,6 +39,10 @@ int fw_update_find(uint32_t vol_lba, fw_image_t *img, fwu_progress_t progress);
 
 /* Writes slot 2, then copies it to slot 1; each slot's header block goes
  * last and every block is read back. 0 or a negative FWU_E*. */
+/* Both firmware slots valid (as the boot checks them)? If exactly one is, it is copied over the
+ * other (the order of fw_update_install). 0 both fine, 1 slot 1 repaired, 2 slot 2 repaired,
+ * < 0 an error (FWU_EIO: neither is valid). */
+int fw_update_repair(fwu_progress_t progress);
 int fw_update_install(const fw_image_t *img, fwu_progress_t progress);
 
 /* Deletes the image (as stock does) so it isn't offered again. */

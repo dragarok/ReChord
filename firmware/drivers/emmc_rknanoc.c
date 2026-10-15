@@ -261,8 +261,9 @@ static int set_width(int width)
 }
 
 /* SD-protocol NAND on the internal port (stock handles these too): SDSC parts are
- * byte addressed. 4-bit if a read-back agrees, else 1 bit. */
-static int sdnand_init(void)
+ * byte addressed. 4-bit if a read-back agrees, else 1 bit. v2: it answered CMD8 (SD 2.0+);
+ * an SD 1.x part did not, and gets ACMD41 without HCS (stock: SDXX_Init(FALSE)). */
+static int sdnand_init(int v2)
 {
     uint32_t i, csd[4];
     int hc;
@@ -270,13 +271,13 @@ static int sdnand_init(void)
     for (i = 0; ; i++) {
         if (send_cmd(55, 0, F_RESP | F_CRC, 0))
             return -20;
-        if (send_cmd(41, 0x40FF8000u, F_RESP, 0) == 0 && (MMC[RESP0] & 0x80000000u))
+        if (send_cmd(41, v2 ? 0x40FF8000u : 0x00FF8000u, F_RESP, 0) == 0 && (MMC[RESP0] & 0x80000000u))
             break;
         if (i == 1000u)
             return -21;
         delay_us(1000);
     }
-    hc = (MMC[RESP0] & 0x40000000u) != 0;
+    hc = v2 && (MMC[RESP0] & 0x40000000u) != 0;
     s_shift = hc ? 0u : 9u;
     if (send_cmd(2, 0, F_RESP | F_LONG | F_CRC, 0) || send_cmd(3, 0, F_RESP | F_CRC, 0))
         return -22;
@@ -295,7 +296,7 @@ static int sdnand_init(void)
         return -25;
     if (!hc && send_cmd(16, 512, F_RESP | F_CRC, 0))
         return -26;
-    s_kind = hc ? "SD NAND (SDHC)" : "SD NAND (SDSC)";
+    s_kind = hc ? "SD NAND (SDHC)" : v2 ? "SD NAND (SDSC)" : "SD NAND (SD 1.x)";
     if (read_idb(s_idb1) == 0 && send_cmd(55, s_rca, F_RESP | F_CRC, 0) == 0 &&
         send_cmd(6, 2, F_RESP | F_CRC, 0) == 0) {           /* ACMD6: 4-bit */
         MMC[CTYPE] = 1u;
@@ -352,7 +353,13 @@ int emmc_init(void)
     delay_us(100);
     /* an SD-protocol NAND answers CMD8, an eMMC does not (stock probes in this order too) */
     if (send_cmd(8, 0x1AAu, F_RESP | F_CRC, 0) == 0 && (MMC[RESP0] & 0xFFFu) == 0x1AAu)
-        return sdnand_init();
+        return sdnand_init(1);
+    /* no CMD8: an SD 1.x part still knows APP_CMD, an eMMC does not (stock's _IdentifyUnknow probes
+     * CMD55 before falling back to MMC's CMD1, which an SD card never answers) */
+    send_cmd(0, 0, F_INIT, 0);
+    delay_us(100);
+    if (send_cmd(55, 0, F_RESP | F_CRC, 0) == 0)
+        return sdnand_init(0);
     send_cmd(0, 0, F_INIT, 0);
     delay_us(100);
     for (i = 0; ; i++) {
@@ -383,6 +390,14 @@ int emmc_init(void)
         return -9;
     if (send_cmd(16, 512, F_RESP | F_CRC, 0))
         return -10;
+    if (((csd[3] >> 26) & 0xFu) < 4u) {     /* SPEC_VERS < 4: no EXT_CSD, SWITCH or bus test (stock skips them too) */
+        s_sectors = csd_v1_sectors(csd);
+        if (s_sectors < 0x20000u)
+            return -12;
+        s_kind = "MMC (before 4.0)";
+        clk_gate(0x6C, 0);
+        return 0;                           /* (1-bit bus) */
+    }
     if (xfer_data(8, 0, ext_csd, 512, 0))   /* EXT_CSD */
         return -11;
     s_sectors = ext_csd[212 / 4];           /* SEC_COUNT, 0 on parts of 2 GB and less */

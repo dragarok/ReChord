@@ -16,6 +16,7 @@
 #include "drivers/usb_uac.h"
 #include "drivers/usb_probe.h"
 #include "drivers/usb_out.h"
+#include "services/bootguard.h"
 #include "drivers/dac_cs43131.h"
 #include "services/fs_target.h"
 #include "services/fw_update.h"
@@ -44,12 +45,15 @@ static int s_sd_in = -1;
 static uint32_t s_cpu_shown_ms;
 
 /* Read-only eMMC probe for the root menu: size and user volume start. */
+static int s_storage_failed;          /* our driver could not use the storage the ROM booted from */
+
 static void emmc_probe(void)
 {
     uint32_t user;
     int r = emmc_init();
 
     if (r) {
+        s_storage_failed = 1;
         snprintf(s_emmc, sizeof s_emmc, "init %d", r);
         log_printf("emmc: init failed (%d)", r);
         return;
@@ -61,8 +65,10 @@ static void emmc_probe(void)
         return;
     }
     r = emmc_layout(&user);
-    if (r)
+    if (r) {
+        s_storage_failed = 1;                    /* (no IDB where the ROM just found one: we read wrong) */
         snprintf(s_emmc, sizeof s_emmc, "%uM lay %d", (unsigned)(emmc_sectors() >> 11), r);
+    }
     else
         snprintf(s_emmc, sizeof s_emmc, "%uM u%x", (unsigned)(emmc_sectors() >> 11),
                  (unsigned)(s_user = user));
@@ -1008,11 +1014,140 @@ static void usb_out_tick(void)
     ui_invalidate_all();
 }
 
+/* The way back that needs none of our drivers: the boot ROM's USB loader (board_reboot_rockusb()).
+ * It keeps the player powered only from USB, so with no cable in it asks for one first. */
+static void rockusb_flow(const char *why)
+{
+    log_printf("rockusb: %s", why);
+    log_flush("rockusb");                        /* (if the storage lets us) */
+    power_screen(1);
+    for (;;) {
+        screen("USB recovery (boot ROM)");
+        line(1, why);
+        line(3, "On a computer: rkdeveloptool");
+        line(4, "  ld, then wl 0 MINIV390.IMG, rd");
+        line(6, usb_cable() ? "rebooting into USB mode..." : "connect USB to a computer");
+        line(7, usb_cable() ? "" : "POWER: switch off instead");
+        display_flush_rows(0, DISPLAY_H - 1);
+        if (usb_cable())
+            break;
+        if (keys_power()) {
+            while (keys_power())
+                cpu_wait_tick();
+            power_off(NULL);
+        }
+        cpu_wait_tick();
+    }
+    delay_ms(2000);                              /* (time to read it) */
+    board_reboot_rockusb();
+}
+
+/* The key held at power-on, decided once and first (before the storage driver, slot repair or
+ * anything slow): KEY_DOWN (VOL-) = the boot ROM's USB loader, KEY_UP (VOL+) = Recovery. */
+static int s_boot_key = KEY_NONE;
+
+static void boot_key_sample(void)
+{
+    uint32_t t0 = time_ms(), up = 0, down = 0;
+
+    while (time_ms() - t0 < 400u) {              /* (the ADC's first readings, then 300 ms of one key) */
+        int a = keys_adc();
+
+        up = a >= 70 && a <= 183 ? up + 1u : 0u;
+        down = a >= 0 && a <= 69 ? down + 1u : 0u;
+        if (up >= 30u || down >= 30u) {
+            s_boot_key = up >= 30u ? KEY_UP : KEY_DOWN;
+            return;
+        }
+        cpu_wait_tick();
+    }
+}
+
+/* Recovery (services/bootguard.h): right after the storage is up and before anything else
+ * runs, when the last boot ended in a fault or VOL+ is held at power-on. Only the pieces
+ * every way back needs: the updater and USB disk. */
+static void recovery_menu(void)
+{
+    bootguard_rec_t rec;
+    char why[48];
+    input_event_t ev;
+
+    if (bootguard_crashed(&rec))
+        snprintf(why, sizeof why, "after a fault (x%u) at %08x", (unsigned)rec.count, (unsigned)rec.pc);
+    else if (s_boot_key == KEY_UP)
+        snprintf(why, sizeof why, "VOL+ held at power-on");
+    else
+        return;
+    log_printf("recovery: %s (lr %08x); storage %s", why, bootguard_crashed(&rec) ? (unsigned)rec.lr : 0u, s_emmc);
+    log_flush("recovery");
+    for (;;) {
+        int k = KEY_NONE;
+
+        power_screen(1);
+        screen("Recovery");
+        line(1, why);
+        line(2, s_user ? "storage ok" : s_emmc[0] ? s_emmc : "storage: none");
+        line(4, "PLAY  install an update (MINIV*.IMG)");
+        line(5, "MENU  USB disk: copy the image");
+        line(6, "BACK  start normally");
+        line(7, "VOL-  USB recovery for a computer");
+        line(8, "POWER off");
+        display_flush_rows(0, DISPLAY_H - 1);
+        while (keys_power())
+            cpu_wait_tick();
+        input_mock_clear();
+        while (k == KEY_NONE) {
+            input_scan(keys_adc(), keys_power());
+            while (input_poll(&ev) > 0)
+                if (ev.adc_value != INPUT_ADC_REPEAT)
+                    k = ev.type;
+            cpu_wait_tick();
+        }
+        log_printf("recovery: key %d", k);
+        if (k == KEY_SELECT && s_user) {
+            update_prompt();
+        } else if (k == KEY_MENU && s_user) {
+            screen("Recovery: USB disk");
+            line(2, "connect the cable (BACK: cancel)");
+            display_flush_rows(0, DISPLAY_H - 1);
+            while (!usb_cable() && input_map_adc(keys_adc()) != KEY_BACK)
+                cpu_wait_tick();
+            if (usb_cable())
+                usb_session();                   /* (it offers the update when the host lets go) */
+        } else if (k == KEY_BACK) {
+            bootguard_clear();
+            log_printf("recovery: start normally");
+            return;
+        } else if (k == KEY_DOWN) {
+            rockusb_flow("from the recovery menu");
+        } else if (k == KEY_POWER) {
+            power_off(NULL);
+        }
+    }
+}
+
 void ap_ui_loop(void)
 {
     input_event_t ev;
 
+    boot_key_sample();    /* first: the keys work whatever comes after */
+    if (s_boot_key == KEY_DOWN)   /* before our storage driver runs at all (it might be what fails) */
+        rockusb_flow("VOL- held at power-on");
     emmc_probe();
+    if (s_storage_failed)
+        rockusb_flow(s_emmc[0] ? s_emmc : "storage failed");
+    if (s_user) {         /* a slot left invalid (an update cut short): copied from the good one */
+        int r;
+
+        screen("Checking the firmware slots");
+        r = fw_update_repair(update_progress);
+        if (r)
+            log_printf("fw: slot repair %d (%s)", r, r == 1 ? "slot 1 rebuilt from slot 2" :
+                       r == 2 ? "slot 2 rebuilt from slot 1" : "failed");
+        if (r < 0)
+            line(3, "firmware slots: repair failed");
+    }
+    recovery_menu();      /* a fault last time, or VOL+ held: before anything else */
     if (s_user)
         update_prompt();  /* at boot too, as stock and RECHO check */
     player_init();       /* register wav/mp3/flac codecs (registry) */
@@ -1129,6 +1264,7 @@ void ap_ui_loop(void)
         /* audio pump + Now Playing sync (no-ops without a playing track) */
         (void)player_process();
         config_poll();
+        bootguard_poll();                /* a fault record is cleared after a minute of normal running */
         /* the RAM ring keeps the oldest lines when full: write it out once half full
          * (at most once a minute), so a long session's log reaches ECHOLOG.TXT whole */
         if ((log_bytes() > 2048u && time_ms() - s_log_flushed >= 60000u) ||
