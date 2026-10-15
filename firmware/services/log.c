@@ -36,10 +36,13 @@ unsigned log_pending(void)
 void log_printf(const char *fmt, ...)
 {
     char line[LOG_LINE_MAX];
-    unsigned long ms = s_clock ? s_clock() : 0ul;
+    unsigned long ms;
     int n;
     va_list ap;
 
+    if (!fmt)
+        return;
+    ms = s_clock ? s_clock() : 0ul;
     n = snprintf(line, sizeof line, "%lu.%03lu ", ms / 1000ul, ms % 1000ul);
     va_start(ap, fmt);
     n += vsnprintf(line + n, sizeof line - (unsigned)n - 1u, fmt, ap);

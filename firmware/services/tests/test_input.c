@@ -112,16 +112,38 @@ static void test_scan(void)
     CHECK(input_scan(500, 0) == 0);
     CHECK(input_scan(1023, 0) == 0);         /* 1-sample glitch ignored */
     CHECK(input_scan(1023, 1) == 0);
-    CHECK(input_scan(1023, 1) == 1);         /* power GPIO wins */
+    CHECK(input_scan(1023, 1) == 0);         /* power GPIO wins; acts on release */
+    CHECK(input_scan(1023, 0) == 0);
+    CHECK(input_scan(1023, 0) == 1);         /* short press: released */
     CHECK(input_pending() == 2);
     CHECK(input_poll(&ev) == 1 && ev.type == KEY_UP && ev.adc_value == 130);
     CHECK(input_poll(&ev) == 1 && ev.type == KEY_POWER && ev.adc_value == -1);
     input_mock_clear();
 }
 
+/* Keys with a hold meaning: short on release, or INPUT_ADC_LONG once held
+ * INPUT_LONG_SCANS scans (and nothing on that release). */
+static void test_hold(void)
+{
+    input_event_t ev;
+    int i, n = 0;
+
+    input_mock_clear();
+    CHECK(input_scan(1023, 1) == 0);
+    for (i = 0; i < INPUT_LONG_SCANS + 5; i++)
+        n += input_scan(1023, 1);
+    CHECK(n == 1);
+    CHECK(input_poll(&ev) == 1 && ev.type == KEY_POWER && ev.adc_value == INPUT_ADC_LONG);
+    CHECK(input_scan(1023, 0) == 0);
+    CHECK(input_scan(1023, 0) == 0);         /* released after a hold: no short press */
+    CHECK(input_pending() == 0);
+    input_mock_clear();
+}
+
 int main(void)
 {
     test_queue_fifo();
+    test_hold();
     test_overflow();
     test_adc_map();
     test_scan();

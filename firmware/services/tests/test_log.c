@@ -107,33 +107,31 @@ static void test_append(void)
 
 static void test_overflow(void)
 {
-    char buf[4096];
-    char expect[64];
+    char buf[8192];
     int i;
 
     log_file_reset();
     log_init(mock_clock);
     s_now_ms = 0;
 
-    /* Fill the ring past capacity. */
-    for (i = 0; i < LOG_BUFFER_LINES + 5; i++) {
-        log_printf("msg %d", i);
+    /* The ring holds 4096 bytes; "0.000 msg NNN\n" is 14: 292 lines fit, 8 drop. */
+    for (i = 0; i < 300; i++) {
+        log_printf("msg %03d", i);
     }
-    CHECK(log_pending() == (unsigned)LOG_BUFFER_LINES);
-    CHECK(log_dropped() == 5);
+    CHECK(log_pending() == 292u);
+    CHECK(log_dropped() == 8);
 
     CHECK(log_flush(NULL) == LOG_OK);
     CHECK(log_pending() == 0);
     CHECK(log_dropped() == 0);
 
     read_log(buf, sizeof(buf));
-    /* 32 buffered lines + 1 drop-counter line. */
-    CHECK(count_lines(buf) == LOG_BUFFER_LINES + 1);
-    CHECK(strstr(buf, "0.000 msg 0\n") != NULL);
-    snprintf(expect, sizeof(expect), "0.000 msg %d\n", LOG_BUFFER_LINES - 1);
-    CHECK(strstr(buf, expect) != NULL);
-    CHECK(strstr(buf, "msg 32") == NULL);          /* dropped, not written */
-    CHECK(strstr(buf, "0.000 log: 5 lines dropped (buffer full)\n") != NULL);
+    /* the oldest lines are kept, then the drop count */
+    CHECK(count_lines(buf) == 292 + 1);
+    CHECK(strstr(buf, "0.000 msg 000\n") != NULL);
+    CHECK(strstr(buf, "0.000 msg 291\n") != NULL);
+    CHECK(strstr(buf, "msg 292") == NULL);         /* dropped, not written */
+    CHECK(strstr(buf, "0.000 ... 8 log lines dropped (buffer full)\n") != NULL);
 }
 
 static void test_flush_error_keeps_buffer(void)

@@ -748,7 +748,7 @@ static struct fs_file *handle_new(const vol_t *v)
  * grows by a zeroed cluster. */
 static int dir_slot(vol_t *v, uint32_t dir, uint32_t *lba, uint32_t *off)
 {
-    cur_t d = { v, dir, 0, 0, 0, 0, 0 };
+    cur_t d = { v, dir, 0, 0, 0, 0, 0, 0 };
     uint32_t end_lba = 0, end_off = 0, c, e;
     int prev_lfn = 0;
     uint8_t *p;

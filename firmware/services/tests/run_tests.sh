@@ -10,7 +10,7 @@ CFLAGS="${CFLAGS:--Wall -Werror -O1}"
 mkdir -p .work
 
 $CC $CFLAGS -I.. -o .work/test_settings test_settings.c ../settings.c ../fs_host.c
-$CC $CFLAGS -I.. -o .work/test_log     test_log.c     ../log.c     ../fs_host.c
+$CC $CFLAGS -I.. -DLOG_PATH='"/ECHOLOG.TXT"' -o .work/test_log test_log.c ../log.c ../fs_host.c
 $CC $CFLAGS -I.. -o .work/test_input   test_input.c   ../input.c
 $CC $CFLAGS -I.. -o .work/test_fs      test_fs.c      ../fs_host.c
 
