@@ -48,6 +48,12 @@ uint32_t clock_pclk_hz(void);       /* APB (pclk_logic) */
 uint64_t time_us(void);
 uint32_t time_ms(void);
 
+/* A time_ms() value as a nonzero stamp (0 meaning "not started"). Never `t | 1`: that is a
+ * millisecond in the future half the time, so `time_ms() - stamp` wraps to ~2^32 in the same
+ * millisecond and every "N ms passed" check fires at once (the USB arm was held after 10 ms
+ * on half the boots). 0 maps to the millisecond before it, one early at worst. */
+static inline uint32_t time_stamp(uint32_t t) { return t ? t : 0xFFFFFFFFu; }
+
 void delay_us(uint32_t us);
 void delay_ms(uint32_t ms);
 

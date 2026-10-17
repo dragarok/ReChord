@@ -849,7 +849,8 @@ void usb_dwc2_park(void)
         return;
     s_arm_cable = (int)((RK_GRF[0xE8 / 4] >> 1) & 1u);
     phy_arm();
-    s_arm_ms = time_ms() | 1u;
+    s_arm_ms = time_stamp(time_ms());
+    log_printf("usb: PHY armed for %u ms (cable %d)", (unsigned)USB_ARM_MS, s_arm_cable);
 }
 
 int usb_dwc2_arming(void)

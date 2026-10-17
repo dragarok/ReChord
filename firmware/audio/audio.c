@@ -1200,7 +1200,7 @@ static void check_underrun(void)
     if (!s_underrun_log || time_ms() - s_underrun_log >= 1000u) {
         log_printf("audio: underrun (%u in all), input %u B buffered", (unsigned)n,
                    (unsigned)(AS->in_wr - AS->in_rd));
-        s_underrun_log = time_ms() | 1u;
+        s_underrun_log = time_stamp(time_ms());
     }
     s_underruns = n;
 }

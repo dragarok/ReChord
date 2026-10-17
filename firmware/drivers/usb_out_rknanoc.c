@@ -1133,7 +1133,7 @@ int usb_out_poll(void)
         if (!(p & HP_CONN)) {
             s.conn_ms = 0;
         } else if (!s.conn_ms) {
-            s.conn_ms = now | 1u;
+            s.conn_ms = time_stamp(now);
         } else if (now - s.conn_ms >= T_ATTDB_MS) {  /* connect debounce, then reset and enumerate */
             uint32_t e0 = s.st.errors;
             int r;

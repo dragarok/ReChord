@@ -707,7 +707,7 @@ static void battery_info_run(void)
             const power_battery_t *b = power_battery();
             char buf[40];
 
-            shown = time_ms() | 1u;
+            shown = time_stamp(time_ms());
             screen("Power");
             snprintf(buf, sizeof buf, "%u mV  %u.%u %%  level %u", b->mv, b->pct10 / 10u, b->pct10 % 10u, b->level);
             line(1, b->mv ? buf : "battery: measuring");
@@ -885,7 +885,7 @@ static int shortcut_key(const input_event_t *ev)
         power_activity();
         if (time_ms() - s_vol_at < 500u && player_get_volume() != s_vol_before)
             player_set_volume(s_vol_before);
-        s_shortcut_at = time_ms() | 1u;
+        s_shortcut_at = time_stamp(time_ms());
         log_printf("ui: shortcut: play = screenshot");
         return 1;
     }
@@ -1418,7 +1418,7 @@ void ap_ui_loop(void)
         if (!power || !s_power_armed)
             s_power_down_ms = 0;
         else if (!s_power_down_ms)
-            s_power_down_ms = time_ms() | 1u;
+            s_power_down_ms = time_stamp(time_ms());
         else if (time_ms() - s_power_down_ms >= 2000u)
             power_off(NULL);
 
