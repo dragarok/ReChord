@@ -236,6 +236,24 @@ static void test_hold(void)
     reset();
 }
 
+/* The press that switched the player on: nothing until the power key is seen up; then it counts.
+ * (Must run first: the latch is per boot.) */
+static void test_boot_press(void)
+{
+    input_event_t ev;
+
+    input_mock_clear();                      /* (not reset(): its idle samples would arm the key) */
+    feed(1023, 1, 150);                      /* held 1.5 s from the first sample: no DOWN, no HOLD */
+    CHECK(input_next(&ev) == 0);
+    CHECK(input_hold_progress(KEY_POWER) == 0);
+    feed(1023, 0, 3);
+    CHECK(input_next(&ev) == 0);             /* nor a release */
+    feed(1023, 1, 2);
+    CHECK(input_next(&ev) == 1 && ev.key == KEY_POWER && ev.gesture == IG_DOWN);
+    feed(1023, 0, 3);
+    reset();
+}
+
 /* PLAY: x2, x3 and their holds; every tap reported at its release (the first never waits). */
 static void test_multi(void)
 {
@@ -378,6 +396,7 @@ static void test_repeat(void)
 
 int main(void)
 {
+    test_boot_press();
     test_chord();
     test_sweep();
     test_queue_fifo();

@@ -343,8 +343,18 @@ static volatile int s_isr;
 static input_event_t s_rep;          /* input_poll: a REPEAT whose steps are still being handed out */
 static unsigned s_rep_left;
 
+/* The press that switched the player on is not a key: the power key counts only once it has been
+ * seen up since boot (a boot by cable arms it at the first sample). Without this the power-on
+ * press arrived as a POWER hold on the first screen (m32, 2026-10-18), where a hold opens the
+ * power menu (DESIGN 1.2). */
+static int s_power_seen_up;
+
 void input_sample(int adc_value, int power, uint32_t now_ms)
 {
+    if (!power)
+        s_power_seen_up = 1;
+    else if (!s_power_seen_up)
+        power = 0;
     sample(power ? KEY_POWER : input_map_adc(adc_value), now_ms);
 }
 
