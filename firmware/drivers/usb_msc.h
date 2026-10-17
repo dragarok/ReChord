@@ -39,6 +39,8 @@ void usb_dwc2_phy_on(void);
 /* The USB interrupt (NVIC IRQ 5) goes to whichever mode set this (the USB DAC, the host). */
 extern void (*volatile usb_irq_hook)(void);
 void usb_dwc2_phy_off(void);
+/* Called when hw_on() cuts the DAC's supply (audio/audio.c: its next start powers it up). */
+void usb_dac_rail_cut(void);
 /* Idle for a later plug: the PHY run configured (as a session's hw_on) for USB_ARM_MS, then held
  * as a session's end leaves it (usb_dwc2_idle_tick does the hold). The device (ECHOLOG
  * 2026-10-16/17): its comparators track VBUS in the held state only after the PHY has run

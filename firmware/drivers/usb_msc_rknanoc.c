@@ -626,6 +626,13 @@ static void phy_config_rom(void)
     RK_GRF[0x8C / 4] = 0xFFFF0200u;
 }
 
+/* audio/audio.c: the DAC's supply was cut here, so its next start runs the power sequence again
+ * (device 2026-10-17: the USB DAC after the probe enumerated and played nothing -- the audio
+ * layer still took the DAC for up and skipped dac_init). Weak for the host tests. */
+__attribute__((weak)) void usb_dac_rail_cut(void)
+{
+}
+
 static void hw_on(void)
 {
     s_arm_ms = 0;                    /* a session takes over an arming PHY */
@@ -654,6 +661,7 @@ static void hw_on(void)
         gpio_out(1, 4, 0);           /* the USB DAC's path, where the DAC is already up: 2.2 low there */
         gpio_out(2, 0, 1);           /* cut its supply while I2S and I2C still drive its pins */
         gpio_out(2, 2, 0);           /* (CS43131 audit 2026-10-16) */
+        usb_dac_rail_cut();          /* the DAC is down now: its next start powers it up again */
     }
 }
 

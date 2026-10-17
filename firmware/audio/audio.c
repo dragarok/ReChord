@@ -23,6 +23,7 @@
 #include "drivers/clock.h"
 #include "drivers/dac_cs43131.h"
 #include "drivers/usb_out.h"
+#include "drivers/usb_msc.h"
 #include "services/fs.h"
 #include "services/log.h"
 #include "services/modules.h"
@@ -1347,6 +1348,16 @@ int audio_set_output(int usb)
         s_dac_up = 0;                        /* the jack: DAC (and amp) brought up again at the next play */
     log_printf("audio: output %s", usb ? "USB" : "the jack");
     return 1;
+}
+
+/* drivers/usb_msc_rknanoc.c hw_on() cut the DAC's supply (a disk, console or probe session). */
+void usb_dac_rail_cut(void)
+{
+    if (s_playing)
+        halt();
+    if (s_dac_up)
+        log_printf("audio: DAC supply cut by USB: it powers up again at the next start");
+    s_dac_up = 0;
 }
 
 int audio_output_usb(void)
