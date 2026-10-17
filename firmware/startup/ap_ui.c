@@ -155,14 +155,16 @@ static void pump(void)
         bt_app_tick();
 }
 
-/* Every gesture the screens' events come from, in the log (DESIGN 3.3: "ui: key PLAY.x2 on player
- * t=..."; the tests time holds and multi-presses by it). A key's DOWN and the window closing are
- * left out but for PLAY's (its x2/x3 label), and so is a repeat's every step but the merged ones. */
+/* The gestures the screens' events come from, in the log (DESIGN 3.3: "ui: key PLAY.x2 on player
+ * t=..."; the tests time holds and multi-presses by them). Left out, to keep the 4 KiB RAM log for
+ * the rest: every DOWN, VOL+/VOL-'s taps and holds (the old "ui: key up/down" lines say those), and
+ * the multi-press window closing but for PLAY's (its x2/x3 label). */
 static void log_gesture(const input_event_t *g)
 {
     const ui_screen_t *top = ui_top_screen();
 
-    if (g->gesture == IG_DOWN || (g->gesture == IG_END && g->key != KEY_SELECT))
+    if (g->gesture == IG_DOWN || (g->gesture == IG_END && g->key != KEY_SELECT) ||
+        ((g->key == KEY_UP || g->key == KEY_DOWN) && (g->gesture == IG_TAP || g->gesture == IG_HOLD)))
         return;
     if (g->gesture == IG_REPEAT)
         log_printf("ui: key %s.repeat on %s t=%u held=%u steps=%u n=%u", input_key_name(g->key),
@@ -1632,7 +1634,8 @@ void ap_ui_loop(void)
                 s_worst_at = time_stamp(now);
                 log_printf("ui: first frame at %u ms", (unsigned)now);
             }
-            if (now - t_pass > s_worst) {    /* the worst pass of every 10 s, when it is 20 ms or more */
+            if (now - t_pass > s_worst) {    /* the worst pass of every 10 s, 50 ms or more (300 and more
+                                              * has its own "slow pass" line) */
                 s_worst = now - t_pass;
                 s_worst_parts[0] = t_keys - t_pass;
                 s_worst_parts[1] = t_play - t_keys;
@@ -1641,7 +1644,7 @@ void ap_ui_loop(void)
                 s_worst_on = ui_top_screen() ? ui_top_screen()->name : "-";
             }
             if (now - s_worst_at >= 10000u) {
-                if (s_worst >= 20u)
+                if (s_worst >= 50u && s_worst < 300u)
                     log_printf("ui: worst pass %u ms on %s: keys+events %u, player %u, rest %u, draw %u",
                                (unsigned)s_worst, s_worst_on, (unsigned)s_worst_parts[0],
                                (unsigned)s_worst_parts[1], (unsigned)s_worst_parts[2],
