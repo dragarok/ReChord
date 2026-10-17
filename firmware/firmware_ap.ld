@@ -142,6 +142,18 @@ SECTIONS
     }
 }
 
+/* ---- the fonts window (drivers/text_load.c) -----------------------------
+ * The "fonts" module (drivers/fonts/rechord_fonts.bin) is loaded at boot into
+ * core-A SRAM from the end of FW_CODE (the most the code image may ever occupy:
+ * the link fails before the code reaches it) to the audio LLI just below the PCM
+ * ring (audio/audio_shared.h AS_LLI = 0x0308FF00). The ROM's boot-time copies
+ * (the row-0 duplicate up by 0xB68 and the 4-byte poke at 0x03078CD0, tools/
+ * pack_fw1.py) land here before our code runs; nothing uses the window after. */
+__fonts_ram_start = ALIGN(ORIGIN(FW_CODE) + LENGTH(FW_CODE), 256);
+__fonts_ram_end   = 0x0308FF00;
+ASSERT(__fonts_ram_end - __fonts_ram_start >= 0x17000,
+       "the fonts window must hold the fonts module (about 92 KiB)")
+
 /* ---- layout contracts (fail the link loudly on violation) ------------- */
 ASSERT(ap_vectors == 0x03050000,
        "ap_vectors must sit at the fw1 entry base 0x03050000 (IMG 0xD68)")

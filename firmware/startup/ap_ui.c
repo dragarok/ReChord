@@ -16,6 +16,7 @@
 #include "drivers/usb_uac.h"
 #include "drivers/usb_probe.h"
 #include "drivers/usb_out.h"
+#include "drivers/text.h"
 #include "services/bootguard.h"
 #include "drivers/dac_cs43131.h"
 #include "services/fs_target.h"
@@ -81,6 +82,7 @@ static void emmc_probe(void)
                  (unsigned)(s_user = user));
     if (s_user)
         fs_target_mount_rw(0, "Internal", emmc_read, emmc_write, s_user);
+    text_fonts_load();                           /* the fonts module from our slot (drivers/text.h) */
 }
 
 static const char *emmc_text(void) { return s_emmc; }
