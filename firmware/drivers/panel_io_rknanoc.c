@@ -196,10 +196,38 @@ static uint64_t adc_now(void)
 static int s_key_min = 0xFFFF, s_key_out = 1023, s_key_cand = -2, s_key_cand_v;
 static uint64_t s_key_cand_t;
 
+/* The edges, for timing (services/input.c input_sample_edges): when the reading left idle, and
+ * when it rose KEY_RISE above the lowest of the press (the finger let go: the band itself is kept
+ * until idle, the release's rising voltage cannot pass through a higher band). Which key it is
+ * stays the stable band's business above. 0 = none. */
+#define KEY_RISE 64
+static uint32_t s_press_ms, s_release_ms;
+
+static void key_edges(int v)
+{
+    uint32_t now = time_ms();
+
+    now = now ? now : 1u;
+    if (v > 1000) {
+        if (s_press_ms && !s_release_ms)
+            s_release_ms = now;
+        s_press_ms = 0;
+    } else if (!s_press_ms) {
+        s_press_ms = now;
+        s_release_ms = 0;
+    } else if (s_key_min <= 1000 && v > s_key_min + KEY_RISE) {
+        if (!s_release_ms)
+            s_release_ms = now;
+    } else if (s_key_min <= 1000 && v <= s_key_min + KEY_RISE / 2) {
+        s_release_ms = 0;                       /* (back down: not a release after all) */
+    }
+}
+
 static void key_sample(int v)
 {
     int k;
 
+    key_edges(v);
     if (v > 1000)
         s_key_min = 0xFFFF;                     /* released: the next press starts afresh */
     else {
@@ -276,7 +304,7 @@ void keys_tick(void)
     if (!s_keys_isr)
         return;
     adc_step();
-    input_sample(s_key_out, keys_power(), time_ms());
+    input_sample_edges(s_key_out, keys_power(), time_ms(), s_press_ms, s_release_ms);
 }
 
 void keys_isr_start(void)
@@ -575,12 +603,12 @@ static void gpio_blit(int x0, int y0, int x1, int y1, const uint16_t *src, int p
 #define DMA_TIMEOUT_US 50000u              /* RECHO: 50 ms */
 #define DMA_MAX_WORDS  4095u               /* the block size field */
 
-/* The trial marker: two words that a warm reset keeps, in the spare bytes above the PCM ring's DMA
- * descriptors (AS_LLI + 8 x 28 B = 0x0308FFE0; services/bootguard.c's record is at 0x0308FFE8).
- * Not RECHO's 0x0309FFA0: our PCM ring fills the last 64 KiB of SRAM. The second word is the first
- * one inverted, so SRAM noise at power-on reads as "no marker". */
-#define MARK         (*(volatile uint32_t *)0x0308FFE0u)
-#define MARK_INV     (*(volatile uint32_t *)0x0308FFE4u)
+/* The trial marker: two words that a warm reset keeps, in .noinit (firmware_ap.ld; not next to the
+ * boot ROM's own record at 0x0308FFE8, not RECHO's 0x0309FFA0 in our PCM ring). The second word is
+ * the first one inverted, so SRAM noise at power-on reads as "no marker". */
+volatile uint32_t g_vop_mark[2] __attribute__((section(".noinit")));   /* (tests: by symbol) */
+#define MARK         (g_vop_mark[0])
+#define MARK_INV     (g_vop_mark[1])
 #define MARK_TRIAL   0x564F5031u           /* 'VOP1': a trial started and has not proven itself */
 #define MARK_FAIL    0x564F5046u           /* 'VOPF': refused until power-off */
 #define TRIAL_MS     5000u

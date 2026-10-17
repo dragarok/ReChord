@@ -118,6 +118,20 @@ class Elf32:
     def u32(self, off: int) -> int:
         return struct.unpack_from("<I", self.data, off)[0]
 
+    def section(self, name: str):
+        """(addr, size) of a section by name, or None."""
+        shoff, shentsize, shnum, shstrndx = self.u32(32), self.u16(46), self.u16(48), self.u16(50)
+        if not shoff or shstrndx >= shnum:
+            return None
+        stro = self.u32(shoff + shstrndx * shentsize + 16)
+        for i in range(shnum):
+            off = shoff + i * shentsize
+            n = self.u32(off)
+            end = self.data.index(b"\0", stro + n)
+            if self.data[stro + n:end].decode("ascii", "replace") == name:
+                return self.u32(off + 12), self.u32(off + 20)
+        return None
+
     def program_headers(self):
         for i in range(self.e_phnum):
             off = self.e_phoff + i * self.e_phentsize
@@ -208,10 +222,16 @@ def build_scatter_table(elf: Elf32):
     # reference/stock row 1: the ROM copies init_size bytes of .data from the
     # payload right after the row-0 block to ram_start and enters via the VT
     # at its start (verdict #19), so the .data image must follow the code.
-    rw = [s for s in all_segs if s["vaddr"] < VECTOR_RAM]
+    # .noinit (the crash record, the display trial's marker) must survive a warm reset: its
+    # segment is not part of the row (the loader zeroes the row's object span past .data)
+    noinit = elf.section(".noinit")
+    rw = [s for s in all_segs if s["vaddr"] < VECTOR_RAM
+          and not (noinit and noinit[1] and s["vaddr"] == noinit[0])]
     if rw:
         lo = min(s["vaddr"] for s in rw)
         hi = max(s["vaddr"] + s["memsz"] for s in rw)
+        if noinit and noinit[1] and hi > noinit[0]:
+            raise SystemExit("SAFETY: the RW row would cover .noinit")
         data = [s for s in rw
                 if s["filesz"] and not is_header_shadow(s)]
         init = sum(s["filesz"] for s in data)

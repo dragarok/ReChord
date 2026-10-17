@@ -140,11 +140,13 @@ static struct {
     uint32_t t0;             /* when it went down (the press; a band it swept past included) */
     uint32_t t_band;         /* when its own band started */
     uint8_t down, held, taps, ignore;   /* DOWN sent, HOLD sent, place in a multi-press, wait for all up */
+    uint8_t settled;         /* this press's place in the multi-press decided (its key is sure) */
     uint32_t reps;           /* repeat steps sent */
     int seq_key;             /* a multi-press open: its key, its taps, the last release */
     uint8_t seq_taps;
     uint32_t seq_up;
     uint32_t now;            /* the latest sample's time */
+    uint32_t edge_press, edge_release;  /* the ladder's own edges (drivers: keys_tick), 0 = none */
 } k = { KEY_NONE, KEY_NONE };
 
 void input_set_hold_ms(uint32_t ms)
@@ -242,33 +244,60 @@ static void end_sequence(uint32_t now)
     }
 }
 
+/* This press's place in the open multi-press, if its key is that one's. */
+static uint8_t taps_for(int key)
+{
+    return k.seq_key == key && k.t0 - k.seq_up <= INPUT_MULTI_GAP_MS && k.seq_taps < 3u ?
+           (uint8_t)(k.seq_taps + 1u) : 1u;
+}
+
+/* The key down is sure (its DOWN, its release, a chord): a press of another key closes the open
+ * multi-press now, not when a band the voltage only passed through became stable for a moment
+ * (QEMU key-ramp-ms=25: MENU's band held 20 ms on the way to PLAY's and broke PLAY's x2). */
+static void settle(uint32_t now)
+{
+    if (k.settled)
+        return;
+    k.settled = 1;
+    if (k.taps == 1u)
+        end_sequence(now);
+    k.seq_key = KEY_NONE;                    /* (open again at this press's release, if a tap) */
+}
+
+/* The ladder's edge, when it is this press's: the time the voltage left idle (press) or rose off
+ * the held key's level (release), not the time a band was stable (20..100 ms later, depending on
+ * how fast the voltage settles and where the 10 ms samples fall). */
+static uint32_t edge(uint32_t e, uint32_t now, uint32_t not_before)
+{
+    return e && now - e <= 250u && (int32_t)(e - not_before) >= 0 ? e : now;
+}
+
 static void press(int key, uint32_t now)
 {
-    int more = k.seq_key == key && now - k.seq_up <= INPUT_MULTI_GAP_MS && k.seq_taps < 3u;
-
-    if (!more)
-        end_sequence(now);
-    k.taps = more ? (uint8_t)(k.seq_taps + 1u) : 1u;
-    k.seq_key = KEY_NONE;                    /* (open again at this press's release, if a tap) */
     k.key = key;
-    k.t0 = k.t_band = now;
-    k.down = k.held = 0;
+    k.t0 = key == KEY_POWER ? now : edge(k.edge_press, now, now - 250u);
+    k.t_band = now;
+    k.taps = taps_for(key);
+    k.down = k.held = k.settled = 0;
     k.reps = 0;
 }
 
 static void release(uint32_t now)
 {
+    uint32_t up = k.key == KEY_POWER ? now : edge(k.edge_release, now, k.t0);
+
+    settle(now);
     if (!k.down) {                           /* a tap shorter than the sweep time: its DOWN now */
         emit(IG_DOWN, k.key, now);
         k.down = 1;
     }
     if (k.held || k.reps) {
-        emit(IG_RELEASE, k.key, now);
+        emit(IG_RELEASE, k.key, up);
     } else {
-        emit(IG_TAP, k.key, now);
+        emit(IG_TAP, k.key, up);
         k.seq_key = k.key;
         k.seq_taps = k.taps;
-        k.seq_up = now;
+        k.seq_up = up;
     }
     k.key = KEY_NONE;
 }
@@ -276,16 +305,24 @@ static void release(uint32_t now)
 /* The key stays down: DOWN once past the sweep time, HOLD at the hold time, VOL's repeats. */
 static void held(uint32_t now)
 {
+    uint32_t t = now;
+
     if (!k.down && now - k.t_band >= sweep_ms(k.key)) {
+        settle(now);
         emit(IG_DOWN, k.key, now);
         k.down = 1;
     }
-    if (k.down && !k.held && now - k.t0 >= s_hold_ms) {
-        emit(IG_HOLD, k.key, now);
+    /* the finger is already off (the release edge; the band stays until the voltage is back at
+     * idle, up to ~200 ms later): the hold and the repeats stop where it let go */
+    if (k.key != KEY_POWER && k.edge_release && (int32_t)(k.edge_release - k.t0) > 0 &&
+        now - k.edge_release <= 250u)
+        t = k.edge_release;
+    if (k.down && !k.held && t - k.t0 >= s_hold_ms) {
+        emit(IG_HOLD, k.key, t);
         k.held = 1;
     }
     if (k.down && is_vol(k.key))
-        emit_repeat(now);
+        emit_repeat(t);
 }
 
 static void sample(int key, uint32_t now)
@@ -311,9 +348,10 @@ static void sample(int key, uint32_t now)
     }
     if (k.key != KEY_NONE && key != KEY_NONE && k.key != KEY_POWER && key != KEY_POWER) {
         /* one ladder key to another with no release between */
-        if (is_vol(k.key) && is_vol(key) && now - k.t0 >= INPUT_CHORD_MS) {
+        if (is_vol(k.key) && is_vol(key) && k.down && now - k.t_band >= INPUT_CHORD_MS) {
             /* RECHO's chord: one volume key held (a deliberate hold, not the sweep of a soft
              * press), then the ladder reads the other */
+            settle(now);
             emit(IG_CHORD, KEY_CHORD, now);
             k.key = KEY_NONE;
             k.seq_key = KEY_NONE;
@@ -328,6 +366,8 @@ static void sample(int key, uint32_t now)
         k.t_band = now;
         k.down = k.held = 0;
         k.reps = 0;
+        if (!k.settled)
+            k.taps = taps_for(key);
         held(now);
         return;
     }
@@ -343,8 +383,25 @@ static volatile int s_isr;
 static input_event_t s_rep;          /* input_poll: a REPEAT whose steps are still being handed out */
 static unsigned s_rep_left;
 
+/* The press that switched the player on is not a key: the power key counts only once it has been
+ * seen up since boot (a boot by cable arms it at the first sample). Without this the power-on
+ * press arrived as a POWER hold on the first screen (m32, 2026-10-18), where a hold opens the
+ * power menu (DESIGN 1.2). */
+static int s_power_seen_up;
+
 void input_sample(int adc_value, int power, uint32_t now_ms)
 {
+    input_sample_edges(adc_value, power, now_ms, 0, 0);
+}
+
+void input_sample_edges(int adc_value, int power, uint32_t now_ms, uint32_t press_ms, uint32_t release_ms)
+{
+    k.edge_press = press_ms;
+    k.edge_release = release_ms;
+    if (!power)
+        s_power_seen_up = 1;
+    else if (!s_power_seen_up)
+        power = 0;
     sample(power ? KEY_POWER : input_map_adc(adc_value), now_ms);
 }
 

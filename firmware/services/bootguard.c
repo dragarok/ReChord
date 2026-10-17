@@ -1,9 +1,10 @@
 /*
  * bootguard.c -- the crash record and the reset after a fault (bootguard.h).
  *
- * The record lives in the 16 spare bytes above the PCM ring's DMA descriptors (AS_LLI + 8 x 28 B
- * ends at 0x0308FFE0): not in the loaded image, not .bss, not touched by core B. A magic and a
- * check word make random or stale RAM read as "no record".
+ * The record lives in .noinit (firmware_ap.ld): our RAM, not cleared at boot, not touched by
+ * core B. Until 2026-10-18 it sat at 0x0308FFE8, which is the boot ROM's own record (the ROM
+ * writes it at every power-on; whether it reads it at a warm reset is unknown): moved, the
+ * ROM's SRAM is left alone. A magic and a check word make random or stale RAM read as "no record".
  */
 #include <stdint.h>
 
@@ -12,7 +13,8 @@
 #include "drivers/clock.h"
 #include "drivers/panel_io.h"
 
-#define REC        ((volatile bootguard_rec_t *)0x0308FFE8u)
+volatile bootguard_rec_t g_bootguard_rec __attribute__((section(".noinit")));   /* (tests: by symbol) */
+#define REC        (&g_bootguard_rec)
 #define MAGIC      0x44524752u                      /* "RGRD" */
 #define SCB_AIRCR  (*(volatile uint32_t *)0xE000ED0Cu)
 

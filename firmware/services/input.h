@@ -94,6 +94,11 @@ unsigned input_dropped(void);
  * (1 = pressed) at now_ms. Called every INPUT_TICK_MS from core A's SysTick once
  * input_isr_sampling(1); before that (and on the host), input_scan() does it. */
 void input_sample(int adc_value, int power, uint32_t now_ms);
+/* The same with the ladder's edges (drivers: keys_tick; 0 = not known): press_ms when the
+ * reading left idle, release_ms when it rose off the held key's level. A press is then timed from
+ * the finger, not from when its band was stable (which moves 20..100 ms with how fast the voltage
+ * settles and where the samples fall): holds at 500 ms, x2/x3 gaps and held_ms as pressed. */
+void input_sample_edges(int adc_value, int power, uint32_t now_ms, uint32_t press_ms, uint32_t release_ms);
 /* 1: the samples come from the timer (input_scan() then only says the loop is alive). */
 void input_isr_sampling(int on);
 int input_isr_active(void);
