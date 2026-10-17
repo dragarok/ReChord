@@ -3,6 +3,12 @@
 This is the current picture. `STATUS.md` and `HANDOVER.md` are the history of the earlier
 approaches (SDK splice, hybrid fw1/BB) and are kept for reference only.
 
+**512 MB only, so far.** This line targets the 512 MB Echo Mini (`MINIV*.IMG` firmware).
+The differences from the 8 GB board are documented in [BOARD_DIFF_512M.md](BOARD_DIFF_512M.md),
+from a comparison of the stock 512 MB and 8 GB firmware, and selected at build time
+(`BOARD=512m | 8g`). All device testing was done on a single 512 MB unit, the only one we
+have. The 8 GB build has not been tested on hardware.
+
 How each part was learned is in [Sources](#sources): mainly the stock firmware, with RECHO as
 a second reference for some parts.
 

@@ -33,6 +33,13 @@ The RKNanoD SoC has two Cortex-M3 cores. ReChord runs its own code on both:
 
 ## Status (October 2026, 512 MB board, branch `echo512`)
 
+> **512 MB board only, so far.** This work targets the 512 MB Echo Mini (`MINIV*.IMG`
+> firmware). The differences from the 8 GB board come from comparing the stock 512 MB and
+> 8 GB firmware images. They are written up in [`docs/BOARD_DIFF_512M.md`](docs/BOARD_DIFF_512M.md)
+> and selected at build time (`BOARD=512m | 8g`, `firmware/drivers/board.h`). Everything
+> marked "device" was tested on one 512 MB unit, the only one we have. The 8 GB build is
+> untested on hardware.
+
 The 512 MB Echo Mini runs ReChord as its daily firmware:
 - it plays music gapless
 - it works as a USB disk and a USB DAC
