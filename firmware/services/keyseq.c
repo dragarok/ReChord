@@ -12,20 +12,25 @@ void keyseq_init(keyseq_t *k, const keyseq_rule_t *rules, int nrules)
     k->nrules = nrules;
 }
 
-/* Does rule r end the recent events (its last r->n codes, gaps within limit)? */
-static int ends_with(const keyseq_t *k, const keyseq_rule_t *r)
+/* Does rule r end these events (its last r->n codes, gaps within limit)? */
+static int ends_with_in(const uint8_t *code, const uint32_t *t, int n, const keyseq_rule_t *r)
 {
-    int base = k->n - r->n;
+    int base = n - r->n;
 
-    if (r->n < 1 || r->n > k->n)
+    if (r->n < 1 || r->n > n)
         return 0;
     for (int i = 0; i < r->n; i++) {
-        if (k->code[base + i] != r->codes[i])
+        if (code[base + i] != r->codes[i])
             return 0;
-        if (i && k->t[base + i] - k->t[base + i - 1] > r->max_gap_ms)
+        if (i && t[base + i] - t[base + i - 1] > r->max_gap_ms)
             return 0;
     }
     return 1;
+}
+
+static int ends_with(const keyseq_t *k, const keyseq_rule_t *r)
+{
+    return ends_with_in(k->code, k->t, k->n, r);
 }
 
 /* Could rule r still complete: the recent events end with a proper prefix of it
@@ -56,14 +61,14 @@ static const keyseq_rule_t *eval(const keyseq_t *k, uint32_t *wait, int *plen)
     for (int i = 0; i < k->nrules; i++) {
         const keyseq_rule_t *r = &k->rules[i];
 
-        if (ends_with(k, r) && (!best || r->n > best->n))
+        if (!(r->flags & KEYSEQ_ALSO) && ends_with(k, r) && (!best || r->n > best->n))
             best = r;
     }
     for (int i = 0; i < k->nrules; i++) {
         const keyseq_rule_t *r = &k->rules[i];
         int p;
 
-        if ((!best || r->n > best->n) && (p = grows_into(k, r)) > 0) {
+        if (!(r->flags & KEYSEQ_ALSO) && (!best || r->n > best->n) && (p = grows_into(k, r)) > 0) {
             if (r->max_gap_ms > *wait)
                 *wait = r->max_gap_ms;
             if (p > *plen)
@@ -73,12 +78,39 @@ static const keyseq_rule_t *eval(const keyseq_t *k, uint32_t *wait, int *plen)
     return best;
 }
 
+/* The KEYSEQ_ALSO rules over the history: the longest one this event completes goes to k->also
+ * (and the history starts afresh, so its events count once). */
+static void feed_also(keyseq_t *k, uint8_t code, uint32_t t_ms)
+{
+    const keyseq_rule_t *best = 0;
+
+    if (k->hn == KEYSEQ_MAX) {
+        memmove(k->hcode, k->hcode + 1, KEYSEQ_MAX - 1);
+        memmove(k->ht, k->ht + 1, (KEYSEQ_MAX - 1) * sizeof k->ht[0]);
+        k->hn--;
+    }
+    k->hcode[k->hn] = code;
+    k->ht[k->hn] = t_ms;
+    k->hn++;
+    for (int i = 0; i < k->nrules; i++) {
+        const keyseq_rule_t *r = &k->rules[i];
+
+        if ((r->flags & KEYSEQ_ALSO) && ends_with_in(k->hcode, k->ht, k->hn, r) && (!best || r->n > best->n))
+            best = r;
+    }
+    if (best) {
+        k->also = best->action;
+        k->hn = 0;
+    }
+}
+
 int keyseq_feed(keyseq_t *k, uint8_t code, uint32_t t_ms)
 {
     const keyseq_rule_t *best;
     int old = k->pending, ret = KEYSEQ_NONE, plen;
     uint32_t wait;
 
+    feed_also(k, code, t_ms);
     if (k->n == KEYSEQ_MAX) {
         memmove(k->code, k->code + 1, KEYSEQ_MAX - 1);
         memmove(k->t, k->t + 1, (KEYSEQ_MAX - 1) * sizeof k->t[0]);
@@ -116,7 +148,13 @@ int keyseq_feed(keyseq_t *k, uint8_t code, uint32_t t_ms)
 
 int keyseq_poll(keyseq_t *k, uint32_t t_ms)
 {
-    int a = k->pending;
+    int a = k->also;
+
+    if (a != KEYSEQ_NONE) {
+        k->also = KEYSEQ_NONE;
+        return a;
+    }
+    a = k->pending;
 
     if (a == KEYSEQ_NONE || (int32_t)(t_ms - k->pending_until) < 0)
         return KEYSEQ_NONE;

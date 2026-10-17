@@ -25,6 +25,7 @@
 #include "services/config.h"
 #include "services/log.h"
 #include "services/power.h"
+#include "services/queue.h"
 #include "audio/audio.h"
 #include "player.h"
 #include "ui/ui.h"
@@ -269,6 +270,20 @@ void bt_keys_action(int action, uint32_t t_ms)
     case BT_KEY_NEXT:
         if (st == PLAYER_PLAYING || st == PLAYER_PAUSED)
             player_next();
+        break;
+    case BT_KEY_PLAY_MODE:              /* (settings by sequence: services/bt_keys.h) */
+        log_printf("bt: sequence: play mode %s", queue_mode_name(player_cycle_mode()));
+        break;
+    case BT_KEY_VOL_UP:
+    case BT_KEY_VOL_DOWN:
+        if (bt_routed()) {              /* the active volume is the BT volume (volume_follow keeps it) */
+            int db = audio_get_volume_db() + (action == BT_KEY_VOL_UP ? BT_SEQ_DB : -BT_SEQ_DB);
+
+            player_set_volume(db < -90 ? -90 : db > 0 ? 0 : db);
+            log_printf("bt: sequence: BT volume %d dB", audio_get_volume_db());
+        } else {
+            log_printf("bt: sequence: BT volume: not routed to the module");
+        }
         break;
     default:
         break;

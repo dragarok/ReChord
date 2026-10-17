@@ -13,9 +13,18 @@
  *   CA -> BT_KEY_PREV    (stock: 0x1B6; seg33 restarts the track after 3 s)
  *   CB -> BT_KEY_NEXT    (stock: 0x1B5)
  *   CD, CU, CM           recognised and ignored by stock: logged, no action
- * Settings driven by key sequences are NOT implemented: they will be rules in
- * the same table. The matched action goes to bt_keys_action() (weak; the UI
- * glue in startup/ap_bt.c drives the player).
+ * Settings ride on sequences of next/previous (keyseq.h KEYSEQ_ALSO rules: each
+ * key still skips at once, as stock; the setting comes in addition when the
+ * sequence completes). Each is 4 presses with at most BT_SEQ_GAP_MS between
+ * neighbours, and each leaves the player on the track it started on (next = +1,
+ * previous within 3 s of a track's start = -1; seg33's 3 s rule):
+ *   CB CA CB CA  -> BT_KEY_PLAY_MODE  the next play mode (as the player screen's)
+ *   CB CB CA CA  -> BT_KEY_VOL_UP     BT volume + BT_SEQ_DB dB
+ *   CB CA CA CB  -> BT_KEY_VOL_DOWN   BT volume - BT_SEQ_DB dB
+ * (Stock has no such sequences: ReChord's own. CD/CU are not used: what an
+ * earphone sends for its volume keys is unknown until a device log shows it.)
+ * The matched action goes to bt_keys_action() (weak; the UI glue in
+ * startup/ap_bt.c drives the player and the settings).
  */
 #ifndef RECHORD_BT_KEYS_H
 #define RECHORD_BT_KEYS_H
@@ -28,7 +37,13 @@ enum {
     BT_KEY_PLAY,
     BT_KEY_PREV,
     BT_KEY_NEXT,
+    BT_KEY_PLAY_MODE,                  /* sequences (settings) from here on */
+    BT_KEY_VOL_UP,
+    BT_KEY_VOL_DOWN,
 };
+
+#define BT_SEQ_GAP_MS 2000u            /* largest time between two keys of a sequence */
+#define BT_SEQ_DB     3                /* BT volume step of a sequence */
 
 void bt_keys_init(void);
 /* One key frame: code = its letter ('P' 'C' 'A' 'B' 'D' 'U' 'M'), t_ms = when it came. */

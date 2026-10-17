@@ -5,12 +5,15 @@
 #include "keyseq.h"
 #include "log.h"
 
-/* One-event rules: stock's own mapping (bt_keys.h). Sequences go here later. */
+/* One-event rules: stock's own mapping; then the settings sequences (bt_keys.h). */
 static const keyseq_rule_t k_rules[] = {
-    { 1, { 'P' }, 0, BT_KEY_PAUSE },
-    { 1, { 'C' }, 0, BT_KEY_PLAY },
-    { 1, { 'A' }, 0, BT_KEY_PREV },
-    { 1, { 'B' }, 0, BT_KEY_NEXT },
+    { 1, { 'P' }, 0, BT_KEY_PAUSE, 0 },
+    { 1, { 'C' }, 0, BT_KEY_PLAY, 0 },
+    { 1, { 'A' }, 0, BT_KEY_PREV, 0 },
+    { 1, { 'B' }, 0, BT_KEY_NEXT, 0 },
+    { 4, { 'B', 'A', 'B', 'A' }, BT_SEQ_GAP_MS, BT_KEY_PLAY_MODE, KEYSEQ_ALSO },
+    { 4, { 'B', 'B', 'A', 'A' }, BT_SEQ_GAP_MS, BT_KEY_VOL_UP, KEYSEQ_ALSO },
+    { 4, { 'B', 'A', 'A', 'B' }, BT_SEQ_GAP_MS, BT_KEY_VOL_DOWN, KEYSEQ_ALSO },
 };
 
 static keyseq_t s_seq;
@@ -24,9 +27,10 @@ __attribute__((weak)) void bt_keys_action(int action, uint32_t t_ms)
 
 const char *bt_keys_name(int action)
 {
-    static const char *const k[] = { "none", "pause", "play", "prev", "next" };
+    static const char *const k[] = { "none", "pause", "play", "prev", "next", "play mode", "BT volume up",
+                                     "BT volume down" };
 
-    return action >= 0 && action <= BT_KEY_NEXT ? k[action] : "?";
+    return action >= 0 && action <= BT_KEY_VOL_DOWN ? k[action] : "?";
 }
 
 void bt_keys_init(void)
