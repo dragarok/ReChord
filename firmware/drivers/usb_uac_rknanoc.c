@@ -363,12 +363,51 @@ static void stream_on(int alt)
     fb_arm(next_odd());
 }
 
+
+#define GI_GOUTNAKEFF (1u << 7)
+/* Disabling an endpoint as the DWC2 databook has it (Linux dwc2_hsotg_ep_stop_xfr): OUT = the
+ * global OUT NAK first (DCTL.SGOUTNak, GINTSTS.GOUTNakEff), then EPDis|SNAK, EPDisbld awaited,
+ * CGOUTNak; IN = SNAK, DIEPINT.INEPNakEff awaited, EPDis|SNAK, EPDisbld awaited, then its TX
+ * FIFO flushed (a disable does not empty it). */
+static void ep_out_stop(unsigned ep)
+{
+    uint32_t n;
+
+    if (!(DOEPCTL(ep) & EP_ENA))
+        return;
+    OTG(DCTL) |= 1u << 9;
+    for (n = 0; n < 100000u && !(OTG(GINTSTS) & GI_GOUTNAKEFF); n++)
+        ;
+    DOEPCTL(ep) |= EP_DIS | EP_SNAK;
+    for (n = 0; n < 100000u && !(DOEPINT(ep) & 2u); n++)
+        ;
+    DOEPINT(ep) = 2u;
+    OTG(DCTL) |= 1u << 10;
+}
+
+static void ep_in_stop(unsigned ep)
+{
+    uint32_t n;
+
+    if (!(DIEPCTL(ep) & EP_ENA))
+        return;
+    DIEPCTL(ep) |= EP_SNAK;
+    for (n = 0; n < 100000u && !(DIEPINT(ep) & (1u << 6)); n++)
+        ;
+    DIEPINT(ep) = 1u << 6;
+    DIEPCTL(ep) |= EP_DIS | EP_SNAK;
+    for (n = 0; n < 100000u && !(DIEPINT(ep) & 2u); n++)
+        ;
+    DIEPINT(ep) = 2u;
+    OTG(GRSTCTL) = (uint32_t)ep << 6 | 0x20u;
+    for (n = 0; n < 100000u && (OTG(GRSTCTL) & 0x20u); n++)
+        ;
+}
+
 static void stream_off(void)
 {
-    if (DOEPCTL(EP_AUDIO) & EP_ENA)
-        DOEPCTL(EP_AUDIO) |= EP_DIS | EP_SNAK;
-    if (DIEPCTL(EP_AUDIO) & EP_ENA)
-        DIEPCTL(EP_AUDIO) |= EP_DIS | EP_SNAK;
+    ep_out_stop(EP_AUDIO);
+    ep_in_stop(EP_AUDIO);
     DOEPCTL(EP_AUDIO) = 0;
     DIEPCTL(EP_AUDIO) = 0;
     s.alt = 0;
@@ -834,14 +873,14 @@ static void uac_irq(void)
         OTG(GINTSTS) = GI_INCOMPISOOUT;
         s.st.missed++;
         if (s.alt) {
-            DOEPCTL(EP_AUDIO) |= EP_DIS | EP_SNAK;
+            ep_out_stop(EP_AUDIO);
             iso_out_arm();
         }
     }
     if (gi & GI_INCOMPISOIN) {                       /* feedback armed for the other parity */
         OTG(GINTSTS) = GI_INCOMPISOIN;
         if (s.alt) {                                 /* (end of the polled frame: at high speed */
-            DIEPCTL(EP_AUDIO) |= EP_DIS | EP_SNAK;   /* every poll has that frame's parity; at full */
+            ep_in_stop(EP_AUDIO);                    /* every poll has that frame's parity; at full */
             fb_arm(s.high ? !s.fb_odd : next_odd()); /* speed the host polls the next frame too) */
         }
     }
@@ -977,6 +1016,9 @@ int usb_uac_run(int (*tick)(void), void (*status)(const usb_uac_status_t *))
     NVIC_ICER0 = 1u << USB_IRQ;
     OTG(GAHBCFG) &= ~1u;
     usb_irq_hook = 0;
+    if (s.alt)                                       /* left mid-stream (MENU, an unplug): the endpoints */
+        stream_off();                                /* stopped as the databook says before */
+    hid_off();                                       /* usb_dwc2_stop() flushes every TX FIFO */
     log_printf("uac: end (%d): packets %u, dropped %u, underruns %u, missed %u", ret, (unsigned)s.st.packets,
                (unsigned)s.st.dropped, (unsigned)s.st.underruns, (unsigned)s.st.missed);
     usb_dwc2_stop();
