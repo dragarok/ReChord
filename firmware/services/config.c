@@ -11,6 +11,7 @@
 #include "log.h"
 #include "queue.h"
 #include "drivers/clock.h"
+#include "theme/theme.h"
 
 config_t g_cfg;
 
@@ -50,6 +51,7 @@ void config_defaults(void)
     g_cfg.bt = 0;
     g_cfg.bt_volume = CFG_BT_VOLUME_UNSET;
     g_cfg.display = CFG_DISPLAY_AUTO;
+    g_cfg.theme = 0;                         /* Classic */
 }
 
 void config_reset(void)
@@ -106,6 +108,8 @@ static void set(const char *k, const char *v)
         g_cfg.tags = (uint8_t)i;
     else if (!strcmp(k, "cpu") && (i = pick(v, k_cpu, 2)) >= 0)
         g_cfg.cpu = (uint8_t)i;
+    else if (!strcmp(k, "theme") && (i = theme_index(v)) >= 0)
+        g_cfg.theme = (uint8_t)i;
     else if (!strcmp(k, "display") && (i = pick(v, k_display, 5)) >= 0)
         g_cfg.display = (uint8_t)i;
     else if (!strcmp(k, "usb_out") && (i = pick(v, k_off_on, 2)) >= 0)
@@ -232,6 +236,13 @@ static int text_of(char *t, unsigned long cap)
         return n;
     if (g_cfg.display != CFG_DISPLAY_AUTO && g_cfg.display < 5u) {
         int d = snprintf(t + n, cap - (unsigned long)n, "display=%s\n", k_display[g_cfg.display]);
+
+        if (d < 0 || (unsigned long)(n + d) >= cap)
+            return n + d;
+        n += d;
+    }
+    if (g_cfg.theme && theme_name(g_cfg.theme)) {   /* (written only when not Classic) */
+        int d = snprintf(t + n, cap - (unsigned long)n, "theme=%s\n", theme_name(g_cfg.theme));
 
         if (d < 0 || (unsigned long)(n + d) >= cap)
             return n + d;

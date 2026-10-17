@@ -25,6 +25,7 @@ static int                s_depth;
 static int                s_running;
 static dirty_rect_t       s_dirty[UI_DIRTY_MAX];
 static int                s_dirty_count;
+unsigned                  ui_inval_seq;    /* every ui_invalidate() call (nav.c: did a key change anything?) */
 
 /* ---- dirty rectangles -------------------------------------------------- */
 
@@ -98,6 +99,7 @@ void ui_invalidate(int x0, int y0, int x1, int y1)
         y1 = DISPLAY_H - 1;
     if (x0 > x1 || y0 > y1)
         return;
+    ui_inval_seq++;
     r.x0 = x0; r.y0 = y0; r.x1 = x1; r.y1 = y1;
     if (s_dirty_count == UI_DIRTY_MAX) {
         /* full: merge the pair that costs least merged (the new one included) */
