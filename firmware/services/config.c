@@ -44,6 +44,8 @@ void config_defaults(void)
     g_cfg.usb_out = 0;                       /* until the board's VBUS supply is known (USB-C probe) */
     g_cfg.usb_vbus = 0;
     g_cfg.usb_out_ma = 500;      /* stock's default: the phone's battery is not the player's charger */
+    g_cfg.bt = 0;
+    g_cfg.bt_volume = CFG_BT_VOLUME_UNSET;
 }
 
 void config_reset(void)
@@ -63,6 +65,11 @@ static int pick(const char *v, const char *const *opts, int n)
         if (!strcmp(v, opts[i]))
             return i;
     return -1;
+}
+
+static int hexval(char c)
+{
+    return c >= '0' && c <= '9' ? c - '0' : c >= 'A' && c <= 'F' ? c - 'A' + 10 : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1;
 }
 
 static void set(const char *k, const char *v)
@@ -110,7 +117,28 @@ static void set(const char *k, const char *v)
             g_cfg.volume = CFG_VOLUME_MUTE;
         else if ((v[0] == '-' || (v[0] >= '0' && v[0] <= '9')) && (i = atoi(v)) >= -90 && i <= 0)
             g_cfg.volume = (int16_t)i;
-    } else if (!strcmp(k, "browse"))
+    } else if (!strcmp(k, "bt") && (i = pick(v, k_off_on, 2)) >= 0)
+        g_cfg.bt = (uint8_t)i;
+    else if (!strcmp(k, "bt_volume") && (v[0] == '-' || (v[0] >= '0' && v[0] <= '9')) &&
+             (i = atoi(v)) >= -90 && i <= 0)
+        g_cfg.bt_volume = (int16_t)i;
+    else if (!strcmp(k, "bt_mac")) {
+        uint8_t m[6];
+
+        for (i = 0; i < 6; i++) {           /* "AA:BB:CC:DD:EE:FF" (the libc's strtoul is decimal only) */
+            int hi = hexval(v[i * 3]), lo = hi < 0 ? -1 : hexval(v[i * 3 + 1]);
+
+            if (lo < 0 || (i < 5 && v[i * 3 + 2] != ':'))
+                break;
+            m[i] = (uint8_t)(hi << 4 | lo);
+        }
+        if (i == 6 && !v[17]) {
+            memcpy(g_cfg.bt_mac, m, sizeof m);
+            g_cfg.bt_paired = 1;
+        }
+    } else if (!strcmp(k, "bt_name"))
+        snprintf(g_cfg.bt_name, sizeof g_cfg.bt_name, "%s", v);
+    else if (!strcmp(k, "browse"))
         snprintf(g_cfg.browse, sizeof g_cfg.browse, "%s", v);
     else if (!strcmp(k, "cursor"))
         g_cfg.cursor = (uint16_t)atoi(v);
@@ -163,7 +191,9 @@ int config_load(void)
 
 static int text_of(char *t, unsigned long cap)
 {
-    char so[8], ao[8], vol[8];
+    char so[8], ao[8], vol[8], bt[96];
+    const uint8_t *m = g_cfg.bt_mac;
+    int n;
 
     if (k_screen_off[g_cfg.screen_off % 5u])
         snprintf(so, sizeof so, "%u", k_screen_off[g_cfg.screen_off % 5u]);
@@ -177,7 +207,12 @@ static int text_of(char *t, unsigned long cap)
         snprintf(vol, sizeof vol, "mute");
     else
         snprintf(vol, sizeof vol, "%d", g_cfg.volume);
-    return snprintf(t, cap,
+    if (g_cfg.bt_paired)
+        snprintf(bt, sizeof bt, "bt_mac=%02X:%02X:%02X:%02X:%02X:%02X\nbt_name=%s\n",
+                 m[0], m[1], m[2], m[3], m[4], m[5], g_cfg.bt_name);
+    else
+        bt[0] = 0;
+    n = snprintf(t, cap,
                     "# ReChord settings (RECHO's format): key=value, one per line. Unknown keys are ignored.\n"
                     "play=%s\nbrightness=%u\nscreen_off=%s\nauto_off=%s\nusb=%s\nresume=%s\nstrip=%s\n"
                     "tags=%s\ncpu=%s\ndac_mhz=%u\ndac_charge=%s\nusb_out=%s\nusb_vbus=%s\nusb_out_ma=%u\nvolume=%s\n"
@@ -187,6 +222,12 @@ static int text_of(char *t, unsigned long cap)
                     k_cpu[g_cfg.cpu & 1u], g_cfg.dac_mhz, k_dac_charge[g_cfg.dac_charge % 3u],
                     k_off_on[g_cfg.usb_out & 1u], k_usb_vbus[g_cfg.usb_vbus & 1u], g_cfg.usb_out_ma, vol, g_cfg.browse, g_cfg.cursor,
                     g_cfg.track[0] ? "track=" : "", g_cfg.track, g_cfg.track[0] ? "\n" : "");
+    if (n < 0 || (unsigned long)n >= cap)
+        return n;
+    if (g_cfg.bt_volume == CFG_BT_VOLUME_UNSET)
+        return n + snprintf(t + n, cap - (unsigned long)n, "bt=%s\n%s", k_off_on[g_cfg.bt & 1u], bt);
+    return n + snprintf(t + n, cap - (unsigned long)n, "bt=%s\nbt_volume=%d\n%s", k_off_on[g_cfg.bt & 1u],
+                        g_cfg.bt_volume, bt);
 }
 
 int config_save(void)

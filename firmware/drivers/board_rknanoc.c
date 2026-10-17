@@ -15,6 +15,7 @@
 #include <stdint.h>
 
 #include "board.h"
+#include "bt_jieli.h"
 #include "panel_io.h"
 
 typedef struct {
@@ -54,6 +55,8 @@ void board_early_init(void)
      * it in Gpio_Init (MINIV390 0x03053AF4 -> 0x03053056(0)), the SDK before muxing GPIO2.14/2.15
      * ("JTAG0", app_main.c), and GPIO2.15 is the panel's reset. */
     REG32(0x500100C4u) = 0x00010000u;
+    bt_early_pins();                     /* the BT module off, its pins low (stock Main step 1; after
+                                          * FORCE_JTAG is off: GPIO2.14 is one of the JTAG pins) */
 #if BOARD == BOARD_512M
     out(GPIO0, 0, 14, 1);
     out(GPIO2, 2, 1, 1);
@@ -87,6 +90,7 @@ int board_usb_supply(int mode)
 /* Called by board_power_off() before the supply is cut. */
 void board_power_off_pins(void)
 {
+    bt_board_off();                      /* the BT module off first (stock ram:0306745c) */
 #if BOARD == BOARD_512M
     out(GPIO0, 0, 14, 0);
     out(GPIO2, 2, 1, 0);

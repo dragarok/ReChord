@@ -32,7 +32,15 @@ typedef struct {
     char browse[128];            /* the browser's folder */
     uint16_t cursor;             /* its highlighted row */
     char track[160];             /* the queue: "f:<clus>:<folder>" or "t:<clus>:<tree root>", "" = none */
+    /* Bluetooth (drivers/bt_jieli.h): stock keeps the same in its settings block 0x0301D13C:
+     * +0x34b enabled, +0x15 BT volume, +0x23e MAC, +0x328 name (08_bluetooth.md §2.4) */
+    uint8_t bt;                  /* 1 = module on at boot (and reconnect to bt_mac) */
+    uint8_t bt_paired;           /* bt_mac / bt_name hold a remembered device */
+    int16_t bt_volume;           /* dB while connected, CFG_BT_VOLUME_UNSET = take the jack's */
+    uint8_t bt_mac[6];
+    char bt_name[33];
 } config_t;
+#define CFG_BT_VOLUME_UNSET 127
 
 extern config_t g_cfg;
 

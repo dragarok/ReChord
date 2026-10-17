@@ -50,7 +50,8 @@ AP_STARTUP_SRCS := \
   firmware/startup/ap_startup.c \
   firmware/startup/vectors.c \
   firmware/startup/ap_main.c \
-  firmware/startup/ap_ui.c
+  firmware/startup/ap_ui.c \
+  firmware/startup/ap_bt.c
 
 # UI layer (same set as $(UI_SRCS) in firmware/ui/ui.mk).
 AP_UI_SRCS := \
@@ -78,7 +79,8 @@ AP_DRIVER_SRCS := \
   firmware/drivers/usb_out_rknanoc.c \
   firmware/drivers/dac_cs43131.c \
   firmware/drivers/board_rknanoc.c \
-  firmware/drivers/clock_rknanoc.c
+  firmware/drivers/clock_rknanoc.c \
+  firmware/drivers/bt_jieli.c
 
 # Services: settings/log/input + the target fs backend (same set as
 # $(SERVICES_TARGET_SRCS) in firmware/services/services.mk).
@@ -97,7 +99,10 @@ AP_SERVICE_SRCS := \
   firmware/services/dirlist.c \
   firmware/services/queue.c \
   firmware/services/config.c \
-  firmware/services/power.c
+  firmware/services/power.c \
+  firmware/services/bt_proto.c \
+  firmware/services/keyseq.c \
+  firmware/services/bt_keys.c
 
 # Theme module (same set as $(THEME_SRCS) in firmware/theme/theme.mk).
 AP_THEME_SRCS := \
