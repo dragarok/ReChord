@@ -48,6 +48,7 @@
 #include "board.h"
 #include <stdint.h>
 
+#include "bt_jieli.h"
 #include "dac_cs43131.h"
 #include "clock.h"
 #include "services/watchdog.h"
@@ -836,8 +837,15 @@ int dac_init(uint32_t rate_hz)
      * leaving it asserted silences a perfectly configured DAC. Then the
      * mute/volume reg 0x010009 ramps 0xFF -> volume (FUN_03055f48); the
      * end value is written directly here. */
-    dac_gpio_out(2, 14, 1);
-    dac_gpio_out(2, 0, 0);
+    if (bt_routed()) {
+        /* Bluetooth connected: stock's play start keeps the path to the module (MINIV390
+         * seg33 0x03087688: 0x0301D114 set -> GPIO2.0 = 1, GPIO2.14 = 0; drivers/bt_jieli.h) */
+        dac_gpio_out(2, 0, 1);
+        dac_gpio_out(2, 14, 0);
+    } else {
+        dac_gpio_out(2, 14, 1);
+        dac_gpio_out(2, 0, 0);
+    }
     dac_gpio_out(1, 4, 1);            /* amp enable again (ref)           */
     dac_map_write(0x00010009, 0x00);   /* unmute                          */
     /* Ref FUN_03055ecc again right before the feed. */

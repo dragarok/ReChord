@@ -141,6 +141,7 @@ WEAK_HANDLER(WDT_IRQHandler);          /* 8 */
 WEAK_HANDLER(TIMER1_IRQHandler);       /* 18 */
 WEAK_HANDLER(TIMER0_IRQHandler);       /* 19 */
 WEAK_HANDLER(SARADC_IRQHandler);       /* 20 */
+WEAK_HANDLER(UART1_IRQHandler);        /* 25 (drivers/bt_jieli.c) */
 WEAK_HANDLER(I2S1_IRQHandler);         /* 32 */
 WEAK_HANDLER(GPIO2_IRQHandler);        /* 36 */
 WEAK_HANDLER(GPIO0_IRQHandler);        /* 38 */
@@ -175,7 +176,9 @@ const uint32_t ap_vectors[16 + AP_IRQS]
     (uint32_t)&TIMER1_IRQHandler,           /* 18                            */
     (uint32_t)&TIMER0_IRQHandler,           /* 19                            */
     (uint32_t)&SARADC_IRQHandler,           /* 20                            */
-    D, D, D, D, D, D,                       /* UART5..UART0                  */
+    D, D, D, D,                             /* UART5 UART4 UART3 UART2       */
+    (uint32_t)&UART1_IRQHandler,            /* 25 UART1: the BT module       */
+    D,                                      /* UART0                         */
     D, D, D, D, D,                          /* SPI1 SPI0 I2C2 I2C1 I2C0      */
     (uint32_t)&I2S1_IRQHandler,             /* 32                            */
     D, D, D,                                /* I2S0 HIFI PMU                 */
