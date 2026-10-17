@@ -35,13 +35,14 @@
 #include "ui/screens/screens.h"
 
 extern const ui_screen_t bt_screen;   /* ap_bt.c */
+void ap_bg_poll(void);                /* ap_bg.c: the queued writes, the log, the settings */
+void ap_bg_sync(void);
 void bt_app_init(void);
 void bt_app_tick(void);
 void bt_app_external(int streaming);
 
 static int s_adc = 1023, s_adc2 = 1023, s_power, s_cable, s_phy_parked;
 static int s_power_press_ok;
-static uint32_t s_log_flushed;  /* time_ms() of the last periodic log write */
 static uint32_t s_shortcut_at;  /* VOL+/VOL- chord: a shortcut key may follow within 2 s */
 static uint32_t s_vol_at;       /* the last volume key press, and the volume before it */
 static int s_vol_before;  /* the power key's current press began after boot's was released */
@@ -81,7 +82,7 @@ static void emmc_probe(void)
         snprintf(s_emmc, sizeof s_emmc, "%uM u%x", (unsigned)(emmc_sectors() >> 11),
                  (unsigned)(s_user = user));
     if (s_user)
-        fs_target_mount_rw(0, "Internal", emmc_read, emmc_write, s_user);
+        fs_target_mount_rw(0, "Internal", emmc_read, emmc_write_async, s_user);
     text_fonts_load();                           /* the fonts module from our slot (drivers/text.h) */
 }
 
@@ -144,13 +145,48 @@ static void update_progress(const char *what, uint32_t done, uint32_t total)
     display_flush_rows(8 + 2 * 14, 8 + 2 * 14 + 7);
 }
 
+/* A screen that runs its own loop keeps what the main loop serves going: the music, the storage
+ * queue and log, the BT module (audit bug 3: the cable question starved the input ring). */
+static int s_bt_ready;                    /* bt_app_init() ran (ask() runs at boot too) */
+
+static void pump(void)
+{
+    (void)player_process();
+    ap_bg_poll();
+    panel_io_poll();                      /* (the display trial's 5 s count goes on in a prompt) */
+    if (s_bt_ready)
+        bt_app_tick();
+}
+
+/* The gestures the screens' events come from, in the log (DESIGN 3.3: "ui: key PLAY.x2 on player
+ * t=..."; the tests time holds and multi-presses by them). Left out, to keep the 4 KiB RAM log for
+ * the rest: every DOWN, VOL+/VOL-'s taps and holds (the old "ui: key up/down" lines say those), and
+ * the multi-press window closing but for PLAY's (its x2/x3 label). */
+static void log_gesture(const input_event_t *g)
+{
+    const ui_screen_t *top = ui_top_screen();
+
+    if (g->gesture == IG_DOWN || (g->gesture == IG_END && g->key != KEY_SELECT) ||
+        ((g->key == KEY_UP || g->key == KEY_DOWN) && (g->gesture == IG_TAP || g->gesture == IG_HOLD)))
+        return;
+    if (g->gesture == IG_REPEAT)
+        log_printf("ui: key %s.repeat on %s t=%u held=%u steps=%u n=%u", input_key_name(g->key),
+                   top ? top->name : "-", (unsigned)g->t_ms, (unsigned)g->held_ms, (unsigned)g->steps,
+                   (unsigned)g->repeat);
+    else
+        log_printf("ui: key %s.%s on %s t=%u held=%u", input_key_name(g->key), input_gesture_name(g),
+                   top ? top->name : "-", (unsigned)g->t_ms, (unsigned)g->held_ms);
+}
+
 /* KEY_SELECT = yes; BACK / power = no; any = 1 with any_key. */
 static int ask(int any_key)
 {
     input_event_t ev;
 
-    while (keys_power())
+    while (keys_power()) {
+        pump();
         cpu_wait_tick();
+    }
     input_mock_clear();
     for (;;) {
         input_scan(keys_adc(), keys_power());
@@ -166,6 +202,7 @@ static int ask(int any_key)
             if (ev.type == KEY_BACK || ev.type == KEY_POWER)
                 return 0;
         }
+        pump();
         cpu_wait_tick();
     }
 }
@@ -243,6 +280,7 @@ static void save_state(const char *why)
     }
     config_save();
     log_flush(why);
+    ap_bg_sync();                        /* (everything queued on the card before it ends) */
 }
 
 /* RECHO's order (docs/RECHO_POWER_CFG.md C.6): stop, save, say so, 500 ms,
@@ -303,6 +341,7 @@ static int detect_wait(int want, uint32_t ms, uint32_t *took)
         input_scan(keys_adc(), keys_power());
         if (input_poll(&ev) > 0 && ev.type == KEY_BACK)
             return -1;
+        pump();
         cpu_wait_tick();
     }
     *took = ms;
@@ -397,7 +436,7 @@ static void usb_session(void)
     line(1, "eject on the PC or press power");
     display_flush_rows(0, DISPLAY_H - 1);
     r = usb_msc_run(luns, 2, keys_power, &rd, &wr);
-    fs_target_mount_rw(0, "Internal", emmc_read, emmc_write, s_user);   /* host may have written */
+    fs_target_mount_rw(0, "Internal", emmc_read, emmc_write_async, s_user);   /* host may have written */
     snprintf(s_usb, sizeof s_usb, "x%d r%uM w%uM", r, (unsigned)(rd >> 11), (unsigned)(wr >> 11));
     log_printf("usb: disk session ended: exit %d, read %u MB, written %u MB, cable %d", r,
                (unsigned)(rd >> 11), (unsigned)(wr >> 11), usb_cable());
@@ -742,7 +781,7 @@ static void battery_info_run(void)
             line(6, buf);
             display_flush_rows(0, DISPLAY_H - 1);
         }
-        (void)player_process();          /* the music goes on meanwhile */
+        pump();                          /* the music goes on meanwhile */
         input_scan(keys_adc(), keys_power());
         if (input_poll(&ev) > 0) {
             power_activity();
@@ -821,6 +860,7 @@ static void usb_probe_menu(void)
         input_scan(keys_adc(), keys_power());
         if (input_poll(&ev) > 0 && ev.adc_value != INPUT_ADC_REPEAT)
             break;
+        pump();
         cpu_wait_tick();
     }
     ui_invalidate_all();
@@ -1079,6 +1119,7 @@ static void usb_dac_session(void)
  * waits for 5 s without a key; its PHY bring-up cuts the DAC's supply, so never while the
  * player plays (or is paused). */
 static uint32_t s_wake_due;              /* time_ms() from which usb_wake() runs (0: not due) */
+static int s_cable_seen;                 /* a cable was in since boot (before: the boot's own wake) */
 
 static void usb_wake(const char *why)
 {
@@ -1110,10 +1151,12 @@ static void cable_connected(void)
         line(3, "MENU: USB DAC");
         line(4, "BACK: charge only");
         display_flush_rows(0, DISPLAY_H - 1);
-        while (keys_power())
+        while (keys_power()) {
+            pump();
             cpu_wait_tick();
+        }
         input_mock_clear();
-        for (;;) {                       /* PLAY, MENU or BACK/power */
+        for (;;) {                       /* PLAY, MENU or BACK/power (the music plays on meanwhile) */
             input_scan(keys_adc(), keys_power());
             if (input_poll(&ev) > 0 && ev.adc_value != INPUT_ADC_REPEAT) {
                 disk = ev.type == KEY_SELECT;
@@ -1123,6 +1166,7 @@ static void cable_connected(void)
             }
             if (!usb_cable())
                 break;
+            pump();
             cpu_wait_tick();
         }
         ui_invalidate_all();
@@ -1177,6 +1221,7 @@ static void rockusb_flow(const char *why)
 {
     log_printf("rockusb: %s", why);
     log_flush("rockusb");                        /* (if the storage lets us) */
+    ap_bg_sync();
     power_screen(1);
     for (;;) {
         screen("USB recovery (boot ROM)");
@@ -1323,7 +1368,12 @@ static void recovery_menu(void)
 void ap_ui_loop(void)
 {
     input_event_t ev;
+    uint32_t t_first = 0;
 
+    log_set_sync(emmc_sync);   /* a named log flush is on the disk when it returns (log.h) */
+    input_set_clock(time_ms);
+    input_set_observer(log_gesture);
+    keys_isr_start();     /* the keys sampled every 10 ms from now on (ap_tick.c), whatever runs */
     boot_key_sample();    /* first: the keys work whatever comes after */
     if (s_boot_key == KEY_DOWN)   /* before our storage driver runs at all (it might be what fails) */
         rockusb_flow("VOL- held at power-on");
@@ -1358,10 +1408,11 @@ void ap_ui_loop(void)
     queue_set_mode(g_cfg.play);
     audio_set_volume_db(g_cfg.volume == CFG_VOLUME_MUTE ? -90 : g_cfg.volume);
     log_printf("cfg: play %s, volume %d, resume %u", queue_mode_name(g_cfg.play), g_cfg.volume, g_cfg.resume);
-    log_flush("boot");
+    log_flush_async("boot");     /* (on the disk within a few passes: not ahead of the first frame) */
     bootcrumb(BC_POWER);
     power_init();
     bt_app_init();                   /* the BT module on only if the setting says so (ap_bt.c) */
+    s_bt_ready = 1;
     bootcrumb(BC_UI_INIT);
     ui_init();
     menu_screen_bind(&k_root);
@@ -1446,17 +1497,18 @@ void ap_ui_loop(void)
             if (!usb_out_active())
                 usb_dwc2_park();         /* (charge only: no session parked it) */
         } else if (!cable && !s_phy_parked && !usb_out_active()) {
-            if (player_get_state() == PLAYER_STOPPED)
-                usb_wake("boot");        /* no cable at boot: so a later plug is seen */
-            else
-                s_wake_due = time_stamp(time_ms());
+            /* no cable at boot: the comparators woken so a later plug is seen, but after the first
+             * screen is up (the sequence holds the loop ~890 ms; it was the first pass's whole
+             * "keys+events 1362", OURS_AUDIT 3.4); the keys are sampled meanwhile (ap_tick.c) */
+            s_wake_due = time_stamp(time_ms() + 300u);
         } else if (!cable && s_cable) {
             s_wake_due = time_stamp(time_ms() + 1500u);   /* the cable out: again, once it is gone */
         }
         if (s_wake_due && !cable && time_ms() - s_wake_due < 0x80000000u &&
-            player_get_state() == PLAYER_STOPPED && power_key_idle_ms() >= 5000u)
-            usb_wake("unplug");          /* (paused: a resume would find the DAC unpowered) */
+            player_get_state() == PLAYER_STOPPED && power_key_idle_ms() >= (s_cable_seen ? 5000u : 1000u))
+            usb_wake(s_cable_seen ? "unplug" : "boot");   /* (paused: a resume would find the DAC unpowered) */
         s_phy_parked = 1;
+        s_cable_seen |= cable;
         s_cable = cable;
         usb_dwc2_idle_tick();            /* the armed PHY held after USB_ARM_MS */
         usb_out_tick();
@@ -1489,6 +1541,9 @@ void ap_ui_loop(void)
         s_adc2 = adc2;
         s_power = power;
         input_scan(adc, power);
+        /* VOL held: the volume's pace on Now Playing and with the screen off, the lists' elsewhere */
+        input_set_repeat(!power_screen_on() || ui_top_screen() == &player_screen ? INPUT_REPEAT_VOLUME :
+                         INPUT_REPEAT_LIST);
 
         while (input_poll(&ev) > 0) {
             static const char *const k_names[] = { "none", "up", "down", "select", "back", "power", "menu", "chord" };
@@ -1538,29 +1593,9 @@ void ap_ui_loop(void)
         /* audio pump + Now Playing sync (no-ops without a playing track) */
         (void)player_process();
         t_play = time_ms();
-        config_poll();
         bootguard_poll();                /* a fault record is cleared after a minute of normal running */
         panel_io_poll();                 /* the VOP trial's marker cleared after 5 s of frames */
-        /* the RAM ring keeps the oldest lines when full: write it out once half full
-         * (at most once a minute), so a long session's log reaches ECHOLOG.TXT whole */
-        /* (any pending line within 10 s: a hang that needs RST loses only those; 2026-10-16 the
-         * device lost a whole playback session's lines that way) */
-        /* While a track plays, core A feeds core B from storage and a log append stalls it: one took
-         * 618 ms on the SD NAND (device 2026-10-16, "slow pass ... rest 618"), and playback stuttered
-         * every 13..18 s. So during playback only a ring 3/4 full is written. */
-        if (player_get_state() == PLAYER_PLAYING ? log_bytes() > 3072u :
-            ((log_bytes() > 0u && time_ms() - s_log_flushed >= 10000u) ||
-             (log_bytes() > 3072u && time_ms() - s_log_flushed >= 5000u))) {   /* (a burst) */
-            uint32_t t0 = time_ms();
-            int rc;
-
-            s_log_flushed = t0;
-            rc = log_flush(NULL);
-            if (rc != 0 || time_ms() - t0 >= 100u) {
-                log_printf("log: flush %d in %u ms", rc, (unsigned)(time_ms() - t0));
-                bootcrumb_kv(BCK_LOG_FLUSH, (uint32_t)(time_ms() - t0) | (uint32_t)(rc & 0xFF) << 24);
-            }
-        }
+        ap_bg_poll();                    /* queued writes, the log, the settings: never waits (ap_bg.c) */
         switch (power_poll(player_get_state() == PLAYER_PLAYING, 0)) {
         case POWER_OFF_IDLE:
             power_off(NULL);
@@ -1598,6 +1633,32 @@ void ap_ui_loop(void)
             if (now - t_pass > s_slowest && now - t_pass >= 300u) {
                 s_slowest = now - t_pass;
                 bootcrumb_set(BCK_SLOW_PASS, s_slowest | (uint32_t)ui_stack_depth() << 24);
+            }
+            static uint32_t s_worst, s_worst_at, s_worst_parts[4];
+            static const char *s_worst_on;
+
+            if (!t_first) {
+                t_first = now;
+                s_worst_at = time_stamp(now);
+                log_printf("ui: first frame at %u ms", (unsigned)now);
+            }
+            if (now - t_pass > s_worst) {    /* the worst pass of every 10 s, 50 ms or more (300 and more
+                                              * has its own "slow pass" line) */
+                s_worst = now - t_pass;
+                s_worst_parts[0] = t_keys - t_pass;
+                s_worst_parts[1] = t_play - t_keys;
+                s_worst_parts[2] = t_draw - t_play;
+                s_worst_parts[3] = now - t_draw;
+                s_worst_on = ui_top_screen() ? ui_top_screen()->name : "-";
+            }
+            if (now - s_worst_at >= 10000u) {
+                if (s_worst >= 50u && s_worst < 300u)
+                    log_printf("ui: worst pass %u ms on %s: keys+events %u, player %u, rest %u, draw %u",
+                               (unsigned)s_worst, s_worst_on, (unsigned)s_worst_parts[0],
+                               (unsigned)s_worst_parts[1], (unsigned)s_worst_parts[2],
+                               (unsigned)s_worst_parts[3]);
+                s_worst_at = time_stamp(now);
+                s_worst = 0;
             }
             if (now - t_pass >= 300u && s_slow < 30u) {
                 s_slow++;

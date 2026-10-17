@@ -100,31 +100,52 @@ static void test_adc_map(void)
     CHECK(input_map_adc(-1) == KEY_NONE);
 }
 
+/* Samples every 10 ms (input_scan's own clock on the host): n samples of one reading. Returns the
+ * gestures queued meanwhile. */
+static unsigned feed(int adc, int power, int n)
+{
+    unsigned before = input_pending();
+
+    while (n-- > 0)
+        input_scan(adc, power);
+    return input_pending() - before;
+}
+
+static int next_is(int key, int gesture, int taps)
+{
+    input_event_t ev;
+
+    return input_next(&ev) == 1 && ev.key == key && ev.gesture == gesture && (!taps || ev.taps == taps);
+}
+
+static void reset(void)
+{
+    input_mock_clear();
+    feed(1023, 0, 3);
+    input_mock_clear();
+}
+
+/* The old events: UP/DOWN on the press (once the band held INPUT_SWEEP_MS), the power key on
+ * release, a 1-sample glitch ignored. */
 static void test_scan(void)
 {
     input_event_t ev;
-    int i;
 
-    input_mock_clear();
-    CHECK(input_scan(1023, 0) == 0);
-    CHECK(input_scan(130, 0) == 0);          /* 1st sample: not stable */
-    CHECK(input_scan(130, 0) == 0);          /* stable: VOL+'s band starts to count */
-    for (i = 1; i < INPUT_PRESS_SCANS; i++)
-        CHECK(input_scan(127, 0) == 0);
-    CHECK(input_scan(127, 0) == 1);          /* held INPUT_PRESS_SCANS: the press acts */
-    CHECK(input_scan(127, 0) == 0);          /* hold: no repeat */
-    CHECK(input_scan(1023, 0) == 0);
-    CHECK(input_scan(1023, 0) == 0);         /* release: nothing more */
-    CHECK(input_scan(500, 0) == 0);
-    CHECK(input_scan(1023, 0) == 0);         /* 1-sample glitch ignored */
-    CHECK(input_scan(1023, 1) == 0);
-    CHECK(input_scan(1023, 1) == 0);         /* power GPIO wins; acts on release */
-    CHECK(input_scan(1023, 0) == 0);
-    CHECK(input_scan(1023, 0) == 1);         /* short press: released */
-    CHECK(input_pending() == 2);
-    CHECK(input_poll(&ev) == 1 && ev.type == KEY_UP && ev.adc_value == 127);
-    CHECK(input_poll(&ev) == 1 && ev.type == KEY_POWER && ev.adc_value == -1);
-    input_mock_clear();
+    reset();
+    CHECK(feed(130, 0, 2) == 0);             /* 2 agreeing samples: VOL+'s band starts */
+    CHECK(feed(127, 0, INPUT_SWEEP_MS / 10 - 1) == 0);
+    CHECK(feed(127, 0, 1) == 1);             /* held INPUT_SWEEP_MS: DOWN */
+    CHECK(feed(127, 0, 5) == 0);             /* held: no repeat yet */
+    CHECK(feed(1023, 0, 2) == 1);            /* release: a TAP (no old event for VOL+) */
+    CHECK(feed(500, 0, 1) == 0);
+    CHECK(feed(1023, 0, 1) == 0);            /* 1-sample glitch ignored */
+    CHECK(feed(1023, 1, 2) == 2);            /* power: VOL+'s multi-press closed, DOWN at once... */
+    CHECK(input_pending() == 4);
+    CHECK(feed(1023, 0, 2) >= 1);            /* ...and a TAP on release */
+    CHECK(input_poll(&ev) == 1 && ev.type == KEY_UP && ev.adc_value == 0 && ev.gesture == IG_DOWN);
+    CHECK(input_poll(&ev) == 1 && ev.type == KEY_POWER && ev.adc_value == -1 && ev.gesture == IG_TAP);
+    CHECK(input_poll(&ev) == 0);
+    reset();
 }
 
 /* The ladder as a soft press on the device drives it (2026-10-16): the voltage settles through
@@ -132,85 +153,227 @@ static void test_scan(void)
 static void test_sweep(void)
 {
     input_event_t ev;
-    int i;
 
-    input_mock_clear();
-    /* DOWN pressed softly: VOL+'s band for a while (not INPUT_PRESS_SCANS), then VOL- */
-    CHECK(input_scan(130, 0) == 0);
-    for (i = 0; i < INPUT_PRESS_SCANS - 2; i++)
-        CHECK(input_scan(130, 0) == 0);
-    CHECK(input_scan(30, 0) == 0);
-    for (i = 0; i < INPUT_PRESS_SCANS; i++)
-        CHECK(input_scan(30, 0) == 0);
-    CHECK(input_scan(30, 0) == 1);           /* DOWN acts once its own band held */
-    CHECK(input_scan(1023, 0) == 0);
-    CHECK(input_scan(1023, 0) == 0);
-    CHECK(input_pending() == 1);
-    CHECK(input_poll(&ev) == 1 && ev.type == KEY_DOWN);
+    reset();
+    /* VOL- pressed softly: VOL+'s band for 40 ms (under INPUT_SWEEP_MS), then VOL- */
+    feed(130, 0, 5);
+    feed(30, 0, 2);                          /* VOL-: DOWN at once (nothing sweeps past it) */
+    feed(1023, 0, 2);
+    CHECK(next_is(KEY_DOWN, IG_DOWN, 1));
+    CHECK(next_is(KEY_DOWN, IG_TAP, 1));
+    CHECK(input_next(&ev) == 0);
+    feed(1023, 0, 40);                       /* (the multi-press window closes) */
+    CHECK(next_is(KEY_DOWN, IG_END, 1));
     /* MENU pressed softly: BACK's band first, then MENU's, then released: only MENU */
-    CHECK(input_scan(515, 0) == 0);
-    CHECK(input_scan(515, 0) == 0);
-    CHECK(input_scan(515, 0) == 0);
-    CHECK(input_scan(360, 0) == 0);
-    CHECK(input_scan(360, 0) == 0);
-    CHECK(input_scan(360, 0) == 0);
-    CHECK(input_scan(1023, 0) == 0);
-    CHECK(input_scan(1023, 0) == 1);         /* released: the key it settled on */
-    CHECK(input_pending() == 1);
-    CHECK(input_poll(&ev) == 1 && ev.type == KEY_MENU);
-    /* a quick tap of UP, released before INPUT_PRESS_SCANS: it acts on the release */
-    CHECK(input_scan(130, 0) == 0);
-    CHECK(input_scan(130, 0) == 0);
-    CHECK(input_scan(130, 0) == 0);
-    CHECK(input_scan(1023, 0) == 0);
-    CHECK(input_scan(1023, 0) == 1);
-    CHECK(input_poll(&ev) == 1 && ev.type == KEY_UP);
-    input_mock_clear();
+    feed(515, 0, 3);
+    feed(360, 0, 3);
+    feed(1023, 0, 2);
+    CHECK(input_poll(&ev) == 1 && ev.type == KEY_MENU && ev.adc_value == 0);
+    CHECK(input_poll(&ev) == 0);
+    /* VOL+ pressed slowly (QEMU's key-ramp-ms=50): PLAY's band held 70 ms on the way; only VOL+
+     * counts (a DOWN for PLAY may come first, but never a TAP) */
+    feed(1023, 0, 40);
+    while (input_next(&ev) == 1)
+        ;
+    feed(260, 0, 2 + 7);
+    feed(150, 0, 2 + 20);
+    feed(1023, 0, 2);
+    CHECK(input_next(&ev) == 1 && ev.key == KEY_SELECT && ev.gesture == IG_DOWN);
+    CHECK(next_is(KEY_UP, IG_DOWN, 1));
+    CHECK(next_is(KEY_UP, IG_TAP, 1));
+    CHECK(input_next(&ev) == 0);
+    /* a quick tap of UP, released before INPUT_SWEEP_MS: it acts on the release */
+    feed(1023, 0, 40);
+    feed(130, 0, 3);
+    feed(1023, 0, 2);
+    CHECK(input_poll(&ev) == 1 && ev.type == KEY_UP && ev.gesture == IG_DOWN);
+    reset();
 }
 
-/* Keys with a hold meaning: short on release, or INPUT_ADC_LONG once held
- * INPUT_LONG_SCANS scans (and nothing on that release). */
+/* Keys with a hold meaning: short on release, or INPUT_ADC_LONG at the hold time (500 ms after the
+ * press) and nothing on that release but IG_RELEASE. */
 static void test_hold(void)
 {
     input_event_t ev;
-    int i, n = 0;
+    uint32_t t_down = 0;
+    int got = 0;
 
-    input_mock_clear();
-    CHECK(input_scan(1023, 1) == 0);
-    for (i = 0; i < INPUT_LONG_SCANS + 5; i++)
-        n += input_scan(1023, 1);
-    CHECK(n == 1);
-    CHECK(input_poll(&ev) == 1 && ev.type == KEY_POWER && ev.adc_value == INPUT_ADC_LONG);
-    CHECK(input_scan(1023, 0) == 0);
-    CHECK(input_scan(1023, 0) == 0);         /* released after a hold: no short press */
+    reset();
+    feed(1023, 1, 2);
+    CHECK(input_next(&ev) == 1 && ev.key == KEY_POWER && ev.gesture == IG_DOWN);
+    t_down = ev.t_ms;
+    CHECK(input_hold_progress(KEY_POWER) == 0);
+    feed(1023, 1, 25);                       /* 250 ms */
+    CHECK(input_hold_progress(KEY_POWER) == 5);
+    while (!got && feed(1023, 1, 1) == 0)
+        ;
+    got = input_next(&ev);
+    CHECK(got && ev.gesture == IG_HOLD && ev.taps == 1);
+    CHECK(ev.t_ms - t_down == INPUT_HOLD_MS);  /* exactly, on the 10 ms grid */
+    CHECK(ev.held_ms == INPUT_HOLD_MS);
+    CHECK(input_hold_progress(KEY_POWER) == 10);
+    feed(1023, 1, 10);
+    feed(1023, 0, 2);
+    CHECK(next_is(KEY_POWER, IG_RELEASE, 1));
     CHECK(input_pending() == 0);
-    input_mock_clear();
+
+    /* the same through the old API */
+    reset();
+    feed(1023, 1, 2 + 60);
+    feed(1023, 0, 3);
+    CHECK(input_poll(&ev) == 1 && ev.type == KEY_POWER && ev.adc_value == INPUT_ADC_LONG);
+    CHECK(input_poll(&ev) == 0);             /* released after a hold: no short press */
+
+    /* the hold time is a setting */
+    reset();
+    input_set_hold_ms(700);
+    feed(300, 0, 2 + 69);
+    CHECK(next_is(KEY_SELECT, IG_DOWN, 1));
+    CHECK(input_pending() == 0);
+    feed(300, 0, 1);
+    CHECK(next_is(KEY_SELECT, IG_HOLD, 1));
+    input_set_hold_ms(INPUT_HOLD_MS);
+    reset();
 }
 
-/* VOL+ held, then the ladder reads VOL-: one KEY_CHORD, nothing more until all keys are up. */
+/* PLAY: x2, x3 and their holds; every tap reported at its release (the first never waits). */
+static void test_multi(void)
+{
+    input_event_t ev;
+
+    reset();
+    feed(260, 0, 2 + 8);                     /* tap 1: 80 ms */
+    feed(1023, 0, 2);
+    CHECK(next_is(KEY_SELECT, IG_DOWN, 1));
+    CHECK(next_is(KEY_SELECT, IG_TAP, 1));   /* at once */
+    feed(1023, 0, 18);                       /* 200 ms gap */
+    feed(260, 0, 2 + 8);
+    feed(1023, 0, 2);
+    CHECK(next_is(KEY_SELECT, IG_DOWN, 2));
+    CHECK(input_next(&ev) == 1 && ev.gesture == IG_TAP && ev.taps == 2);
+    CHECK(strcmp(input_gesture_name(&ev), "x2") == 0);
+    feed(1023, 0, 18);
+    feed(260, 0, 2 + 8);
+    feed(1023, 0, 2);
+    CHECK(next_is(KEY_SELECT, IG_DOWN, 3));
+    CHECK(next_is(KEY_SELECT, IG_TAP, 3));
+    feed(1023, 0, 31);                       /* 300 ms after the last release: the window closes */
+    CHECK(input_next(&ev) == 1 && ev.gesture == IG_END && ev.taps == 3 && ev.key == KEY_SELECT);
+
+    /* a gap over 300 ms starts again at 1 */
+    feed(260, 0, 2 + 8);
+    feed(1023, 0, 2);
+    CHECK(next_is(KEY_SELECT, IG_DOWN, 1));
+    CHECK(next_is(KEY_SELECT, IG_TAP, 1));
+    feed(1023, 0, 35);
+    CHECK(next_is(KEY_SELECT, IG_END, 1));
+    feed(260, 0, 2 + 8);
+    feed(1023, 0, 2);
+    CHECK(next_is(KEY_SELECT, IG_DOWN, 1));
+    CHECK(next_is(KEY_SELECT, IG_TAP, 1));
+
+    /* 2x+hold: a tap, then a press held; through the old API a short press and a hold */
+    feed(1023, 0, 10);
+    feed(260, 0, 2 + 55);
+    CHECK(next_is(KEY_SELECT, IG_DOWN, 2));
+    CHECK(input_next(&ev) == 1 && ev.gesture == IG_HOLD && ev.taps == 2);
+    CHECK(strcmp(input_gesture_name(&ev), "x2hold") == 0);
+    feed(1023, 0, 2);
+    CHECK(next_is(KEY_SELECT, IG_RELEASE, 2));
+    feed(1023, 0, 40);
+    CHECK(input_pending() == 0);             /* (a hold closes the multi-press: no END) */
+
+    /* another key closes PLAY's window at once */
+    feed(260, 0, 2 + 8);
+    feed(1023, 0, 2);
+    feed(515, 0, 2 + 8);
+    feed(1023, 0, 2);
+    CHECK(next_is(KEY_SELECT, IG_DOWN, 1));
+    CHECK(next_is(KEY_SELECT, IG_TAP, 1));
+    CHECK(next_is(KEY_SELECT, IG_END, 1));
+    CHECK(next_is(KEY_BACK, IG_DOWN, 1));
+    CHECK(next_is(KEY_BACK, IG_TAP, 1));
+    reset();
+}
+
+/* VOL+ held, then the ladder reads VOL-: one chord, nothing more until all keys are up. */
 static void test_chord(void)
 {
     input_event_t ev;
-    int i;
 
-    input_mock_clear();
-    CHECK(input_scan(130, 0) == 0);
-    CHECK(input_scan(130, 0) == 0);
-    for (i = 1; i < INPUT_PRESS_SCANS; i++)
-        CHECK(input_scan(130, 0) == 0);
-    CHECK(input_scan(130, 0) == 1);          /* VOL+ press */
-    for (i = INPUT_PRESS_SCANS; i < INPUT_CHORD_SCANS; i++)
-        CHECK(input_scan(130, 0) == 0);      /* held long enough to be a deliberate chord */
-    CHECK(input_scan(30, 0) == 0);
-    CHECK(input_scan(30, 0) == 1);           /* the other volume key: the chord */
-    CHECK(input_scan(130, 0) == 0);
-    CHECK(input_scan(130, 0) == 0);          /* VOL- up, VOL+ still down: nothing */
-    CHECK(input_scan(1023, 0) == 0);
-    CHECK(input_scan(1023, 0) == 0);
-    CHECK(input_pending() == 2);
+    reset();
+    feed(130, 0, 2 + INPUT_SWEEP_MS / 10);   /* VOL+ press */
+    feed(130, 0, (INPUT_CHORD_MS - INPUT_SWEEP_MS) / 10);   /* held long enough to be a chord */
+    feed(30, 0, 2);                          /* the other volume key: the chord */
+    feed(130, 0, 3);
+    feed(30, 0, 3);                          /* nothing while any key stays down */
+    feed(1023, 0, 3);
     CHECK(input_poll(&ev) == 1 && ev.type == KEY_UP);
-    CHECK(input_poll(&ev) == 1 && ev.type == KEY_CHORD);
-    input_mock_clear();
+    CHECK(input_poll(&ev) == 1 && ev.type == KEY_CHORD && ev.gesture == IG_CHORD);
+    CHECK(input_poll(&ev) == 0);
+    /* VOL+ for less than INPUT_CHORD_MS, then VOL-: VOL+ was pressed, then VOL- (no chord) */
+    feed(1023, 0, 40);
+    feed(130, 0, 2 + 10);
+    feed(30, 0, 2);
+    feed(1023, 0, 2);
+    CHECK(input_poll(&ev) == 1 && ev.type == KEY_UP);
+    CHECK(input_poll(&ev) == 1 && ev.type == KEY_DOWN);
+    CHECK(input_poll(&ev) == 0);
+    reset();
+}
+
+/* VOL held: repeats from 400 ms, accelerating; not taken for a while they become one bigger step;
+ * the steps add up to the schedule whatever the UI does. */
+static void test_repeat(void)
+{
+    input_event_t ev;
+    unsigned steps = 0, events = 0;
+
+    reset();
+    input_set_repeat(INPUT_REPEAT_LIST);
+    feed(30, 0, 2);                          /* VOL-: DOWN at once */
+    CHECK(next_is(KEY_DOWN, IG_DOWN, 1));
+    feed(30, 0, 39);                         /* 390 ms */
+    CHECK(input_pending() == 0);
+    feed(30, 0, 1);                          /* 400 ms */
+    CHECK(input_next(&ev) == 1 && ev.gesture == IG_REPEAT && ev.steps == 1 && ev.repeat == 1);
+    for (int i = 0; i < 160; i++) {          /* to 2 s, taken every tick */
+        feed(30, 0, 1);
+        while (input_next(&ev) == 1) {
+            CHECK(ev.gesture == IG_REPEAT || (ev.gesture == IG_HOLD && ev.held_ms == INPUT_HOLD_MS));
+            if (ev.gesture == IG_REPEAT) {
+                steps += ev.steps;
+                events++;
+            }
+        }
+    }
+    CHECK(1 + steps == 21);                  /* 1 at 0.4 s, 8/s to 1 s, 16/s to 2 s */
+    CHECK(events == steps);                  /* one step per event while taken at once */
+    feed(30, 0, 100);                        /* 1 s more, not taken (a stalled main loop) */
+    CHECK(input_pending() == 1);
+    CHECK(input_next(&ev) == 1 && ev.gesture == IG_REPEAT && ev.steps == 32 && ev.repeat == 53);
+    feed(1023, 0, 2);
+    CHECK(next_is(KEY_DOWN, IG_RELEASE, 1));
+    /* the old API hands a merged step out as that many events */
+    feed(130, 0, 2 + 40 + 60);
+    input_mock_clear();                      /* (still down: ignored until released) */
+    feed(130, 0, 20);
+    CHECK(input_pending() == 0);
+    feed(1023, 0, 2);
+    CHECK(input_pending() == 0);
+    input_set_repeat(INPUT_REPEAT_VOLUME);
+    feed(130, 0, 2 + 120);                   /* 1.2 s: 7 + 2x2 = 11 dB, from 400 ms */
+    {
+        unsigned n = 0, rep = 0;
+
+        while (input_poll(&ev) == 1) {
+            n++;
+            rep += ev.adc_value == INPUT_ADC_REPEAT;
+        }
+        CHECK(n == 1 + 11 && rep == 11);
+    }
+    input_set_repeat(INPUT_REPEAT_LIST);
+    reset();
 }
 
 int main(void)
@@ -222,6 +385,8 @@ int main(void)
     test_overflow();
     test_adc_map();
     test_scan();
+    test_multi();
+    test_repeat();
 
     printf("test_input: %d checks, %d failures\n", s_checks, s_failures);
     return (s_failures == 0) ? 0 : 1;

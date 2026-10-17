@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "clock.h"
 #include "emmc.h"
 #include "rknanoc.h"
 
@@ -125,10 +126,12 @@ static int send_cmd(uint32_t idx, uint32_t arg, uint32_t flags, int wait_busy)
     return 0;
 }
 
-static int xfer_data(uint32_t idx, uint32_t arg, uint32_t *buf, uint32_t len, int write)
+/* A data command in two halves: xfer_start() sends it and moves the data through the FIFO,
+ * xfer_finish() waits for data over (a write's DTO comes once the card has the block; the card may
+ * then still program it, STATUS_BUSY). The write-behind queue below runs the halves apart. */
+static int xfer_start(uint32_t idx, uint32_t arg, uint32_t *buf, uint32_t len, int write)
 {
-    uint32_t words = len >> 2, fifo_tries = 5000000u, tries = 5000001u;
-    int ret = 0;
+    uint32_t words = len >> 2, fifo_tries = 5000000u;
 
     if (wait_clear(STATUS, STATUS_BUSY, 1000000))
         return -2;
@@ -167,6 +170,14 @@ static int xfer_data(uint32_t idx, uint32_t arg, uint32_t *buf, uint32_t len, in
             while (n--)
                 *buf++ = MMC[FIFO];
     }
+    return 0;
+}
+
+static int xfer_finish(void)
+{
+    uint32_t tries = 5000001u;
+    int ret = 0;
+
     while (!(MMC[RINTSTS] & 0xAE88u)) {     /* data over or error */
         if (--tries == 0u) {
             ret = -10;
@@ -178,6 +189,13 @@ static int xfer_data(uint32_t idx, uint32_t arg, uint32_t *buf, uint32_t len, in
         ret = -11;
     MMC[RINTSTS] = 0xFFFFFFFFu;
     return ret;
+}
+
+static int xfer_data(uint32_t idx, uint32_t arg, uint32_t *buf, uint32_t len, int write)
+{
+    int ret = xfer_start(idx, arg, buf, len, write);
+
+    return ret ? ret : xfer_finish();
 }
 
 static int wait_tran(void)
@@ -451,14 +469,208 @@ static int block_read(uint32_t arg, uint32_t count, void *buf)
     return ret;
 }
 
+/* ---- the write-behind queue ------------------------------------------------
+ *
+ * A single-block write costs the UI nothing but the transfer: emmc_write_async() copies the block
+ * into a queue and returns; emmc_wq_step(), called once per main-loop pass, sends the oldest one
+ * (CMD24 and the FIFO, xfer_start) and on a later pass sees it done (data over, STATUS_BUSY clear --
+ * the card programmed it -- then CMD13 in tran, the same signals send_cmd()/wait_tran() and
+ * bootcrumb's polled writes wait on). The card is programming for most of a write (the device's
+ * 600 ms log appends were about 8 of them, OURS_AUDIT 1.6), and nothing waits for that any more.
+ * Order is kept: blocks reach the card oldest first (fs_target.c's crash order holds), a block
+ * queued again while it is the newest is replaced in place. Every other access stays coherent:
+ * emmc_read() lets a write in flight finish, then serves queued blocks from the queue;
+ * emmc_write()/emmc_fw_write() (USB disk, the updater) drain the queue first; emmc_quiesce() lets
+ * bootcrumb.c's own register writes in. emmc_sync() drains it (power off, sessions, reboot). */
+#ifndef EMMC_WQ_SLOTS
+#define EMMC_WQ_SLOTS 16u
+#endif
+static uint32_t s_wq_buf[EMMC_WQ_SLOTS][128];
+static uint32_t s_wq_lba[EMMC_WQ_SLOTS];
+static unsigned s_wq_head, s_wq_n;       /* the oldest block, blocks queued (the head may be in flight) */
+static int s_wq_flight;                  /* the head was sent and is being programmed */
+static uint32_t s_wq_t0;                 /* time_ms() when it was sent (a stuck card: wq_done) */
+static emmc_wq_stats_t s_wq_st;
+
+static int raw_write(uint32_t lba, uint32_t count, const void *buf);
+
+/* The head block sent: command and data, then back to the caller while the card programs it. */
+static int wq_send(void)
+{
+    int r;
+
+    watchdog_feed();
+    select_mmc(0);
+    clk_gate(0x6C, 1);
+    r = xfer_start(24, s_wq_lba[s_wq_head] << s_shift, s_wq_buf[s_wq_head], 512, 1);
+    if (r) {
+        MMC[CTRL] |= 2u;                     /* FIFO reset; the block is written the slow way */
+        wait_clear(CTRL, 2u, 5000);
+        MMC[RINTSTS] = 0xFFFFFFFFu;
+        clk_gate(0x6C, 0);
+        return r;
+    }
+    s_wq_flight = 1;
+    s_wq_t0 = time_ms();
+    return 0;
+}
+
+static void wq_pop(int rc)
+{
+    if (rc) {
+        s_wq_st.errors++;
+        s_wq_st.last_error = rc;
+    }
+    s_wq_st.written++;
+    s_wq_head = (s_wq_head + 1u) % EMMC_WQ_SLOTS;
+    s_wq_n--;
+}
+
+/* The block in flight: 1 = done (or failed: counted), 0 = the card still has it. wait: until done. */
+static int wq_done(int wait)
+{
+    int r = 0, on_sd = s_on_sd;
+
+    if (!s_wq_flight)
+        return 1;
+    select_mmc(0);
+    if (!wait && (!(MMC[RINTSTS] & 0xAE88u) || (MMC[STATUS] & STATUS_BUSY))) {
+        if (time_ms() - s_wq_t0 < 2000u) {
+            select_mmc(on_sd);
+            return 0;                        /* data not over, or the card programs */
+        }
+        s_wq_st.stuck++;                     /* 2 s: wait it out below */
+    }
+    r = xfer_finish();
+    if (!r && wait_tran())
+        r = -31;
+    clk_gate(0x6C, 0);
+    s_wq_flight = 0;
+    if (r) {                                 /* failed: once more, the slow way */
+        r = raw_write(s_wq_lba[s_wq_head], 1, s_wq_buf[s_wq_head]);
+    }
+    wq_pop(r);
+    select_mmc(on_sd);
+    return 1;
+}
+
+void emmc_quiesce(void)
+{
+    if (s_wq_flight)
+        s_wq_st.waits++;
+    wq_done(1);
+}
+
+int emmc_wq_step(int may_start)
+{
+    if (s_wq_flight) {                       /* done now: the next block waits for the next step, so
+                                              * the audio refill reads in between */
+        wq_done(0);
+        return (int)s_wq_n;
+    }
+    if (may_start && s_wq_n && wq_send()) {
+        int r = raw_write(s_wq_lba[s_wq_head], 1, s_wq_buf[s_wq_head]);
+
+        wq_pop(r);
+    }
+    return (int)s_wq_n;
+}
+
+int emmc_busy(void)
+{
+    return s_wq_flight;
+}
+
+unsigned emmc_wq_pending(void)
+{
+    return s_wq_n;
+}
+
+unsigned emmc_wq_free(void)
+{
+    return EMMC_WQ_SLOTS - s_wq_n;
+}
+
+const emmc_wq_stats_t *emmc_wq_stats(void)
+{
+    return &s_wq_st;
+}
+
+int emmc_sync(void)
+{
+    int errors = (int)s_wq_st.errors;
+
+    if (s_wq_n)
+        s_wq_st.syncs++;
+    while (s_wq_n) {
+        wq_done(1);
+        emmc_wq_step(1);
+    }
+    wq_done(1);
+    return s_wq_st.errors != (uint32_t)errors ? -32 : 0;
+}
+
+int emmc_write_async(uint32_t lba, uint32_t count, const void *buf)
+{
+    const uint32_t *src = buf;
+
+    if (count == 0u)
+        return 0;
+    if (lba < s_write_floor || lba + count < lba || lba + count > s_sectors)
+        return -30;
+    if (count > EMMC_WQ_SLOTS / 2u) {        /* a big write (a screenshot): one CMD25 after the queue */
+        emmc_sync();
+        return raw_write(lba, count, buf);
+    }
+    for (uint32_t i = 0; i < count; i++, src += 128) {
+        unsigned tail = (s_wq_head + s_wq_n - 1u) % EMMC_WQ_SLOTS;
+
+        if (s_wq_n && s_wq_lba[tail] == lba + i && !(s_wq_flight && s_wq_n == 1u)) {
+            memcpy(s_wq_buf[tail], src, 512);    /* the newest block again: replaced in place */
+            s_wq_st.merged++;
+            continue;
+        }
+        while (s_wq_n == EMMC_WQ_SLOTS) {        /* full: the oldest goes out first */
+            s_wq_st.waits++;
+            wq_done(1);
+            if (s_wq_n == EMMC_WQ_SLOTS)
+                emmc_wq_step(1);
+        }
+        tail = (s_wq_head + s_wq_n) % EMMC_WQ_SLOTS;
+        s_wq_lba[tail] = lba + i;
+        memcpy(s_wq_buf[tail], src, 512);
+        s_wq_n++;
+        s_wq_st.queued++;
+        if (s_wq_n > s_wq_st.peak)
+            s_wq_st.peak = s_wq_n;
+    }
+    return 0;
+}
+
 int emmc_read(uint32_t lba, uint32_t count, void *buf)
 {
+    int r;
+
     if (count == 0u)
         return 0;
     if (lba + count < lba || lba + count > s_sectors)
         return -30;
+    if (s_wq_flight) {                       /* the card cannot be read while it programs */
+        s_wq_st.waits++;
+        s_wq_st.wait_lr = (uint32_t)__builtin_return_address(0);
+        s_wq_st.wait_ms = time_ms();
+        wq_done(1);
+        s_wq_st.wait_ms = time_ms() - s_wq_st.wait_ms;
+    }
     select_mmc(0);
-    return block_read(lba << s_shift, count, buf);
+    r = block_read(lba << s_shift, count, buf);
+    for (unsigned k = 0; !r && k < s_wq_n; k++) {   /* queued blocks are newer than the card's */
+        unsigned i = (s_wq_head + k) % EMMC_WQ_SLOTS;
+
+        if (s_wq_lba[i] >= lba && s_wq_lba[i] < lba + count)
+            memcpy((uint8_t *)buf + (s_wq_lba[i] - lba) * 512u, s_wq_buf[i], 512);
+    }
+    return r;
 }
 
 static int raw_write(uint32_t lba, uint32_t count, const void *buf)
@@ -466,6 +678,8 @@ static int raw_write(uint32_t lba, uint32_t count, const void *buf)
     int ret, r;
 
     watchdog_feed();
+    if (s_wq_flight)                         /* (the queue's own retry comes here with none) */
+        wq_done(1);
     select_mmc(0);
     clk_gate(0x6C, 1);
     if (count == 1u) {
@@ -491,6 +705,7 @@ int emmc_write(uint32_t lba, uint32_t count, const void *buf)
         return 0;
     if (lba < s_write_floor || lba + count < lba || lba + count > s_sectors)
         return -30;
+    emmc_sync();                             /* the queued blocks are older: first */
     return raw_write(lba, count, buf);
 }
 
@@ -504,6 +719,7 @@ int emmc_fw_write(uint32_t rel, uint32_t count, const void *buf)
 {
     if (count == 0u || rel + count < rel || rel + count > s_fw_sectors)
         return -30;
+    emmc_sync();
     return raw_write(EMMC_FW_BASE + rel, count, buf);
 }
 

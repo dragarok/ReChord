@@ -63,6 +63,13 @@ void log_printf(const char *fmt, ...);
  * On failure the buffer is kept for the next attempt. Returns LOG_OK or an
  * error code. */
 int log_flush(const char *tag);
+/* The storage may hold writes back (drivers/emmc.h's queue): log_flush() with a tag (the named
+ * moments: recovery, an error, an update, power off) then waits until they are on the disk
+ * (sync); log_flush(NULL) (the periodic write) and log_flush_async() do not. */
+void log_set_sync(int (*sync)(void));
+/* Everything written so far is on the disk (the storage's queue is empty). */
+void log_durable(void);
+int log_flush_async(const char *tag);
 
 /* Number of lines dropped since the last successful flush. */
 unsigned long log_dropped(void);

@@ -220,12 +220,15 @@ static void key_sample(int v)
         s_key_out = s_key_cand_v;
 }
 
-int keys_adc(void)
+/* One step of the converter: the conversion started last time collected (if done), the next one
+ * started. From the main loop (keys_adc) until keys_tick() takes over, then every 10 ms from core
+ * A's SysTick: channel 1 (the ladder) seven times in eight, the eighth goes round 0, 2, 3. */
+static volatile int s_keys_isr;
+
+static int adc_step(void)
 {
     static const uint8_t k_other[3] = { 0, 2, 3 };
     unsigned ch;
-
-    watchdog_feed();                 /* every screen that waits for a key polls here */
 
     if (s_adc_ch < 8u) {
         uint64_t el = adc_now() - s_adc_t0;
@@ -247,12 +250,40 @@ int keys_adc(void)
         }
     }
     s_adc_n++;
-    ch = s_adc_n % 4u ? 1u : k_other[(s_adc_n / 4u) % 3u];
+    if (s_keys_isr)
+        ch = s_adc_n % 8u ? 1u : k_other[(s_adc_n / 8u) % 3u];
+    else
+        ch = s_adc_n % 4u ? 1u : k_other[(s_adc_n / 4u) % 3u];
     ADC[2] &= ~0x10u;
     ADC[2] = (ADC[2] & ~0x67u) | ch | 0x18u;      /* (interrupt enable clear, as stock's polled path) */
     s_adc_ch = ch;
     s_adc_t0 = adc_now();
     return s_key_out;
+}
+
+int keys_adc(void)
+{
+    watchdog_feed();                 /* every screen that waits for a key polls here */
+    if (s_keys_isr)
+        return s_key_out;            /* (the timer converts: keys_tick) */
+    return adc_step();
+}
+
+/* Core A's SysTick, every 10 ms once keys_isr_start() ran: the converter stepped and the keys
+ * sampled into services/input.c's recogniser, whatever the main loop is doing (DESIGN 3.3). */
+void keys_tick(void)
+{
+    if (!s_keys_isr)
+        return;
+    adc_step();
+    input_sample(s_key_out, keys_power(), time_ms());
+}
+
+void keys_isr_start(void)
+{
+    (void)keys_power();              /* (its pin set up before the first tick reads it) */
+    s_keys_isr = 1;
+    input_isr_sampling(1);
 }
 
 const uint32_t *adc_diag(void)
