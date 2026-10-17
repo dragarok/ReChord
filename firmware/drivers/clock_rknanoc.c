@@ -69,9 +69,15 @@ static void systick_start(void)
     SYST_CSR = 7u;                 /* core clock, interrupt, enable */
 }
 
+/* The 10 ms work that must not wait for the main loop (startup/ap_tick.c: the keys, core B's
+ * clock requests); weak, so the tests that link the clock alone need none. */
+extern void tick_hook(void) __attribute__((weak));
+
 void SysTick_Handler(void)
 {
     s_ticks++;
+    if (tick_hook)
+        tick_hook();
     if (++s_win_ticks == CLOCK_TICK_HZ) {    /* a second: idle cycles per mille of it */
         uint32_t idle = s_idle_cyc, pm = (s_reload + 1u) * CLOCK_TICK_HZ / 1000u;
 

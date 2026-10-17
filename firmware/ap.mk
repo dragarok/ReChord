@@ -52,6 +52,7 @@ AP_STARTUP_SRCS := \
   firmware/startup/ap_main.c \
   firmware/startup/ap_ui.c \
   firmware/startup/ap_bt.c \
+  firmware/startup/ap_tick.c \
   firmware/startup/ap_bg.c
 
 # UI layer (same set as $(UI_SRCS) in firmware/ui/ui.mk).

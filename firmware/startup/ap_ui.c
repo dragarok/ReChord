@@ -143,6 +143,24 @@ static void update_progress(const char *what, uint32_t done, uint32_t total)
     display_flush_rows(8 + 2 * 14, 8 + 2 * 14 + 7);
 }
 
+/* Every gesture the screens' events come from, in the log (DESIGN 3.3: "ui: key PLAY.x2 on player
+ * t=..."; the tests time holds and multi-presses by it). A key's DOWN and the window closing are
+ * left out but for PLAY's (its x2/x3 label), and so is a repeat's every step but the merged ones. */
+static void log_gesture(const input_event_t *g)
+{
+    const ui_screen_t *top = ui_top_screen();
+
+    if (g->gesture == IG_DOWN || (g->gesture == IG_END && g->key != KEY_SELECT))
+        return;
+    if (g->gesture == IG_REPEAT)
+        log_printf("ui: key %s.repeat on %s t=%u held=%u steps=%u n=%u", input_key_name(g->key),
+                   top ? top->name : "-", (unsigned)g->t_ms, (unsigned)g->held_ms, (unsigned)g->steps,
+                   (unsigned)g->repeat);
+    else
+        log_printf("ui: key %s.%s on %s t=%u held=%u", input_key_name(g->key), input_gesture_name(g),
+                   top ? top->name : "-", (unsigned)g->t_ms, (unsigned)g->held_ms);
+}
+
 /* KEY_SELECT = yes; BACK / power = no; any = 1 with any_key. */
 static int ask(int any_key)
 {
@@ -1325,6 +1343,9 @@ void ap_ui_loop(void)
     input_event_t ev;
     uint32_t t_first = 0;
 
+    input_set_clock(time_ms);
+    input_set_observer(log_gesture);
+    keys_isr_start();     /* the keys sampled every 10 ms from now on (ap_tick.c), whatever runs */
     boot_key_sample();    /* first: the keys work whatever comes after */
     if (s_boot_key == KEY_DOWN)   /* before our storage driver runs at all (it might be what fails) */
         rockusb_flow("VOL- held at power-on");
@@ -1488,6 +1509,9 @@ void ap_ui_loop(void)
         s_adc2 = adc2;
         s_power = power;
         input_scan(adc, power);
+        /* VOL held: the volume's pace on Now Playing and with the screen off, the lists' elsewhere */
+        input_set_repeat(!power_screen_on() || ui_top_screen() == &player_screen ? INPUT_REPEAT_VOLUME :
+                         INPUT_REPEAT_LIST);
 
         while (input_poll(&ev) > 0) {
             static const char *const k_names[] = { "none", "up", "down", "select", "back", "power", "menu", "chord" };

@@ -43,6 +43,10 @@ void backlight_set(int duty);
  * moves the ADC scan on) and the power key level (1 = pressed). Feed both to
  * input_scan(). */
 int keys_adc(void);
+/* From core A's SysTick (10 ms): the converter and the key samples (services/input.c). Off until
+ * keys_isr_start(); then keys_adc() only returns the latest stable reading. */
+void keys_tick(void);
+void keys_isr_start(void);
 /* The last conversion of a SAR-ADC channel (0 battery, 1 keys, 2, 3), -1 = none yet. */
 int adc_value(unsigned ch);
 void adc_init(void);            /* stock's AdcInit, write for write */
