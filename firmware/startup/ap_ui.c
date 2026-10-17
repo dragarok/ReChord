@@ -33,6 +33,10 @@
 #include "ui/ui.h"
 #include "ui/screens/screens.h"
 
+extern const ui_screen_t bt_screen;   /* ap_bt.c */
+void bt_app_init(void);
+void bt_app_tick(void);
+
 static int s_adc = 1023, s_adc2 = 1023, s_power, s_cable, s_phy_parked;
 static int s_power_press_ok;
 static uint32_t s_log_flushed;  /* time_ms() of the last periodic log write */
@@ -416,6 +420,7 @@ void settings_apply(void)
 static void open_files(void)    { browser_screen_set_root("/"); ui_push_screen(&browser_screen); }
 static void open_player(void)   { ui_push_screen(&player_screen); }
 static void open_settings(void) { settings_screen_reload(); ui_push_screen(&settings_screen); }
+static void open_bt(void)       { ui_push_screen(&bt_screen); }
 
 /* "200M 1.5%": core A clock and its busy share over the last second */
 static const char *cpu_text(void)
@@ -834,6 +839,7 @@ static const menu_item_t k_root_items[] = {
     { "USB DAC",     NULL,      usb_dac_session },       /* (last but one: tests count rows to Files) */
     { "USB-C probe", NULL,      usb_probe_menu },
     { "USB detect",  NULL,      usb_detect_test },       /* (appended: tests count rows from the top) */
+    { "Bluetooth",   NULL,      open_bt },               /* (appended, as above) */
 };
 #define ROOT_CPU_ROW 6               /* index of "CPU" in k_root_items */
 #define ROOT_BAT_ROW 12
@@ -1321,6 +1327,7 @@ void ap_ui_loop(void)
     log_flush("boot");
     bootcrumb(BC_POWER);
     power_init();
+    bt_app_init();                   /* the BT module on only if the setting says so (ap_bt.c) */
     bootcrumb(BC_UI_INIT);
     ui_init();
     menu_screen_bind(&k_root);
@@ -1527,6 +1534,7 @@ void ap_ui_loop(void)
                 player_note_track(st.track.ref.clus);
             }
         }
+        bt_app_tick();                   /* the BT module: frames, polls, keys (nothing while off) */
         if (!power_screen_on())
             ;                            /* backlight off: nothing to draw */
         else if (ui_top_screen() == &player_screen)
