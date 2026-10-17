@@ -147,6 +147,9 @@ static void uart_close(void)
 #define T_DISC_MS         3000u         /* our CT00 unanswered for 3 s: unrouted anyway */
 #define T_SERVED_MAX_MS   1000u         /* the idle time counts at most 1 s per tick: a USB disk
                                          * session that held the loop for 42 min idled it off at once */
+#define T_CH_CHECK_MS     10000u        /* a link only a CH frame announced: a CHER/CLER this soon
+                                         * undoes it. The device answered a CH06 with "CH36"+MAC+name,
+                                         * then CHER and CLER 70 ms later, and no link (97.5 s) */
 
 /* ---- state ---------------------------------------------------------------------- */
 static bt_state_t s_state;
@@ -164,6 +167,7 @@ static uint32_t s_idle, s_last;         /* unconnected time served (ms); the las
 static int s_want;                      /* the source plays (bt_set_playing), linked or not */
 static uint32_t s_stop_t;               /* the source stopped then, not yet sent (0: none) */
 static uint32_t s_q_t;                  /* our CQ00 while connected, unanswered (0: none) */
+static uint32_t s_ch_t;                 /* connected by a CH frame then, no CQO since (0: none) */
 static unsigned s_q_miss;               /* such polls in a row (measured: the device's answer set is open) */
 static uint32_t s_seq = 1, s_tx_fail;
 static bt_dev_t s_list[BT_SCAN_MAX], s_peer;
@@ -315,6 +319,7 @@ static void link_down(int lost)
     s_paired_wait = 0;
     s_disc_t = 0;
     s_q_t = 0;
+    s_ch_t = 0;
     if (was) {
         log_printf("bt: disconnected");
         bt_event(BT_EV_DISCONNECTED, &s_peer);
@@ -444,6 +449,8 @@ static void connected(const bt_frame_t *f)
         if (f->name[0])
             memcpy(s_peer.name, f->name, sizeof s_peer.name);
     }
+    if (f)
+        s_ch_t = 0;                     /* the CQO confirms it */
     s_q_t = 0;
     if (s_q_miss) {
         log_printf("bt: CQ00 answered again after %u unanswered", s_q_miss);
@@ -461,6 +468,14 @@ static void connected(const bt_frame_t *f)
     s_playing = -1;                     /* bt_set_playing() sends CY0 for the current state */
     s_avrcp = 0;
     bt_event(BT_EV_CONNECTED, &s_peer);
+}
+
+/* CH...: connected (stock), until a CQO confirms it or a CHER/CLER soon after undoes it */
+static void ch_linked(uint32_t now)
+{
+    if (s_state != BT_CONNECTED)
+        s_ch_t = time_stamp(now);
+    connected(0);
 }
 
 static void frame(const bt_frame_t *f, uint32_t now)
@@ -511,7 +526,7 @@ static void frame(const bt_frame_t *f, uint32_t now)
             s_paired_wait = 1;
             s_t = now;
         } else if (f->cmd == 'H') {     /* CHOK: connected */
-            connected(0);
+            ch_linked(now);
         } else if (f->cmd == 'T') {     /* CTOK (or the resident's CT): disconnected; the device
                                          * sends it unasked when the earphones go */
             link_down(1);
@@ -526,10 +541,15 @@ static void frame(const bt_frame_t *f, uint32_t now)
             log_printf("bt: connect failed (C%cER)", f->cmd);
             go(BT_ON);
             bt_event(BT_EV_CONNECT_FAILED, &s_peer);
+        } else if (s_state == BT_CONNECTED && s_ch_t && now - s_ch_t < T_CH_CHECK_MS) {
+            log_printf("bt: connect failed (C%cER after the CH answer)", f->cmd);
+            link_down(0);
+            go(BT_ON);
+            bt_event(BT_EV_CONNECT_FAILED, &s_peer);
         }
         break;
     case BT_RX_LINKED:
-        connected(0);
+        ch_linked(now);
         break;
     case BT_RX_STATUS:
         if (f->state == 'O') {

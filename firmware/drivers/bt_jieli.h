@@ -99,7 +99,7 @@ enum {
     BT_EV_PAIRED = 1,                  /* CLOK: remember it (stock: settings slot +0x349) */
     BT_EV_CONNECTED,                   /* CQO / CH: routed */
     BT_EV_DISCONNECTED,
-    BT_EV_CONNECT_FAILED,              /* CLER / CHER, or 3 s without an answer (then CT00) */
+    BT_EV_CONNECT_FAILED,              /* CLER / CHER (also right after a CH link), or 3 s without an answer (then CT00) */
     BT_EV_NO_MODULE,                   /* no CV1x in 5 s (stock also turns the setting off) */
     BT_EV_IDLE_OFF,                    /* 5 min unconnected outside the screen, the source not
                                         * playing (stock: setting off; ReChord keeps it: bt_wake) */
