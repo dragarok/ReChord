@@ -373,13 +373,112 @@ void panel_io_delay_ms(uint16_t ms)
     delay_ms(ms);
 }
 
-/* ---- the flush path ------------------------------------------------------------------------------ */
+/* ---- the flush path ------------------------------------------------------------------------------
+ * GPIO (bit-bang) pixel writer: every byte is the extracted pattern -- the whole GPIO0 DR from the
+ * shadow with the byte in 16..23, D/C high, WR low, written twice, then once more with WR high
+ * (the panel latches on the rising edge) -- but with the shadow word, the DR address and the
+ * WR bit in registers, 4 pixels per loop, no call per byte. s_wr_stores = 2 drops the repeated
+ * WR-low store (2 stores a byte: ~42 ns low, ~42 ns high at pclk 48 MHz, inside the ST7789's 15 /
+ * 15 / 66 ns on paper) -- a measurement option (display=pio2), never the default: the repeated
+ * store is what the reference does on this board. */
 
-void panel_io_blit_generic(int x0, int y0, int x1, int y1, const uint16_t *src, int pitch);
+#if defined(__GNUC__) && !defined(__clang__)
+#define HOT __attribute__((optimize("O2")))
+#else
+#define HOT
+#endif
+
+static int s_wr_stores = 3;
+
+#define BYTE3(dr, lo, b) do { uint32_t w_ = (lo) | (b); *(dr) = w_; *(dr) = w_; *(dr) = w_ | PIN_WR; } while (0)
+#define BYTE2(dr, lo, b) do { uint32_t w_ = (lo) | (b); *(dr) = w_; *(dr) = w_ | PIN_WR; } while (0)
+/* a pixel's bytes in place for the DR: high byte (bits 15..8 -> 23..16), then low (7..0 -> 23..16) */
+#define HI(p) (((uint32_t)(p) & 0xFF00u) << 8)
+#define LO(p) (((uint32_t)(p) & 0x00FFu) << 16)
+
+static HOT void gpio_pixels3(const uint16_t *src, int n)
+{
+    volatile uint32_t *dr = &GPIO0->dr;
+    uint32_t lo = (bus_ctl | PIN_DC) & ~PIN_WR;
+
+    for (; n >= 4; n -= 4, src += 4) {
+        uint32_t a = ((const uint32_t *)(const void *)src)[0], b = ((const uint32_t *)(const void *)src)[1];
+
+        BYTE3(dr, lo, HI(a)); BYTE3(dr, lo, LO(a));
+        BYTE3(dr, lo, HI(a >> 16)); BYTE3(dr, lo, LO(a >> 16));
+        BYTE3(dr, lo, HI(b)); BYTE3(dr, lo, LO(b));
+        BYTE3(dr, lo, HI(b >> 16)); BYTE3(dr, lo, LO(b >> 16));
+    }
+    for (; n > 0; n--, src++) {
+        BYTE3(dr, lo, HI(*src));
+        BYTE3(dr, lo, LO(*src));
+    }
+}
+
+static HOT void gpio_pixels2(const uint16_t *src, int n)
+{
+    volatile uint32_t *dr = &GPIO0->dr;
+    uint32_t lo = (bus_ctl | PIN_DC) & ~PIN_WR;
+
+    for (; n >= 4; n -= 4, src += 4) {
+        uint32_t a = ((const uint32_t *)(const void *)src)[0], b = ((const uint32_t *)(const void *)src)[1];
+
+        BYTE2(dr, lo, HI(a)); BYTE2(dr, lo, LO(a));
+        BYTE2(dr, lo, HI(a >> 16)); BYTE2(dr, lo, LO(a >> 16));
+        BYTE2(dr, lo, HI(b)); BYTE2(dr, lo, LO(b));
+        BYTE2(dr, lo, HI(b >> 16)); BYTE2(dr, lo, LO(b >> 16));
+    }
+    for (; n > 0; n--, src++) {
+        BYTE2(dr, lo, HI(*src));
+        BYTE2(dr, lo, LO(*src));
+    }
+}
+
+/* CASET x0..x1, RASET y0..y1, RAMWR over the GPIO bus. */
+static void gpio_window(int x0, int y0, int x1, int y1)
+{
+    bus_write(0x2A, 0);
+    bus_write((uint8_t)(x0 >> 8), PIN_DC);
+    bus_write((uint8_t)x0, PIN_DC);
+    bus_write((uint8_t)(x1 >> 8), PIN_DC);
+    bus_write((uint8_t)x1, PIN_DC);
+    bus_write(0x2B, 0);
+    bus_write((uint8_t)(y0 >> 8), PIN_DC);
+    bus_write((uint8_t)y0, PIN_DC);
+    bus_write((uint8_t)(y1 >> 8), PIN_DC);
+    bus_write((uint8_t)y1, PIN_DC);
+    bus_write(0x2C, 0);
+}
+
+static void gpio_blit(int x0, int y0, int x1, int y1, const uint16_t *src, int pitch)
+{
+    int w = x1 - x0 + 1;
+
+    gpio_window(x0, y0, x1, y1);
+    for (int y = y0; y <= y1; y++, src += pitch) {
+        if ((uintptr_t)src & 2u) {               /* (the word loads want a word-aligned row) */
+            if (s_wr_stores == 2) {
+                BYTE2(&GPIO0->dr, (bus_ctl | PIN_DC) & ~PIN_WR, HI(*src));
+                BYTE2(&GPIO0->dr, (bus_ctl | PIN_DC) & ~PIN_WR, LO(*src));
+            } else {
+                BYTE3(&GPIO0->dr, (bus_ctl | PIN_DC) & ~PIN_WR, HI(*src));
+                BYTE3(&GPIO0->dr, (bus_ctl | PIN_DC) & ~PIN_WR, LO(*src));
+            }
+            if (s_wr_stores == 2)
+                gpio_pixels2(src + 1, w - 1);
+            else
+                gpio_pixels3(src + 1, w - 1);
+        } else if (s_wr_stores == 2) {
+            gpio_pixels2(src, w);
+        } else {
+            gpio_pixels3(src, w);
+        }
+    }
+}
 
 void panel_io_blit(int x0, int y0, int x1, int y1, const uint16_t *src, int pitch)
 {
-    panel_io_blit_generic(x0, y0, x1, y1, src, pitch);
+    gpio_blit(x0, y0, x1, y1, src, pitch);
 }
 
 void panel_io_sync(void)
@@ -388,7 +487,7 @@ void panel_io_sync(void)
 
 const char *panel_io_path(void)
 {
-    return "pio";
+    return s_wr_stores == 2 ? "pio2" : "pio";
 }
 
 uint32_t panel_io_now_us(void)
