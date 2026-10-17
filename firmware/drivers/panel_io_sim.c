@@ -339,3 +339,21 @@ int panel_io_sim_write_ppm(const char *path)
     }
     return 0;
 }
+
+/* The pixel path: the simulator has one. */
+int panel_io_select(int path)
+{
+    (void)path;
+    return PANEL_PATH_PIO;
+}
+
+void panel_io_poll(void)
+{
+}
+
+const uint32_t *panel_io_counters(void)
+{
+    static const uint32_t zero[4];
+
+    return zero;
+}

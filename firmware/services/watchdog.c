@@ -45,6 +45,11 @@ void watchdog_start(void)
     s_on = 1;
 }
 
+int watchdog_running(void)
+{
+    return s_on;
+}
+
 void watchdog_feed(void)
 {
     if (s_on)

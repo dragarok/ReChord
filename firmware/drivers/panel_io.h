@@ -40,6 +40,22 @@ void panel_io_blit(int x0, int y0, int x1, int y1, const uint16_t *src, int pitc
 void panel_io_sync(void);
 /* The path pixels take now ("pio" = GPIO bit-bang, "vop" = VOP MCU, CPU-fed, "dma" = VOP + DMA). */
 const char *panel_io_path(void);
+
+/*
+ * The pixel path (config key display=auto|pio|pio2|vop|dma). The boot always runs on the GPIO bus
+ * (proven on the device); panel_io_select() moves to the VOP afterwards, only with the watchdog
+ * running, as a TRIAL guarded the way RECHO 0.10 guards it: a marker in SRAM that a warm reset
+ * keeps (and the boot trail's step on the eMMC), cleared once the new path has pushed frames for
+ * 5 s (panel_io_poll(), every main-loop pass). A boot that finds the marker of an unfinished trial
+ * (a hang, then the watchdog's reset) refuses the VOP until power-off. A band that does not finish
+ * (DMA: 50 ms) falls back to the CPU-fed VOP; a VOP that stays busy falls back to GPIO, latched.
+ * Returns the path now in use.
+ */
+enum { PANEL_PATH_PIO = 0, PANEL_PATH_VOP, PANEL_PATH_DMA, PANEL_PATH_PIO2, PANEL_PATH_AUTO };
+int panel_io_select(int path);
+void panel_io_poll(void);
+/* Counters: [0] DMA bands, [1] DMA band timeouts, [2] VOP busy timeouts, [3] slowest band us. */
+const uint32_t *panel_io_counters(void);
 /* Time for the frame accounting: microseconds (for differences; wraps) and time_ms(). */
 uint32_t panel_io_now_us(void);
 uint32_t panel_io_now_ms(void);

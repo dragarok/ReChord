@@ -23,6 +23,8 @@ static const char *const k_off_on[] = { "off", "on" };
 static const char *const k_dac_charge[] = { "off", "on", "power" };   /* CFG_DAC_* */
 static const char *const k_usb_vbus[] = { "port", "gpio2.1" };       /* USB_OUT_SUPPLY_* */
 static const char *const k_cpu[] = { "auto", "max" };
+/* the panel's pixel path, drivers/panel_io.h PANEL_PATH_* (written only when not auto) */
+static const char *const k_display[] = { "pio", "vop", "dma", "pio2", "auto" };
 
 static uint32_t s_hash, s_save_at;
 
@@ -46,6 +48,7 @@ void config_defaults(void)
     g_cfg.usb_out_ma = 500;      /* stock's default: the phone's battery is not the player's charger */
     g_cfg.bt = 0;
     g_cfg.bt_volume = CFG_BT_VOLUME_UNSET;
+    g_cfg.display = CFG_DISPLAY_AUTO;
 }
 
 void config_reset(void)
@@ -102,6 +105,8 @@ static void set(const char *k, const char *v)
         g_cfg.tags = (uint8_t)i;
     else if (!strcmp(k, "cpu") && (i = pick(v, k_cpu, 2)) >= 0)
         g_cfg.cpu = (uint8_t)i;
+    else if (!strcmp(k, "display") && (i = pick(v, k_display, 5)) >= 0)
+        g_cfg.display = (uint8_t)i;
     else if (!strcmp(k, "usb_out") && (i = pick(v, k_off_on, 2)) >= 0)
         g_cfg.usb_out = (uint8_t)i;
     else if (!strcmp(k, "usb_out_ma") && (i = atoi(v)) >= 100 && i <= 500)
@@ -224,6 +229,13 @@ static int text_of(char *t, unsigned long cap)
                     g_cfg.track[0] ? "track=" : "", g_cfg.track, g_cfg.track[0] ? "\n" : "");
     if (n < 0 || (unsigned long)n >= cap)
         return n;
+    if (g_cfg.display != CFG_DISPLAY_AUTO && g_cfg.display < 5u) {
+        int d = snprintf(t + n, cap - (unsigned long)n, "display=%s\n", k_display[g_cfg.display]);
+
+        if (d < 0 || (unsigned long)(n + d) >= cap)
+            return n + d;
+        n += d;
+    }
     if (g_cfg.bt_volume == CFG_BT_VOLUME_UNSET)
         return n + snprintf(t + n, cap - (unsigned long)n, "bt=%s\n%s", k_off_on[g_cfg.bt & 1u], bt);
     return n + snprintf(t + n, cap - (unsigned long)n, "bt=%s\nbt_volume=%d\n%s", k_off_on[g_cfg.bt & 1u],
