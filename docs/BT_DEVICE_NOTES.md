@@ -3,7 +3,7 @@
 The JieLi module on UART1 (115200 8N1, power GPIO2.7, audio routed by GPIO2.0 = 1 /
 GPIO2.14 = 0) as the 512 MB Echo Mini's own logs show it, and the driver changes that
 came from them. Driver: `firmware/drivers/bt_jieli.c`; app glue: `firmware/startup/ap_bt.c`.
-Stock's driver and frame set: `08_bluetooth.md` in our research notes (stock MINIV390 disassembly; not in this repo).
+Everything here builds on stock's own driver: its frame set, pins and timing came from disassembling the stock firmware (MINIV390); the notes, `08_bluetooth.md`, are not in this repo.
 
 ## The module, as logged on the device
 
@@ -56,14 +56,14 @@ module with no link for more than 6 s.
 
 ## Device runs, 2026-10-17
 
-The build with the first five fixes (`00a99f7`), flashed to both slots:
+The build with the first four fixes in the table above, flashed to both slots:
 
 - boot with a remembered device: linked 7.9 s after power-on
 - earphones away mid-song (unsolicited `CTOK`): on the jack at once, tries at +2 s and
   +5 s, linked again 8.6 s after the drop, the song routed back
 - Disconnect: one `CT00`, `CLOK`, unrouted, no reconnect; Forget then reboot: no reconnect
 - USB DAC with the earphones: 186k packets, none dropped, no underrun, 48 -> 192 -> 48 kHz
-- the `CH36` / `CHER` / `CLER` connect above (fixed in `a83bf38`, not yet on the device)
+- the `CH36` / `CHER` / `CLER` connect above (fixed in the next commit, not yet on the device)
 
 ## Open
 
