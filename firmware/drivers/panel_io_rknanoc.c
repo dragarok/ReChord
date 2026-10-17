@@ -372,3 +372,31 @@ void panel_io_delay_ms(uint16_t ms)
 {
     delay_ms(ms);
 }
+
+/* ---- the flush path ------------------------------------------------------------------------------ */
+
+void panel_io_blit_generic(int x0, int y0, int x1, int y1, const uint16_t *src, int pitch);
+
+void panel_io_blit(int x0, int y0, int x1, int y1, const uint16_t *src, int pitch)
+{
+    panel_io_blit_generic(x0, y0, x1, y1, src, pitch);
+}
+
+void panel_io_sync(void)
+{
+}
+
+const char *panel_io_path(void)
+{
+    return "pio";
+}
+
+uint32_t panel_io_now_us(void)
+{
+    return (uint32_t)time_us();
+}
+
+uint32_t panel_io_now_ms(void)
+{
+    return time_ms();
+}

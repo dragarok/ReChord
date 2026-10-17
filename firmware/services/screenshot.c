@@ -3,7 +3,7 @@
  *
  * Layout: BITMAPINFOHEADER with BI_BITFIELDS (565 masks) and a negative
  * height (rows top-down, as the display renders them), pixel data at 512
- * so every 8-row strip (5120 bytes = 10 sectors) lands sector-aligned and
+ * so every 16-row band (10240 bytes = 20 sectors) lands sector-aligned and
  * goes from the display's strip buffer straight to the eMMC. 109312 bytes.
  * RAM: the 512-byte header on the stack, nothing static.
  */

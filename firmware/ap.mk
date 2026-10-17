@@ -67,6 +67,7 @@ AP_UI_SRCS := \
 # including panel_init_rknanoc.c from DRIVERS_COMMON_SRCS).
 AP_DRIVER_SRCS := \
   firmware/drivers/display.c \
+  firmware/drivers/text_stub.c \
   firmware/drivers/font.c \
   firmware/drivers/font8x8.c \
   firmware/drivers/panel_init_rknanoc.c \

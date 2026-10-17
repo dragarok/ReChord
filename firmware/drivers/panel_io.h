@@ -1,7 +1,7 @@
 /*
  * panel_io.h -- ReChord display transport abstraction (clean-room).
  *
- * The display driver speaks to the panel only through these five calls,
+ * The display driver speaks to the panel only through these calls,
  * so the same driver code runs:
  *   - on target:   panel_io_rknanoc.c (RKNanoC VOP MCU register interface),
  *   - on the host: panel_io_sim.c (simulated DCS panel, writes PPM files),
@@ -30,6 +30,19 @@ void panel_io_send_data(uint8_t data);
 /* Send one RGB565 pixel (two data bytes, high byte first) -- the fast
  * path used after RAMWR (0x2C). */
 void panel_io_send_pixel(uint16_t rgb565);
+
+/* A block of pixels into a panel window (the flush path): CASET x0..x1, RASET y0..y1 (PHYSICAL
+ * panel rows), RAMWR, then (x1-x0+1) x (y1-y0+1) pixels from src, rows 'pitch' pixels apart. The
+ * transport may still be reading src when this returns (DMA): src must stay unchanged until the
+ * next panel_io call (every call waits for the block before it) or panel_io_sync(). */
+void panel_io_blit(int x0, int y0, int x1, int y1, const uint16_t *src, int pitch);
+/* Wait until every block is on the panel. */
+void panel_io_sync(void);
+/* The path pixels take now ("pio" = GPIO bit-bang, "vop" = VOP MCU, CPU-fed, "dma" = VOP + DMA). */
+const char *panel_io_path(void);
+/* Time for the frame accounting: microseconds (for differences; wraps) and time_ms(). */
+uint32_t panel_io_now_us(void);
+uint32_t panel_io_now_ms(void);
 
 /* Millisecond delay hook for init sequences (power-on delays).
  * The sim backend counts but never sleeps. */
