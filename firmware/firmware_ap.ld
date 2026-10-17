@@ -121,10 +121,23 @@ SECTIONS
         _bss_end = .;
     } > FW_RAM
 
-    /* Remaining SRAM between .bss and the top of FW_RAM is the heap
+    /* ---- not cleared at boot: what a warm reset must keep (the crash record,
+       the display trial's marker). In our own RAM, which the boot ROM leaves
+       alone at power-on (device, rung 1: noise there), never in the ROM's own
+       record at 0x0308FFE8 (docs/ROADMAP.md: the recovery path comes first). */
+    .noinit ALIGN(4) (NOLOAD) :
+    {
+        . = ALIGN(4);
+        _noinit_start = .;
+        *(.noinit*)
+        . = ALIGN(4);
+        _noinit_end = .;
+    } > FW_RAM
+
+    /* Remaining SRAM between .noinit and the top of FW_RAM is the heap
        (symbolic only: no allocator is wired in milestone 1).  The stack zone
        below 0x03004000 is NOT heap. */
-    __heap_start = _bss_end;
+    __heap_start = _noinit_end;
     __heap_end   = ORIGIN(FW_RAM) + LENGTH(FW_RAM);
 
     /* Flash/load-resident address of the .data init image (inside the blob). */

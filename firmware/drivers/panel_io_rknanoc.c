@@ -575,12 +575,12 @@ static void gpio_blit(int x0, int y0, int x1, int y1, const uint16_t *src, int p
 #define DMA_TIMEOUT_US 50000u              /* RECHO: 50 ms */
 #define DMA_MAX_WORDS  4095u               /* the block size field */
 
-/* The trial marker: two words that a warm reset keeps, in the spare bytes above the PCM ring's DMA
- * descriptors (AS_LLI + 8 x 28 B = 0x0308FFE0; services/bootguard.c's record is at 0x0308FFE8).
- * Not RECHO's 0x0309FFA0: our PCM ring fills the last 64 KiB of SRAM. The second word is the first
- * one inverted, so SRAM noise at power-on reads as "no marker". */
-#define MARK         (*(volatile uint32_t *)0x0308FFE0u)
-#define MARK_INV     (*(volatile uint32_t *)0x0308FFE4u)
+/* The trial marker: two words that a warm reset keeps, in .noinit (firmware_ap.ld; not next to the
+ * boot ROM's own record at 0x0308FFE8, not RECHO's 0x0309FFA0 in our PCM ring). The second word is
+ * the first one inverted, so SRAM noise at power-on reads as "no marker". */
+volatile uint32_t g_vop_mark[2] __attribute__((section(".noinit")));   /* (tests: by symbol) */
+#define MARK         (g_vop_mark[0])
+#define MARK_INV     (g_vop_mark[1])
 #define MARK_TRIAL   0x564F5031u           /* 'VOP1': a trial started and has not proven itself */
 #define MARK_FAIL    0x564F5046u           /* 'VOPF': refused until power-off */
 #define TRIAL_MS     5000u
