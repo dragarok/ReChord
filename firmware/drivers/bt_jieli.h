@@ -15,9 +15,10 @@
  *             not wired here: ReChord has no headphone sense yet (bt_jack_in()).
  *
  * Non-blocking: bt_poll() from the main loop (every 10 ms tick) runs the
- * power-on sequence, the scan, the connect, the status poll and the idle
- * power-off (5 min: stock's "30000" counts 10 ms ticks, see bt_jieli.c). Nothing is ever printed on UART1 (stock's fault handler
- * prints there; ours does not touch UART1 at all).
+ * power-on sequence, the scan, the connect, the status poll, the reconnect and
+ * the idle power-off (5 min: stock's "30000" counts 10 ms ticks, see bt_jieli.c;
+ * only time this code was served counts). Nothing is ever printed on UART1
+ * (stock's fault handler prints there; ours does not touch UART1 at all).
  */
 #ifndef RECHORD_BT_JIELI_H
 #define RECHORD_BT_JIELI_H
@@ -78,8 +79,16 @@ void bt_ui_active(int on);
 void bt_set_playing(int playing);
 
 /* The power-on hook for the boot auto-on (stock seg21 0307a4d2 when the
- * setting is on): power on and reconnect to (mac) twice, 3 s apart. */
+ * setting is on): power on and reconnect to (mac): stock's two tries 3 s apart,
+ * then [ours] every 10, 20, then 30 s until it links. A link lost without the
+ * user's Disconnect is reconnected the same way. */
 void bt_autostart(const uint8_t mac[6], const char *name);
+
+/* [ours] The source started playing (the player, or a USB DAC host streaming)
+ * with Bluetooth wanted: bring the link to (mac) back if it is down. The module
+ * off after its idle time: power on and reconnect; on and unlinked: reconnect
+ * now. Nothing after the user's Disconnect (until a connect or the next boot). */
+void bt_wake(const uint8_t mac[6], const char *name);
 
 /* 1 = a jack is in (the jack then wins the audio path). Weak, 0: ReChord has
  * no headphone sense yet (stock reads GPIO2.8 / GPIO0.13: polarity unverified). */
@@ -92,7 +101,8 @@ enum {
     BT_EV_DISCONNECTED,
     BT_EV_CONNECT_FAILED,              /* CLER / CHER, or 3 s without an answer (then CT00) */
     BT_EV_NO_MODULE,                   /* no CV1x in 5 s (stock also turns the setting off) */
-    BT_EV_IDLE_OFF,                    /* 5 min unconnected outside the screen (stock: setting off) */
+    BT_EV_IDLE_OFF,                    /* 5 min unconnected outside the screen, the source not
+                                        * playing (stock: setting off; ReChord keeps it: bt_wake) */
 };
 void bt_event(int ev, const bt_dev_t *dev);
 

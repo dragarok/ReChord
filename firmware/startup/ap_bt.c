@@ -237,11 +237,13 @@ void bt_event(int ev, const bt_dev_t *dev)
         }
         break;
     case BT_EV_NO_MODULE:               /* seg84: timeout -> +0x34b = 0 */
-    case BT_EV_IDLE_OFF:                /* ram:03067a0c: +0x34a = +0x34b = 0 */
         g_cfg.bt = 0;
         s_after_on = 0;
         config_save_later();
         break;
+    case BT_EV_IDLE_OFF:                /* ram:03067a0c: +0x34a = +0x34b = 0. [ours] the setting stays
+                                         * on and the next play wakes it (bt_wake): stock's off left a
+                                         * device's later boots without Bluetooth (2026-10-17) */
     default:
         break;
     }
@@ -348,8 +350,20 @@ void bt_app_init(void)
 void bt_app_tick(void)
 {
     static int s_live;                  /* the last tick did the work below */
+    static int s_was_playing;
     int in_screen = ui_top_screen() == &bt_screen;
     bt_state_t st = bt_state();
+    int playing;
+
+    /* Wanted and paired: a start of the source (a track, a USB DAC host streaming) brings a lost
+     * link back (bt_wake: the module on again after its idle time, or a reconnect now). */
+    if (g_cfg.bt && g_cfg.bt_paired) {
+        playing = s_ext >= 0 ? s_ext > 0 : player_get_state() == PLAYER_PLAYING;
+        if (playing && !s_was_playing)
+            bt_wake(g_cfg.bt_mac, g_cfg.bt_name);
+        s_was_playing = playing;
+        st = bt_state();
+    }
 
     /* Off (the default) and not on its screen: nothing can happen, so nothing is done -- the
      * work below (the player's state, the time, the framer) cost core A 3-4 instructions per

@@ -136,15 +136,35 @@ static void uart_close(void)
                                          * QEMU: stock's CP00 came 30.000 s after its CS00 */
 #define T_PAIRED_MS       30000u        /* [inferred]: CLOK and no CQO, give up waiting (stock: state 0 at CLOK) */
 #define T_IDLE_OFF_MS     300000u       /* ram:03067cda: > 30000 ticks unconnected outside the screen */
+/* [ours], from the device log of 2026-10-17 (log/ECHOLOG_20261017_bt.txt in the project): */
+#define T_RETRY_MS        10000u        /* after stock's two tries: 10 s, 20 s, then every 30 s. A CLER
+                                         * there came 5-8 s after a CL06 (earphones in their case) */
+#define T_RETRY_MAX_MS    30000u
+#define T_LOST_MS         2000u         /* a lost link: the first try 2 s later */
+#define T_CL_ECHO_MS      5000u         /* a CLOK this soon after our CL06 answers it, even linked */
+#define T_STOP_MS         300u          /* a stop reaches the module once it lasted 300 ms: a USB host
+                                         * flipped its alternate 4 times in 40 ms at a rate change */
+#define T_DISC_MS         3000u         /* our CT00 unanswered for 3 s: unrouted anyway */
+#define T_SERVED_MAX_MS   1000u         /* the idle time counts at most 1 s per tick: a USB disk
+                                         * session that held the loop for 42 min idled it off at once */
 
 /* ---- state ---------------------------------------------------------------------- */
 static bt_state_t s_state;
 static uint32_t s_t;                    /* time the current state (or step) began */
-static uint32_t s_poll_t, s_hold, s_busy_t, s_sub_t;
+static uint32_t s_poll_t, s_hold, s_sub_t;
 static int s_ver = -1, s_ui, s_playing = -1, s_routed, s_ch_sent, s_paired_wait;
 static int s_avrcp;                     /* stock 0x0301D8AC: 0 none, 1 paused, 2 playing */
-static int s_reconnect;                 /* auto-reconnect attempts left */
-static uint32_t s_reconnect_t;
+static int s_rc;                        /* reconnecting to s_peer until it links */
+static unsigned s_rc_n;                 /* CL06 tries sent in this run */
+static uint32_t s_rc_t;                 /* the last try */
+static uint32_t s_cl_t;                 /* our last CL06 (0: none) */
+static int s_user_off;                  /* the user's Disconnect: no reconnect until a connect or a boot */
+static uint32_t s_disc_t;               /* our CT00 waiting for its answer (0: none) */
+static uint32_t s_idle, s_last;         /* unconnected time served (ms); the last bt_poll (0: none yet) */
+static int s_want;                      /* the source plays (bt_set_playing), linked or not */
+static uint32_t s_stop_t;               /* the source stopped then, not yet sent (0: none) */
+static uint32_t s_q_t;                  /* our CQ00 while connected, unanswered (0: none) */
+static unsigned s_q_miss;               /* such polls in a row (measured: the device's answer set is open) */
 static uint32_t s_seq = 1, s_tx_fail;
 static bt_dev_t s_list[BT_SCAN_MAX], s_peer;
 static int s_n;
@@ -258,15 +278,48 @@ void bt_board_off(void)
     s_state = BT_OFF;
 }
 
-static void link_down(void)
+static int peer_set(void)
+{
+    for (int i = 0; i < BT_MAC_LEN; i++)
+        if (s_peer.mac[i])
+            return 1;
+    return 0;
+}
+
+/* The wait before the next CL06 of a reconnect run, by the tries already sent. */
+static uint32_t rc_gap(void)
+{
+    if (s_rc_n < 2)
+        return T_RECONNECT_MS;          /* stock's two tries, 3 s apart (ram:03067692) */
+    return s_rc_n == 2 ? T_RETRY_MS : s_rc_n == 3 ? 2u * T_RETRY_MS : T_RETRY_MAX_MS;
+}
+
+/* Reconnect to s_peer, the first try (first_ms) after the module is up; why = NULL: not logged. */
+static void rc_start(const char *why, uint32_t first_ms)
+{
+    if (s_rc || s_user_off || !peer_set())
+        return;
+    s_rc = 1;
+    s_rc_n = 0;
+    s_rc_t = time_ms() - T_RECONNECT_MS + first_ms;
+    if (why)
+        log_printf("bt: reconnecting to '%s' (%s)", s_peer.name, why);
+}
+
+/* lost = 1: the link went without our asking (reconnected unless the user disconnected). */
+static void link_down(int lost)
 {
     int was = s_state == BT_CONNECTED;
 
     route(0);
     s_paired_wait = 0;
+    s_disc_t = 0;
+    s_q_t = 0;
     if (was) {
         log_printf("bt: disconnected");
         bt_event(BT_EV_DISCONNECTED, &s_peer);
+        if (lost)
+            rc_start("link lost", T_LOST_MS);
     }
 }
 
@@ -280,16 +333,17 @@ int bt_power(int on)
         bt_rx_init(&s_rx);
         s_ver = -1;
         s_n = 0;
-        s_busy_t = time_ms();
+        s_idle = 0;
+        s_last = 0;
         go(BT_STARTING);
         log_printf("bt: power on");
         return 0;
     }
     if (s_state == BT_OFF)
         return 0;
-    link_down();
+    link_down(0);
     module_off();
-    s_reconnect = 0;
+    s_rc = 0;
     go(BT_OFF);
     log_printf("bt: power off");
     return 0;
@@ -298,12 +352,29 @@ int bt_power(int on)
 void bt_autostart(const uint8_t mac[6], const char *name)
 {
     bt_power(1);
+    s_user_off = 0;
     if (mac) {
         memcpy(s_peer.mac, mac, BT_MAC_LEN);
         snprintf(s_peer.name, sizeof s_peer.name, "%s", name ? name : "");
-        s_reconnect = 2;                /* ram:03067692: counter 1 -> 2 tries, 3 s apart */
-        s_reconnect_t = time_ms() - T_RECONNECT_MS;   /* (the first once the module is up) */
+        s_rc = 0;
+        rc_start(0, 0);                 /* ram:03067692: counter 1 -> 2 tries, 3 s apart, then ours */
     }
+}
+
+void bt_wake(const uint8_t mac[6], const char *name)
+{
+    if (s_user_off || !mac || s_state == BT_CONNECTED || s_state == BT_CONNECTING ||
+        s_state == BT_SCANNING || s_state == BT_NO_MODULE || (s_state == BT_ON && s_rc))
+        return;
+    if (s_state == BT_OFF) {
+        log_printf("bt: the source plays: the module on again");
+        bt_power(1);
+    }
+    if (!s_rc) {
+        memcpy(s_peer.mac, mac, BT_MAC_LEN);
+        snprintf(s_peer.name, sizeof s_peer.name, "%s", name ? name : "");
+    }
+    rc_start(s_state == BT_STARTING ? 0 : "the source plays", 0);
 }
 
 int bt_scan(void)
@@ -317,7 +388,7 @@ int bt_scan(void)
     if (s_state == BT_CONNECTED || s_state == BT_CONNECTING)
         return -1;
     s_n = 0;
-    s_reconnect = 0;
+    s_rc = 0;
     go(BT_SCANNING);
     return tx_cmd('S');                 /* CS00: seg84 0307a2a6 / 0307aeee */
 }
@@ -331,8 +402,10 @@ int bt_connect(const uint8_t mac[6], const char *name)
     snprintf(s_peer.name, sizeof s_peer.name, "%s", name ? name : "");
     s_ch_sent = 0;
     s_paired_wait = 0;
-    s_reconnect = 0;
+    s_rc = 0;
+    s_user_off = 0;
     go(BT_CONNECTING);
+    s_cl_t = time_stamp(time_ms());
     return tx_mac('L', mac);            /* CL06+MAC: seg84 0307aace */
 }
 
@@ -340,6 +413,9 @@ int bt_disconnect(void)
 {
     if (s_state != BT_CONNECTED && s_state != BT_CONNECTING)
         return -1;
+    s_user_off = 1;
+    s_rc = 0;
+    s_disc_t = time_stamp(time_ms());
     return tx_cmd('T');                 /* CT00: seg84 0307ba00 (event 0xDF) */
 }
 
@@ -368,9 +444,16 @@ static void connected(const bt_frame_t *f)
         if (f->name[0])
             memcpy(s_peer.name, f->name, sizeof s_peer.name);
     }
+    s_q_t = 0;
+    if (s_q_miss) {
+        log_printf("bt: CQ00 answered again after %u unanswered", s_q_miss);
+        s_q_miss = 0;
+    }
     if (s_state == BT_CONNECTED)
         return;
-    s_reconnect = 0;
+    s_rc = 0;
+    s_user_off = 0;
+    s_disc_t = 0;
     s_paired_wait = 0;
     go(BT_CONNECTED);
     log_printf("bt: connected to '%s'", s_peer.name);
@@ -416,20 +499,30 @@ static void frame(const bt_frame_t *f, uint32_t now)
             go(BT_ON);                  /* CSEN: state 0. (CSER: ignored by stock) */
         break;
     case BT_RX_OK:
-        if (f->cmd == 'L') {            /* CLOK: paired; connected comes with CQO */
-            log_printf("bt: paired '%s'", s_peer.name);
+        if (f->cmd == 'L' && s_state == BT_CONNECTED && !(s_cl_t && now - s_cl_t < T_CL_ECHO_MS)) {
+            /* stock's screen parser: CLOK -> connected = 0 (08_bluetooth.md 2.3); the device
+             * answers our CT00 with CLOK, never CTOK (2026-10-17, six times) */
+            log_printf("bt: CLOK: the link closed");
+            link_down(1);
+            go(BT_ON);
+        } else if (f->cmd == 'L' && (s_state == BT_CONNECTING || s_rc)) {
+            log_printf("bt: paired '%s'", s_peer.name);    /* connected comes with CQO */
             bt_event(BT_EV_PAIRED, &s_peer);
             s_paired_wait = 1;
             s_t = now;
         } else if (f->cmd == 'H') {     /* CHOK: connected */
             connected(0);
-        } else if (f->cmd == 'T') {     /* CTOK (or the resident's CT): disconnected */
-            link_down();
+        } else if (f->cmd == 'T') {     /* CTOK (or the resident's CT): disconnected; the device
+                                         * sends it unasked when the earphones go */
+            link_down(1);
             go(BT_ON);
         }
         break;
     case BT_RX_ERR:                     /* CLER / CHER */
-        if (s_state == BT_CONNECTING) {
+        if (s_state == BT_ON && s_rc) {
+            s_paired_wait = 0;
+            log_printf("bt: reconnect refused (C%cER), try %u", f->cmd, s_rc_n);
+        } else if (s_state == BT_CONNECTING) {
             log_printf("bt: connect failed (C%cER)", f->cmd);
             go(BT_ON);
             bt_event(BT_EV_CONNECT_FAILED, &s_peer);
@@ -443,7 +536,7 @@ static void frame(const bt_frame_t *f, uint32_t now)
             connected(f);
         } else {
             if (s_state == BT_CONNECTED) {      /* CQS/CQL/CQI: the resident sets connected = 0 */
-                link_down();
+                link_down(1);
                 go(BT_ON);
             }
         }
@@ -469,7 +562,15 @@ static void frame(const bt_frame_t *f, uint32_t now)
 void bt_poll(void)
 {
     uint32_t now = time_ms();
+    uint32_t served = s_last ? now - s_last : 0;
     bt_frame_t f;
+
+    s_last = now;
+    if (served > T_SERVED_MAX_MS) {     /* the loop was held (a USB disk session): not idle time */
+        if (s_state != BT_OFF && s_state != BT_NO_MODULE)
+            log_printf("bt: not served for %u ms", (unsigned)served);
+        served = T_SERVED_MAX_MS;
+    }
 
     /* frames */
     while (s_tail != s_head) {
@@ -481,6 +582,15 @@ void bt_poll(void)
     }
     if (bt_rx_idle(&s_rx, now, &f))
         frame(&f, now);
+
+    if (s_disc_t && now - s_disc_t >= T_DISC_MS) {
+        s_disc_t = 0;
+        if (s_state == BT_CONNECTED || s_state == BT_CONNECTING) {
+            log_printf("bt: no answer to CT00 in 3 s: disconnected anyway");
+            link_down(0);
+            go(BT_ON);
+        }
+    }
 
     switch (s_state) {
     case BT_STARTING:
@@ -526,30 +636,52 @@ void bt_poll(void)
         break;
     }
 
-    /* auto-reconnect (ram:03067692): CL06 + the remembered MAC every 3 s while it lasts */
-    if (s_state == BT_ON && s_reconnect > 0 && now - s_reconnect_t >= T_RECONNECT_MS) {
-        s_reconnect--;
-        s_reconnect_t = now;
+    if (s_state == BT_ON && s_paired_wait && now - s_t >= T_PAIRED_MS) {
+        log_printf("bt: paired but no link in 30 s");
+        s_paired_wait = 0;
+    }
+
+    /* reconnect: stock's auto-reconnect (ram:03067692: CL06 + the remembered MAC twice, 3 s
+     * apart), then [ours] 10, 20 and every 30 s, never while a CLOK waits for its link */
+    if (s_state == BT_ON && s_rc && now - s_rc_t >= rc_gap() && !(s_rc_n >= 2 && s_paired_wait)) {
+        s_rc_n++;
+        s_rc_t = now;
+        if (s_rc_n > 2)
+            log_printf("bt: reconnect try %u", s_rc_n);
+        s_cl_t = time_stamp(now);
         tx_mac('L', s_peer.mac);
     }
 
     /* status poll: CQ00 every 3 s in the screen (seg84 0307b394), else every 5 s (resident
      * ram:030677ae), which skips 10 polls after a CP/CC key and polls not while reconnecting */
     if (now - s_poll_t >= (s_ui ? T_POLL_UI_MS : T_POLL_MS)) {
+        int q = 0;
+
         s_poll_t = now;
         if (s_ui)
-            tx_cmd('Q');
+            q = 1;
         else if (s_hold)
             s_hold--;
-        else if (!s_reconnect)
+        else if (!(s_rc && s_rc_n < 2))
+            q = 1;
+        if (q && s_state == BT_CONNECTED) {
+            if (s_q_t) {                /* the last one unanswered: logged, not acted on */
+                s_q_miss++;
+                if (s_q_miss == 1 || s_q_miss == 3 || s_q_miss % 60 == 10)
+                    log_printf("bt: CQ00 unanswered while connected (%u in a row)", s_q_miss);
+            }
+            s_q_t = time_stamp(now);
+        }
+        if (q)
             tx_cmd('Q');
     }
 
     /* idle off (ram:03067a0c): outside the screen, not connected, 5 min since the last
-     * connected or in-screen time */
-    if (s_state == BT_CONNECTED || s_ui)
-        s_busy_t = now;
-    else if (now - s_busy_t > T_IDLE_OFF_MS) {
+     * connected or in-screen time. [ours] Only time served counts, and not while the source
+     * plays and a reconnect runs (the earphones may come back) */
+    if (s_state == BT_CONNECTED || s_ui || (s_want && s_rc))
+        s_idle = 0;
+    else if ((s_idle += served) > T_IDLE_OFF_MS) {
         log_printf("bt: 5 min unconnected: power off");
         bt_power(0);
         bt_event(BT_EV_IDLE_OFF, 0);
@@ -561,12 +693,28 @@ void bt_set_playing(int playing)
     uint8_t b[BT_TX_MAX];
 
     playing = !!playing;
+    s_want = playing;
     if (s_state != BT_CONNECTED) {
         s_playing = -1;
+        s_stop_t = 0;
         return;
     }
-    if (playing == s_playing)
+    if (playing == s_playing) {
+        s_stop_t = 0;
         return;
+    }
+    if (!playing && s_playing == 1) {   /* [ours] a stop once it lasted T_STOP_MS (stock sends one
+                                         * frame per action; a USB host flips within ms) */
+        uint32_t now = time_ms();
+
+        if (!s_stop_t) {
+            s_stop_t = time_stamp(now);
+            return;
+        }
+        if (now - s_stop_t < T_STOP_MS)
+            return;
+    }
+    s_stop_t = 0;
     tx(b, bt_enc_level(b, playing ? 0x1Eu : 0u));   /* CY0+30 / CY0+0 */
     /* the AVRCP-like status (seg27 0307de7e..0307e102, state 0x0301D8AC): a play/pause here (not
      * the connect itself) tells the module when its state differs: resume while it is < 2 ->
@@ -589,7 +737,7 @@ void bt_set_playing(int playing)
 void bt_ui_active(int on)
 {
     if (s_ui && !on)
-        s_busy_t = time_ms();           /* (the idle time runs from leaving the screen) */
+        s_idle = 0;                     /* (the idle time runs from leaving the screen) */
     s_ui = on;
 }
 
