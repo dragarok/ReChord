@@ -143,6 +143,18 @@ static void update_progress(const char *what, uint32_t done, uint32_t total)
     display_flush_rows(8 + 2 * 14, 8 + 2 * 14 + 7);
 }
 
+/* A screen that runs its own loop keeps what the main loop serves going: the music, the storage
+ * queue and log, the BT module (audit bug 3: the cable question starved the input ring). */
+static int s_bt_ready;                    /* bt_app_init() ran (ask() runs at boot too) */
+
+static void pump(void)
+{
+    (void)player_process();
+    ap_bg_poll();
+    if (s_bt_ready)
+        bt_app_tick();
+}
+
 /* Every gesture the screens' events come from, in the log (DESIGN 3.3: "ui: key PLAY.x2 on player
  * t=..."; the tests time holds and multi-presses by it). A key's DOWN and the window closing are
  * left out but for PLAY's (its x2/x3 label), and so is a repeat's every step but the merged ones. */
@@ -166,8 +178,10 @@ static int ask(int any_key)
 {
     input_event_t ev;
 
-    while (keys_power())
+    while (keys_power()) {
+        pump();
         cpu_wait_tick();
+    }
     input_mock_clear();
     for (;;) {
         input_scan(keys_adc(), keys_power());
@@ -182,6 +196,7 @@ static int ask(int any_key)
             if (ev.type == KEY_BACK || ev.type == KEY_POWER)
                 return 0;
         }
+        pump();
         cpu_wait_tick();
     }
 }
@@ -320,6 +335,7 @@ static int detect_wait(int want, uint32_t ms, uint32_t *took)
         input_scan(keys_adc(), keys_power());
         if (input_poll(&ev) > 0 && ev.type == KEY_BACK)
             return -1;
+        pump();
         cpu_wait_tick();
     }
     *took = ms;
@@ -759,7 +775,7 @@ static void battery_info_run(void)
             line(6, buf);
             display_flush_rows(0, DISPLAY_H - 1);
         }
-        (void)player_process();          /* the music goes on meanwhile */
+        pump();                          /* the music goes on meanwhile */
         input_scan(keys_adc(), keys_power());
         if (input_poll(&ev) > 0) {
             power_activity();
@@ -838,6 +854,7 @@ static void usb_probe_menu(void)
         input_scan(keys_adc(), keys_power());
         if (input_poll(&ev) > 0 && ev.adc_value != INPUT_ADC_REPEAT)
             break;
+        pump();
         cpu_wait_tick();
     }
     ui_invalidate_all();
@@ -1096,6 +1113,7 @@ static void usb_dac_session(void)
  * waits for 5 s without a key; its PHY bring-up cuts the DAC's supply, so never while the
  * player plays (or is paused). */
 static uint32_t s_wake_due;              /* time_ms() from which usb_wake() runs (0: not due) */
+static int s_cable_seen;                 /* a cable was in since boot (before: the boot's own wake) */
 
 static void usb_wake(const char *why)
 {
@@ -1127,10 +1145,12 @@ static void cable_connected(void)
         line(3, "MENU: USB DAC");
         line(4, "BACK: charge only");
         display_flush_rows(0, DISPLAY_H - 1);
-        while (keys_power())
+        while (keys_power()) {
+            pump();
             cpu_wait_tick();
+        }
         input_mock_clear();
-        for (;;) {                       /* PLAY, MENU or BACK/power */
+        for (;;) {                       /* PLAY, MENU or BACK/power (the music plays on meanwhile) */
             input_scan(keys_adc(), keys_power());
             if (input_poll(&ev) > 0 && ev.adc_value != INPUT_ADC_REPEAT) {
                 disk = ev.type == KEY_SELECT;
@@ -1140,6 +1160,7 @@ static void cable_connected(void)
             }
             if (!usb_cable())
                 break;
+            pump();
             cpu_wait_tick();
         }
         ui_invalidate_all();
@@ -1384,6 +1405,7 @@ void ap_ui_loop(void)
     bootcrumb(BC_POWER);
     power_init();
     bt_app_init();                   /* the BT module on only if the setting says so (ap_bt.c) */
+    s_bt_ready = 1;
     bootcrumb(BC_UI_INIT);
     ui_init();
     menu_screen_bind(&k_root);
@@ -1466,17 +1488,18 @@ void ap_ui_loop(void)
             if (!usb_out_active())
                 usb_dwc2_park();         /* (charge only: no session parked it) */
         } else if (!cable && !s_phy_parked && !usb_out_active()) {
-            if (player_get_state() == PLAYER_STOPPED)
-                usb_wake("boot");        /* no cable at boot: so a later plug is seen */
-            else
-                s_wake_due = time_stamp(time_ms());
+            /* no cable at boot: the comparators woken so a later plug is seen, but after the first
+             * screen is up (the sequence holds the loop ~890 ms; it was the first pass's whole
+             * "keys+events 1362", OURS_AUDIT 3.4); the keys are sampled meanwhile (ap_tick.c) */
+            s_wake_due = time_stamp(time_ms() + 300u);
         } else if (!cable && s_cable) {
             s_wake_due = time_stamp(time_ms() + 1500u);   /* the cable out: again, once it is gone */
         }
         if (s_wake_due && !cable && time_ms() - s_wake_due < 0x80000000u &&
-            player_get_state() == PLAYER_STOPPED && power_key_idle_ms() >= 5000u)
-            usb_wake("unplug");          /* (paused: a resume would find the DAC unpowered) */
+            player_get_state() == PLAYER_STOPPED && power_key_idle_ms() >= (s_cable_seen ? 5000u : 1000u))
+            usb_wake(s_cable_seen ? "unplug" : "boot");   /* (paused: a resume would find the DAC unpowered) */
         s_phy_parked = 1;
+        s_cable_seen |= cable;
         s_cable = cable;
         usb_dwc2_idle_tick();            /* the armed PHY held after USB_ARM_MS */
         usb_out_tick();
