@@ -59,23 +59,47 @@ const char *theme_name(int i)
     return t ? t->name : 0;
 }
 
-int theme_load_named(const char *name)
+int theme_index(const char *name)
 {
     int i, n;
 
     if (name == 0)
         return -1;
-
     n = theme_builtin_count();
     for (i = 0; i < n; i++) {
         const theme_t *t = theme_builtin_get(i);
-        if (t && name_eq(t->name, name)) {
-            g_current = *t;
-            g_have_current = 1;
-            return 0;
-        }
+        if (t && name_eq(t->name, name))
+            return i;
     }
-    return -2;   /* unknown theme name — current theme left untouched */
+    return -2;
+}
+
+const theme_t *theme_builtin(int i)
+{
+    return theme_builtin_get(i);
+}
+
+int theme_load_index(int i)
+{
+    const theme_t *t = theme_builtin_get(i);
+
+    if (t == 0)
+        return -1;
+    g_current = *t;
+    g_have_current = 1;
+    return 0;
+}
+
+int theme_load_named(const char *name)
+{
+    int i;
+
+    if (name == 0)
+        return -1;
+    i = theme_index(name);
+    if (i < 0)
+        return -2;   /* unknown theme name — current theme left untouched */
+    return theme_load_index(i);
 }
 
 int theme_validate(const theme_t *t)

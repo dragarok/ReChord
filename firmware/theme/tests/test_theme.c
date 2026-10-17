@@ -9,7 +9,10 @@
  *   3. the file parser round-trips a sample theme file: every field written
  *      to the file comes back unchanged, unknown/garbage lines are skipped,
  *      and a partial file overrides only the keys it contains;
- *   4. theme_set()/theme_get() identity.
+ *   4. theme_set()/theme_get() identity;
+ *   5. the DESIGN.md 5.1 tokens: four built-ins in order, sample values,
+ *      readable pairs, selection by index and name, `#RRGGBB` and the
+ *      `bg`/`ok` key aliases in files.
  *
  * Compile (host):
  *   cc -Wall -Werror -O2 -o test_theme \
@@ -176,6 +179,46 @@ int main(void)
               "one-key file applies one key");
         CHECK(t.background == 0x0000, "override writes the key present");
         CHECK(t.text == old_text, "override preserves keys not present");
+    }
+
+    /* ---- 5. DESIGN.md 5.1 tokens and selection ---------------------- */
+    {
+        static const char *const order[] = { "Classic", "Paper", "Night", "Contrast" };
+        theme_t t;
+        int k;
+
+        CHECK(theme_count() == 4, "four built-in themes");
+        for (k = 0; k < 4; k++)
+            CHECK(theme_name(k) && strcmp(theme_name(k), order[k]) == 0, "built-in order");
+        CHECK(theme_index("contrast") == 3 && theme_index("PAPER") == 1, "theme_index is case-insensitive");
+        CHECK(theme_index("Sepia") < 0 && theme_index(0) < 0, "theme_index of an unknown name");
+        CHECK(theme_load_index(3) == 0 && strcmp(theme_get()->name, "Contrast") == 0, "theme_load_index");
+        CHECK(theme_load_index(4) < 0 && theme_load_index(-1) < 0 &&
+              strcmp(theme_get()->name, "Contrast") == 0, "out of range leaves the current theme");
+        CHECK(theme_builtin(0) && strcmp(theme_builtin(0)->name, "Classic") == 0 && theme_builtin(4) == 0,
+              "theme_builtin");
+        /* sample values (8-bit tokens quantised to RGB565) */
+        CHECK(theme_builtin(0)->sel_bg == 0x2B37 && theme_builtin(0)->value == 0x6DBF &&
+              theme_builtin(0)->keybar_bg == 0x18E4 && theme_builtin(0)->hires == 0xED89, "Classic tokens");
+        CHECK(theme_builtin(1)->header_bg == 0xEF3A && theme_builtin(1)->sel_bg == 0x9AC2, "Paper tokens");
+        CHECK(theme_builtin(2)->text == 0xAD56 && theme_builtin(2)->sel_bg == 0x1A6F, "Night tokens");
+        CHECK(theme_builtin(3)->accent == 0xFEA0 && theme_builtin(3)->divider == 0xFFFF &&
+              theme_builtin(3)->sel_text == 0x0000, "Contrast tokens");
+        for (k = 0; k < 4; k++) {
+            const theme_t *b = theme_builtin(k);
+
+            CHECK(b->sel_text != b->sel_bg && b->key_text != b->keybar_bg && b->on_accent != b->accent &&
+                  b->badge_text != b->badge_bg && b->text != b->header_bg && b->bar_fill != b->bar_track,
+                  "readable token pairs");
+        }
+        /* files: #RRGGBB, aliases, new keys */
+        t = *theme_builtin(0);
+        CHECK(theme_file_parse("sel_bg = #2A66BE\nbg=#000000\nok = #00FF00\nscroll=0x1234\n"
+                               "warn = #12345\nhires=#GG0000\n", &t) == 4,
+              "four good colour lines, two bad ones skipped");
+        CHECK(t.sel_bg == 0x2B37 && t.background == 0x0000 && t.success == 0x07E0 && t.scroll == 0x1234,
+              "#RRGGBB quantised, bg/ok aliases");
+        CHECK(t.warn == theme_builtin(0)->warn && t.hires == theme_builtin(0)->hires, "bad colours left alone");
     }
 
     printf("\n%s (%d failures)\n", failures ? "FAILED" : "PASSED", failures);

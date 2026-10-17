@@ -323,6 +323,11 @@ test-dsp: firmware/rechord_dsp_core.c firmware/rechord_dsp_core.h firmware/test_
 host-tests:
 	CC=$(HOSTCC) sh firmware/services/tests/run_tests.sh
 	CC=$(HOSTCC) sh firmware/drivers/tests/run_tests.sh
+	@mkdir -p build/host
+	$(HOSTCC) -std=c99 -Wall -Werror -Ifirmware/theme -o build/host/test_theme firmware/theme/tests/test_theme.c \
+	  firmware/theme/theme.c firmware/theme/themes_builtin.c firmware/theme/theme_file.c
+	build/host/test_theme > build/host/test_theme.txt || { cat build/host/test_theme.txt; exit 1; }
+	@tail -1 build/host/test_theme.txt
 	HOSTCC=$(HOSTCC) $(PYTHON) tools/test_fs_write.py
 	@mkdir -p build/host
 	$(HOSTCC) -O2 -Wall -Ifirmware -o build/host/test_fw_powercut firmware/services/test_fw_powercut.c \

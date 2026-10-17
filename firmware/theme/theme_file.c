@@ -86,19 +86,48 @@ static int parse_u32(const char *s, int len, unsigned *out)
     return 0;
 }
 
+/* A colour: RGB565 (decimal or 0x hex, <= 0xFFFF) or "#RRGGBB" (8-bit sRGB,
+ * quantised to RGB565 like every built-in value). Returns 0 on success. */
+static int parse_color(const char *s, int len, unsigned *out)
+{
+    int i = 0;
+    unsigned v = 0;
+
+    while (len > 0 && is_space(*s)) { s++; len--; }
+    while (len > 0 && is_space(s[len - 1])) len--;
+    if (len == 7 && s[0] == '#') {
+        for (i = 1; i < 7; i++) {
+            char c = s[i];
+            unsigned d;
+            if (c >= '0' && c <= '9') d = (unsigned)(c - '0');
+            else if (c >= 'a' && c <= 'f') d = (unsigned)(c - 'a' + 10);
+            else if (c >= 'A' && c <= 'F') d = (unsigned)(c - 'A' + 10);
+            else return -1;
+            v = v * 16u + d;
+        }
+        *out = ((v >> 19) & 0x1Fu) << 11 | ((v >> 10) & 0x3Fu) << 5 | ((v >> 3) & 0x1Fu);
+        return 0;
+    }
+    if (parse_u32(s, len, &v) != 0 || v > 0xFFFFu)
+        return -1;
+    *out = v;
+    return 0;
+}
+
 /* Apply one key/value span. Returns 1 if applied, 0 if skipped. */
 static int apply_kv(theme_t *t, const char *k, int klen,
                     const char *v, int vlen)
 {
     unsigned num;
 
-#define MATCH_COLOR(field)                                                   \
-    if (key_eq(k, klen, #field)) {                                           \
-        if (parse_u32(v, vlen, &num) != 0 || num > 0xFFFFu)                  \
+#define MATCH_COLOR_AS(key, field)                                           \
+    if (key_eq(k, klen, key)) {                                              \
+        if (parse_color(v, vlen, &num) != 0)                                 \
             return 0;                                                        \
         t->field = (uint16_t)num;                                            \
         return 1;                                                            \
     }
+#define MATCH_COLOR(field) MATCH_COLOR_AS(#field, field)
 #define MATCH_INT(field)                                                     \
     if (key_eq(k, klen, #field)) {                                           \
         if (parse_u32(v, vlen, &num) != 0 || num > 0x7FFFFFFFu)              \
@@ -108,17 +137,38 @@ static int apply_kv(theme_t *t, const char *k, int klen,
     }
 
     MATCH_COLOR(background)
+    MATCH_COLOR_AS("bg", background)
     MATCH_COLOR(surface)
     MATCH_COLOR(text)
     MATCH_COLOR(text_dim)
     MATCH_COLOR(accent)
     MATCH_COLOR(danger)
     MATCH_COLOR(success)
+    MATCH_COLOR_AS("ok", success)
+    MATCH_COLOR(header_bg)
+    MATCH_COLOR(divider)
+    MATCH_COLOR(text_off)
+    MATCH_COLOR(on_accent)
+    MATCH_COLOR(sel_bg)
+    MATCH_COLOR(sel_text)
+    MATCH_COLOR(value)
+    MATCH_COLOR(keybar_bg)
+    MATCH_COLOR(key_text)
+    MATCH_COLOR(key_hold)
+    MATCH_COLOR(key_press)
+    MATCH_COLOR(bar_track)
+    MATCH_COLOR(bar_fill)
+    MATCH_COLOR(badge_bg)
+    MATCH_COLOR(badge_text)
+    MATCH_COLOR(hires)
+    MATCH_COLOR(warn)
+    MATCH_COLOR(scroll)
     MATCH_INT(spacing)
     MATCH_INT(radius)
     MATCH_INT(font_id)
 
 #undef MATCH_COLOR
+#undef MATCH_COLOR_AS
 #undef MATCH_INT
 
     if (key_eq(k, klen, "name")) {
