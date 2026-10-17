@@ -1,5 +1,9 @@
 # ReChord — Build Status (Aug 2026)
 
+> **History (2026-10-17).** This document describes an earlier approach (the SDK splice
+> and the hybrid fw1/BB era, through early October 2026). It is kept for reference. The
+> current state of the 512 MB `echo512` line is in [ROADMAP.md](ROADMAP.md).
+
 > **Goal:** a **complete custom firmware written from source** for the FiiO
 > Echo Mini (RKnanoC) — a **"Rockbox for the FiiO"**. Not a patch, not a
 > byte-mod: **all the firmware source available and modifiable**, covering

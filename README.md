@@ -1,153 +1,174 @@
 # ReChord
 
-> **Re-Chord** — re-harmonize the FiiO Echo Mini. A **free, from-source custom
-> firmware (CWF)** for the Echo Mini — a **"Rockbox for the FiiO"**.
+> **Re-Chord**: re-harmonize the Echo Mini. A free, from-source custom firmware for
+> the SNOWSKY (FiiO) Echo Mini, a "Rockbox for the Echo Mini".
 
-## Objective (the whole point)
+## Objective
 
-ReChord is a **complete custom firmware, written from source** — not a patch,
-not a byte-mod of the stock binary. The goal is to have **all the firmware
-source code available and modifiable**, covering **both** halves of the device:
+ReChord is a complete custom firmware, written from source: not a patch and not a
+byte-mod of the stock binary. All of the firmware source is available and modifiable,
+on both halves of the device:
 
-- **UI** — custom menus, screens, navigation, theme (what you see).
-- **DSP / audio** — custom effects, EQ, codecs, playback (what you hear).
+- **UI and system** (core A): menus, screens, storage, USB, Bluetooth, power.
+- **Audio** (core B): decoders, gapless playback, DSP.
 
-Everything compiles from source and is flashed as a normal firmware update.
-No binary patching of the stock firmware. No stock app layer left over.
+Everything compiles from source and installs as a normal firmware image.
 
-## Architecture (the key insight)
+## Architecture
 
-The Echo Mini runs **two firmwares side by side**, communicating over a
-hardware mailbox (`MailBox A2B/B2A`):
+The RKNanoD SoC has two Cortex-M3 cores. ReChord runs its own code on both:
 
-| Firmware | IMG offset | Role | SDK source |
-|----------|-----------|------|-------------|
-| **fw1 (AP)** | `0x0007B8 – 0x057820` | **UI + system** — menus, fonts, storage, USB, updates | **RKnanoD SDK** — App/UI build (`main.c` + `SDK_160_128/UI/`) |
-| **section_3 (BB)** | `0x081A14 – 0x9BAA0E` | **Audio** — codecs, DSP/EQ, playback engine | **RKnanoD SDK** — BB build (`Main2.c` + codecs) |
+- **Core A**, our `fw1`, is clocked by power state (96 MHz in the UI, 48 MHz idle). It does:
+  - boot, clocks and power
+  - the UI and keys
+  - storage: eMMC / SD NAND, microSD, FAT/exFAT
+  - USB: mass storage, the USB DAC (UAC2), and USB host for USB-C earphones
+  - the Bluetooth module
+  - feeding core B's input ring
+- **Core B** runs one decoder image per codec family, loaded from the firmware slot when a
+  track needs it. It decodes into a PCM ring that core A's DMA streams to I2S and the two
+  CS43131 DACs, gapless across tracks and sample-rate changes.
+- **The mask ROM** (`0x00000000-0x02FFFFFF`) is the fixed boot ROM. It is not firmware we
+  replace.
 
-- **Both firmwares are two builds of the same Rockchip RKnanoD SDK**
-  (confirmed by string match: fw1 = 223 RKnanoD_MP3 strings vs only 32
-  rk3399-table). The AP is the `main.c` + `UI/` build; the BB is the
-  `Main2.c` + codecs build.
-- **ReChord's current product is a from-source fw1 (AP)**: our own boot,
-  UI, storage, and player — the stock AP layer is gone. The BB/section_3
-  remains in the image (stock or SDK-built) for the hybrid-era paths; the
-  reference two-core audio protocol is being reimplemented clean-room
-  (`firmware/player/ipc_b.h`).
-- The **mask ROM** (`0x00000000–0x02FFFFFF`) is the fixed hardware HAL
-  (LCD, I2S, DAC, USB, keys) — it is *not* firmware we replace; it is the
-  "BIOS" our code calls.
+## Status (October 2026, 512 MB board, branch `echo512`)
 
-> **This is NOT a decompilation project, and NOT a patch project.** The
-> reverse-engineering phase (2026) produced the knowledge (addresses, SDK
-> integration, hardware map) that makes the from-source build possible. See
-> `docs/RE-HISTORY.md`.
+The 512 MB Echo Mini runs ReChord as its daily firmware:
+- it plays music gapless
+- it works as a USB disk and a USB DAC
+- it plays to Bluetooth earphones
 
-## Status (Oct 2026)
+The full table, with what's verified on the device and what only in QEMU, is in
+[`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-ReChord is currently under active development and should be considered
-experimental compared to established alternatives.
+| Area | State |
+|---|---|
+| Boot, 512 MB board port, boot guard, watchdog | ✅ device |
+| Dual-core audio, gapless (bit-exact), DAC volume | ✅ device |
+| FLAC, WAV/AIFF, MP3, AAC/HE-AAC, ALAC, Vorbis, Opus, WavPack, APE, WMA (v1/v2, Pro, Lossless), DSD | ✅ QEMU (bit-exact), FLAC on the device |
+| Storage: eMMC, SD NAND, microSD, FAT16/32/exFAT, FAT32 writes | ✅ device |
+| Tags, play queue, sorted browser, resume, settings file, log file | ✅ device |
+| Power: backlight, screen off, auto power-off, battery | ✅ device |
+| USB disk and hot-plug | ✅ device |
+| USB DAC (UAC2, bit-perfect 16/24/32-bit, 44.1-192 kHz, media keys) | ✅ device |
+| USB-C earphones (the player as USB audio host) | ✅ QEMU |
+| Bluetooth (JieLi module): connect, reconnect, routing, earphone keys | ✅ device, see [`docs/BT_DEVICE_NOTES.md`](docs/BT_DEVICE_NOTES.md) |
+| Power-cut-safe updater, both slots, ROM USB loader fallback | ✅ QEMU |
+| UI | 🟡 functional but basic (8x8 ASCII font); the rebuild is next |
 
-| Layer | Status |
-|-------|--------|
-| **fw1 (AP) boots standalone** (ROM → our reset → our Main) | ✅ on hardware (verdict #20 lineage) |
-| **UI**: menus, keys, file browser (eMMC + SD, FAT16/32/exFAT) | ✅ on hardware (m5a/m5b) |
-| **USB mass storage** (LUN0 = eMMC r/w, LUN1 = SD r/o) | ✅ on hardware (m3c) |
-| **Self-updater** (copy HIFIEC90.IMG, eject/power → install) | ✅ on hardware (verdict #24) |
-| **microSD driver** (DW-MMC, 4-bit, read-only) | ✅ on hardware (verdict #26) |
-| **Player module** (state machine, gapless, ReplayGain, fs-backed codec_io) | ✅ linked into fw1, host-tested (~340 asserts) |
-| **Codecs**: WAV (ours), MP3 (minimp3), FLAC (dr_flac) | ✅ vendored + host-tested; MP3/FLAC decoded losslessly in tests |
-| **DAC renderer** (I2S → CS43131) | ⬜ **next — no sound until this lands** |
-| **DSP effects** (`EffectProcess` hook) | 🟡 core written + host-tested (`firmware/dsp/`), waiting on the renderer |
-| **BB (section_3) SDK build** | ✅ compiles + links (`make build-bb`) |
+ReChord is experimental. Keep the stock firmware image at hand.
 
-- The player decodes WAV/MP3/FLAC and applies gapless trimming +
-  ReplayGain, but the PCM ring currently has **no consumer** in our fw1
-  (no B core in the image) — the DAC renderer is the next milestone
-  (`docs/rewrite/audio.md` step 7).
-- Flash safety: images are packed behind a scatter-table gate (DFIU rules)
-  and always installed via the official updater flow; stock/restorable via
-  maskrom (`docs/DEBRICK-LINUX.md`).
+## Roadmap
 
-Full details: [`docs/HANDOVER.md`](docs/HANDOVER.md) (start here) ·
-[`docs/STATUS.md`](docs/STATUS.md) · [`docs/rewrite/audio.md`](docs/rewrite/audio.md)
+Next, in order:
+1. **A proper UI:**
+   - a screenshot test for every screen
+   - a framebuffer with DMA panel push
+   - UTF-8 text (Latin, Devanagari, CJK)
+   - new now-playing, browser, queue and settings screens
+   - themes
+2. **Reliability:**
+   - log and config writes that don't stall the main loop
+   - core B's clock after a pause
+   - prompts that keep feeding the audio
+3. **Features:**
+   - EQ and ReplayGain on core B
+   - a real-time clock and a persistent queue
+   - key gestures
+   - a spectrum view
 
-## Quick build check
+Details: [`docs/ROADMAP.md`](docs/ROADMAP.md).
+
+## Build
 
 ```bash
-# host tests (codecs, gapless, ReplayGain, player): ~340 assertions
-sh firmware/player/tests/run_tests.sh
-
-# UI host tests
-make -C firmware/ui test
-
-# clean-room AP image (UI + player + codecs) → flashable IMGs
-make cfw-ap                 # build/cfw/rechord_ap.elf
-make cfw-img                # build/ReChord_AP.IMG + build/ReChord_AP5M.IMG
-
-# SDK builds (BB/section_3) — see docs/STATUS.md for the full include list
-make build-bb && make link-bb
+export PATH=<arm-gnu-toolchain>/bin:$PATH
+make cfw-ap -j8                                   # core A: build/cfw/rechord_ap.elf
+make cfw-img FONT_IMG=<stock MINIV390.IMG>        # + core-B codec images, stock bitmap fonts
+# -> build/MINIV900.IMG (512 MB board); BOARD=8g -> build/HIFIEC90.IMG
 ```
 
-Flash: copy `build/ReChord_AP5M.IMG` to the device root as
-**`HIFIEC90.IMG`**, then **eject** (or unplug — power key also scans since
-m6b) → on-device prompt → confirm → power-cycle. See
-[`docs/FLASHING.md`](docs/FLASHING.md).
+Kai's exFAT has coarse timestamps, so make can miss an edit there. When in doubt, build
+from clean (`rm -rf build/cfw build/coreb`).
+
+## Install
+
+- **Updater:** copy the update file (`MINIV900.IMG` on the 512 MB board) to the player's
+  root, eject, and confirm on the player.
+- **Maskrom** (recovery, or a known-good write): `rkdeveloptool` writes the image, padded to
+  512-byte sectors, to both firmware slots. On the 512 MB board these are LBA `0` and
+  `0x11000`. Read both slots back and compare them. See
+  [`docs/DEBRICK-LINUX.md`](docs/DEBRICK-LINUX.md).
+
+Stock is always restorable the same way.
 
 ## Repository layout
 
 ```
-firmware/rockchip/          # Rockchip RKnanoD SDK (source + codec .lib)
-  ├── bbsystem/             # kernel base (Main2, CRU, DMA, interrupt, ...)
-  ├── system/               # OS, fileseek, module_overlay, sysservice
-  ├── audio/                # AudioControl, Effect (EQ/DSP), codecs
-  └── include/              # ReChord integration headers (armcc compat, etc.)
-firmware/                   # our from-source layer
-  ├── startup/              # fw1 boot (ap_startup, vectors, UI loop)
-  ├── ui/                   # screens (menu, browser, player, settings)
-  ├── services/             # settings, log, input, FAT/exFAT fs, fw_update
-  ├── drivers/              # panel, eMMC, SD (DW-MMC), USB MSC, input
-  ├── player/               # playback engine: codec_t + codecs/ (wav/mp3/flac)
-  │   └── codecs/           #   minimp3 + dr_flac vendored (CC0 / MIT-0)
-  ├── dsp/                  # effect modules (EQ, bass, volume) — host-tested
-  └── theme/                # theme data + loader
-tools/                      # build, analyze, pack scripts
-docs/                       # HANDOVER (start here), STATUS, re/, rewrite/
-stock/                      # official firmware backups (not distributed)
+firmware/
+  startup/      core A: startup, main loop and UI (ap_ui.c), Bluetooth app (ap_bt.c)
+  ui/ theme/    screens, themes
+  drivers/      clocks, panel, eMMC/SD, USB (MSC, UAC2 DAC, host), CS43131, JieLi BT
+  services/     config, log, input, key sequences, FAT/exFAT, tags, queue, updater, BT protocol
+  audio/        core A's audio engine and container parsers (MP4, ASF, APE)
+  coreb/        core B: runtime and decoders (libmad, FAAD2, Tremor, Opus, WavPack,
+                demac, ALAC, WMA, DSD)
+  rockchip/     Rockchip RKNanoD SDK (reference)
+tools/          image packing and analysis
+docs/           ROADMAP (start here), BT_DEVICE_NOTES, hardware and RE notes, history
 ```
 
-## Roadmap
+## Sources and acknowledgements
 
-- [x] Rockchip SDK compiles (kernel + audio + codecs) — the BB base
-- [x] BB custom boot (`firmware_entry` → our own `rechord_main`)
-- [x] QEMU smoke test (boot + framebuffer menu + text rendering)
-- [x] **AP (fw1) boots standalone with our own from-source UI**
-- [x] Storage: eMMC + microSD read, FAT/exFAT browser, USB MSC, self-update
-- [x] **Player linked into the AP**: gapless, ReplayGain, WAV/MP3/FLAC decode
-- [ ] **DAC renderer**: I2S out to the CS43131 DACs — first audible sound
-- [ ] **DSP effects**: custom EQ / bass / reverb in the render path
-- [ ] **Two-core audio**: reference AP↔BB protocol re-impl (`ipc_b`) or
-      single-core renderer, whichever the bring-up proves simpler
+**The stock firmware is the main source.** We disassembled and decompiled the official
+firmware images and traced them in QEMU to learn the hardware:
+- the boot path
+- the 512 MB vs 8 GB board differences
+- the panel, keys and storage controllers
+- the DACs and their power order
+- the USB PHY
+- **all of the Bluetooth support**: the module, its pins, its frames and its timing
 
-## Safety / flashing
+The Rockchip RKNanoD SDK, the chip datasheets and the FCC filing photos settled what the
+code didn't.
 
-- Flashing uses the **official upgrade method** (copy IMG + reboot) — stock is
-  always restorable by copying the original back.
-- No signature verification in hardware (confirmed by the community —
-  `docs/community.md`); images are CRC-validated by our own updater.
-- `tools/pack_img.py` / `tools/make_fw1.py` validate the scatter table
-  against the reference boot model before anything is flashable (DFIU rules).
-- See [`docs/FLASHING.md`](docs/FLASHING.md) for the safe procedure and
-  [`docs/DEBRICK-LINUX.md`](docs/DEBRICK-LINUX.md) for maskrom recovery.
+**RECHO is the second reference.** [RECHO](https://recho.atzkey.workers.dev), the
+closed-source custom firmware for the Echo Mini (earlier released as RefCFW), showed first
+what this hardware can do. As part of this work we decompiled RECHO (0.9.2 and 0.10.0) and
+traced it in QEMU to learn from it.
+
+Several parts of ReChord copy what RECHO does, re-written in our own C:
+- the PLL/clock sequence
+- the I2S/DMA programming
+- backlight and power behaviour
+- the battery reading
+- the volume-key shortcuts
+- the settings format and its defaults
+
+These places say "RECHO" in their source comments.
+
+**Please support RECHO's developers.** Their About screen links
+<https://ko-fi.com/miauk>.
+
+Also used:
+- Rockbox (libdemac, libwma, libwmapro)
+- FFmpeg (WMA Lossless)
+- libmad
+- FAAD2
+- Tremor and libogg
+- libopus and opusfile
+- WavPack
+
+Their licenses are in their directories under `firmware/coreb/` (as license files, or
+in the source headers for WMA).
 
 ## Disclaimer
 
-ReChord is an independent project. It is not affiliated with FiiO, SNOWSKY,
-or Rockchip. It uses the publicly-available Rockchip RKnanoD SDK and
-independent reverse-engineering notes. Firmware images are not distributed;
-obtain official firmware from FiiO. Flashing modified firmware carries risk —
-use at your own risk.
+ReChord is an independent project. It is not affiliated with FiiO, SNOWSKY, Rockchip, or
+the RECHO developers. Firmware images (stock or RECHO) are not distributed here; get
+official firmware from FiiO. Flashing modified firmware carries risk: use at your own risk.
 
 ## Alternatives
-https://refcfw.atzkey.workers.dev/ by atzkey.
-An existing tool serving a similar purpose. ReChord is an independent project developed from scratch with a different architecture and focus
+
+[RECHO](https://recho.atzkey.workers.dev): a mature closed-source custom firmware for the
+Echo Mini (8 GB board).

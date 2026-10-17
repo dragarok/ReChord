@@ -1,5 +1,9 @@
 # ReChord — Handover / Debug Notes for AI Agents
 
+> **History (2026-10-17).** This document describes an earlier approach (the SDK splice
+> and the hybrid fw1/BB era, through early October 2026). It is kept for reference. The
+> current state of the 512 MB `echo512` line is in [ROADMAP.md](ROADMAP.md).
+
 > **Read this first.** This file captures hard-won knowledge from building
 > and flashing ReChord custom firmware on the FiiO Echo Mini (RKnanoC).
 > It exists so a fresh AI session can pick up where the last one left off
