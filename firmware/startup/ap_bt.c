@@ -21,6 +21,7 @@
 #include "drivers/bt_jieli.h"
 #include "drivers/clock.h"
 #include "drivers/display.h"
+#include "drivers/usb_uac.h"
 #include "services/bt_keys.h"
 #include "services/config.h"
 #include "services/log.h"
@@ -246,14 +247,35 @@ void bt_event(int ev, const bt_dev_t *dev)
     }
 }
 
+/* The USB DAC session (ap_ui.c): 1 = the host streams, 0 = it does not, -1 = no session (the
+ * player's state). The module's audio comes from the DAC's analog output (GPIO2.0), the DAC's
+ * own unmute keeps that path when connected (dac_cs43131.c), so the host's audio reaches the
+ * earphones; the module needs only to be served, told the source is playing (CY0+30, else it
+ * stays muted: the device, 2026-10-17, played the USB DAC on the jack only), and its keys sent
+ * to the host. */
+static int s_ext = -1;
+
+void bt_app_external(int streaming)
+{
+    s_ext = streaming;
+}
+
 /* Earphone keys (services/bt_keys.h): stock's gates -- pause only while playing,
- * play only while paused (seg84 0307b67c), previous/next with a track open. */
+ * play only while paused (seg84 0307b67c), previous/next with a track open. In a USB DAC
+ * session they are the host's media keys. */
 void bt_keys_action(int action, uint32_t t_ms)
 {
     int st = player_get_state();
 
     (void)t_ms;
     power_activity();
+    if (s_ext >= 0 && action >= BT_KEY_PAUSE && action <= BT_KEY_NEXT) {
+        if (action == BT_KEY_PAUSE || action == BT_KEY_PLAY)
+            usb_uac_key(USB_UAC_PLAY_PAUSE);
+        else
+            usb_uac_key(action == BT_KEY_PREV ? USB_UAC_PREV : USB_UAC_NEXT);
+        return;
+    }
     switch (action) {
     case BT_KEY_PAUSE:
         if (st == PLAYER_PLAYING)
@@ -341,7 +363,7 @@ void bt_app_tick(void)
     }
     s_live = 1;
     bt_ui_active(in_screen);
-    bt_set_playing(player_get_state() == PLAYER_PLAYING);
+    bt_set_playing(s_ext >= 0 ? s_ext : player_get_state() == PLAYER_PLAYING);
     bt_poll();
     bt_keys_poll(time_ms());
     volume_follow();

@@ -522,6 +522,11 @@ void usb_uac_self_powered(int on)
     s_self_powered = on;
 }
 
+int usb_uac_streaming(void)
+{
+    return s.alt != 0;
+}
+
 void usb_uac_key(int key)
 {
     static const uint8_t bit[3] = { 1u << 0, 1u << 1, 1u << 2 };

@@ -164,6 +164,11 @@ void power_activity(void)
     s_key_ms = s_idle_ms = time_ms();
 }
 
+uint32_t power_key_idle_ms(void)
+{
+    return time_ms() - s_key_ms;
+}
+
 int power_screen_on(void)
 {
     return s_screen;

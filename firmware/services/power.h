@@ -39,6 +39,7 @@ int power_poll(int playing, int usb_session);
  * battery is shown, rated and guarded as with no cable (a low battery ends the session). */
 void power_usb_supply_off(int off);
 void power_activity(void);       /* a key: restarts the screen-off and idle timers */
+uint32_t power_key_idle_ms(void);  /* since the last key */
 int power_screen_on(void);
 void power_screen(int on);       /* backlight + core-A clock; logged */
 void power_brightness_changed(void);

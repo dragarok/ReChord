@@ -36,6 +36,7 @@
 extern const ui_screen_t bt_screen;   /* ap_bt.c */
 void bt_app_init(void);
 void bt_app_tick(void);
+void bt_app_external(int streaming);
 
 static int s_adc = 1023, s_adc2 = 1023, s_power, s_cable, s_phy_parked;
 static int s_power_press_ok;
@@ -1004,6 +1005,8 @@ static int uac_tick(void)
     if (power_poll(1, POWER_SESSION_DAC) == POWER_OFF_BATTERY)   /* (no auto power off: the cable is in) */
         leave = 1;
     dac_power_only();
+    bt_app_external(usb_uac_streaming());   /* the BT module served here too: the host's audio to */
+    bt_app_tick();                          /* the earphones, their keys to the host */
     return leave;
 }
 
@@ -1045,6 +1048,7 @@ static void usb_dac_session(void)
     dac_power_only();
     uac_draw(1);
     r = usb_uac_run(uac_tick, uac_status);
+    bt_app_external(-1);
     log_printf("ui: USB DAC ended (%d)", r);
     bootcrumb(BC_LOOP);
     if (s_dac_sw) {
@@ -1061,6 +1065,33 @@ static void usb_dac_session(void)
 
 /* RECHO's "On USB connect" (cfg usb): ask, disk, DAC, charge only. The USB DAC
  * is not there yet: it charges. The CDC console stays in the main menu. */
+/* The cable comparators woken: the USB-C probe's own sequence, silently. Every cable plugged in
+ * after boot that the device ever noticed (8 of 8, rechord3..rechord8, each a real host that then
+ * enumerated) came after a USB-C probe; with none before it, none ever was (the boot park, the 1 s
+ * arm, all twelve detect-test states, after sessions). The probe's PHY on/off alone does not do
+ * it (rechord7's "probe cycle" state stayed blind), and it lasts through the block held in reset
+ * (rechord8: seen with rst 7 gate 3), so it is one of its other steps (host mode with port power,
+ * the comparator reference sweep, the GPIO2.1/2.0/0.14 and UOC2 charge/discharge toggles).
+ * About 1.4 s with the main loop stopped (keys pressed then are lost), so after an unplug it
+ * waits for 5 s without a key; its PHY bring-up cuts the DAC's supply, so never while the
+ * player plays (or is paused). */
+static uint32_t s_wake_due;              /* time_ms() from which usb_wake() runs (0: not due) */
+
+static void usb_wake(const char *why)
+{
+    static usb_probe_step_t st[USB_PROBE_STEPS];
+    uint32_t t0 = time_ms(), w[3];
+    int n;
+
+    s_wake_due = 0;
+    if (usb_out_active())
+        return;
+    n = usb_probe_run(st, 0);
+    usb_cable_state(w);
+    log_printf("usb: comparators woken (%s): the probe's sequence, %d steps, %u ms, e8 %x", why, n,
+               (unsigned)(time_ms() - t0), (unsigned)(w[0] & 0xFu));
+}
+
 static void cable_connected(void)
 {
     int disk = g_cfg.usb == CFG_USB_DISK, dac = g_cfg.usb == CFG_USB_DAC;
@@ -1405,12 +1436,21 @@ void ap_ui_loop(void)
         if (usb_out_active())
             cable = 0;                   /* (VBUS is the player's own while host) */
         if (cable && !s_cable) {         /* the cable in (also at boot) */
+            s_wake_due = 0;
             cable_connected();
             if (!usb_out_active())
                 usb_dwc2_park();         /* (charge only: no session parked it) */
         } else if (!cable && !s_phy_parked && !usb_out_active()) {
-            usb_dwc2_park();             /* no cable at boot: as stock, so a later plug is seen */
+            if (player_get_state() == PLAYER_STOPPED)
+                usb_wake("boot");        /* no cable at boot: so a later plug is seen */
+            else
+                s_wake_due = time_stamp(time_ms());
+        } else if (!cable && s_cable) {
+            s_wake_due = time_stamp(time_ms() + 1500u);   /* the cable out: again, once it is gone */
         }
+        if (s_wake_due && !cable && time_ms() - s_wake_due < 0x80000000u &&
+            player_get_state() == PLAYER_STOPPED && power_key_idle_ms() >= 5000u)
+            usb_wake("unplug");          /* (paused: a resume would find the DAC unpowered) */
         s_phy_parked = 1;
         s_cable = cable;
         usb_dwc2_idle_tick();            /* the armed PHY held after USB_ARM_MS */

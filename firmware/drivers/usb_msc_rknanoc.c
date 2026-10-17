@@ -867,10 +867,11 @@ void usb_dwc2_idle_tick(void)
     }
 }
 
-/* In this order: the boot's own idle first (the fix under test), then the old quick re-park
- * (does it undo it?), then how long a run settles the comparators. */
+/* In this order: the boot's own idle first (woken by the probe's sequence: the fix under test),
+ * then whether each later PHY state undoes the wake (the quick re-park, a run of 300 ms or 1 s
+ * then held). */
 const char *const usb_detect_names[USB_DETECT_STATES] = {
-    "as booted (armed 1 s)", "quick re-park (old)", "run 300 ms, hold", "run 1 s, hold",
+    "as booted (woken)", "quick re-park (old)", "run 300 ms, hold", "run 1 s, hold",
 };
 
 void usb_detect_state(int n)

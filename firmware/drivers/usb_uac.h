@@ -36,4 +36,7 @@ void usb_uac_self_powered(int on);
 enum { USB_UAC_PLAY_PAUSE, USB_UAC_NEXT, USB_UAC_PREV };
 void usb_uac_key(int key);
 
+/* The host has an audio stream open (a streaming alternate setting selected). */
+int usb_uac_streaming(void);
+
 #endif
