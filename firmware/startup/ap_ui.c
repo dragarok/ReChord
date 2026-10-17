@@ -155,6 +155,7 @@ static int ask(int any_key)
         while (input_poll(&ev) > 0) {
             static const char *const k_names[] = { "none", "up", "down", "select", "back", "power", "menu", "chord" };
 
+            display_mark_input(time_ms());   /* key->px: logged when the answer is on the panel */
             log_printf("ui: key %s%s on %s", ev.type >= 0 && ev.type < 8 ? k_names[ev.type] : "?",
                        ev.adc_value == INPUT_ADC_LONG ? " (hold)" : ev.adc_value == INPUT_ADC_REPEAT ? " (repeat)" : "",
                        ui_top_screen() ? ui_top_screen()->name : "-");
@@ -1488,6 +1489,7 @@ void ap_ui_loop(void)
         while (input_poll(&ev) > 0) {
             static const char *const k_names[] = { "none", "up", "down", "select", "back", "power", "menu", "chord" };
 
+            display_mark_input(time_ms());   /* key->px: logged when the answer is on the panel */
             log_printf("ui: key %s%s on %s", ev.type >= 0 && ev.type < 8 ? k_names[ev.type] : "?",
                        ev.adc_value == INPUT_ADC_LONG ? " (hold)" : ev.adc_value == INPUT_ADC_REPEAT ? " (repeat)" : "",
                        ui_top_screen() ? ui_top_screen()->name : "-");

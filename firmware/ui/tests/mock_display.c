@@ -107,14 +107,25 @@ void display_draw_text(int x, int y, const char *s, uint16_t fg, uint16_t bg)
     }
 }
 
-void display_flush_rows(int y0, int y1)
+void display_flush_rect(int x0, int y0, int x1, int y1)
 {
     if (s_flush_count < MOCK_DISPLAY_MAX_FLUSH) {
         s_flushes[s_flush_count].y0 = y0;
         s_flushes[s_flush_count].y1 = y1;
+        s_flushes[s_flush_count].x0 = x0;
+        s_flushes[s_flush_count].x1 = x1;
         s_flush_count++;
     }
 }
+
+void display_flush_rows(int y0, int y1)
+{
+    display_flush_rect(0, y0, DISPLAY_W - 1, y1);
+}
+
+void display_frame_begin(void) {}
+void display_frame_end(void) {}
+void display_mark_input(uint32_t t_ms) { (void)t_ms; }
 
 void display_clear(uint16_t rgb565)
 {
