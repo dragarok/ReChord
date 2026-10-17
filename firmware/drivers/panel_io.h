@@ -45,6 +45,12 @@ void backlight_set(int duty);
 int keys_adc(void);
 /* The last conversion of a SAR-ADC channel (0 battery, 1 keys, 2, 3), -1 = none yet. */
 int adc_value(unsigned ch);
+void adc_init(void);            /* stock's AdcInit, write for write */
+/* What the converter did since boot (keys_adc): completions, timeouts, CTRL bit 6 seen, and the
+ * first completion's STATUS (bit 31 set once taken) / CTRL / DATA / microseconds after its start. */
+enum { ADC_DIAG_DONE, ADC_DIAG_TIMEOUTS, ADC_DIAG_BIT6, ADC_DIAG_FIRST_STAS, ADC_DIAG_FIRST_CTRL,
+       ADC_DIAG_FIRST_DATA, ADC_DIAG_FIRST_US, ADC_DIAG_LAST_CTRL, ADC_DIAG_LAST_STAS, ADC_DIAG_N };
+const uint32_t *adc_diag(void);
 int keys_power(void);
 void board_power_off(void);   /* does not return */
 /* A GPIO0 pin that is not the panel's, set through the panel bus's shadow of the

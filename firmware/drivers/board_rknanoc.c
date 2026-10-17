@@ -11,6 +11,7 @@
  * On the 8 GB board GPIO0.14 is only ever muxed to a peripheral and GPIO2.1
  * belongs to the DAC driver; board_early_init() leaves both alone there.
  */
+#include "services/watchdog.h"
 #include <stdint.h>
 
 #include "board.h"
@@ -49,6 +50,10 @@ static int s_strap = -1;              /* GPIO2.9 at boot: 0 = the 0x66666666 boa
 void board_early_init(void)
 {
     REG32(0x5002004Cu) = 0xFFFF0000u;    /* PMU_SYS_REG3: no stale loader request (we are running) */
+    /* GRF_INTER_CON0 bit 0 (FORCE_JTAG) off: the ROM leaves it 1 (device, 2026-10-16), stock clears
+     * it in Gpio_Init (MINIV390 0x03053AF4 -> 0x03053056(0)), the SDK before muxing GPIO2.14/2.15
+     * ("JTAG0", app_main.c), and GPIO2.15 is the panel's reset. */
+    REG32(0x500100C4u) = 0x00010000u;
 #if BOARD == BOARD_512M
     out(GPIO0, 0, 14, 1);
     out(GPIO2, 2, 1, 1);
@@ -56,7 +61,7 @@ void board_early_init(void)
      * bit 9, write-masked), settle, read, then the pin driven low */
     iomux_gpio(2, 9);
     GPIO2->ddr &= ~(1u << 9);
-    REG32(0x50010050u) = 0x02000000u;
+    REG32(0x50010054u) = 0x00020000u;    /* stock's own write (was 0x50010050 bit 9: another pin) */
     for (volatile unsigned d = 0; d < 2000u; d++)
         ;
     s_strap = (int)((GPIO2->ext_porta >> 9) & 1u);
@@ -97,6 +102,7 @@ int board_check(uint32_t emmc_sectors)
 
 void board_reboot_rockusb(void)
 {
+    watchdog_stop();
     __asm__ volatile("cpsid i");
     REG32(0xE000E010u) = 0;                          /* SysTick off */
     REG32(0xE000E180u) = REG32(0xE000E184u) = 0xFFFFFFFFu;   /* every IRQ off, nothing pending */

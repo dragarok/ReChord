@@ -7,6 +7,7 @@
  * block read 0x03052694 / write 0x0305271c, layout 0x03052a98; CRU gate
  * 0x030513e0 / reset 0x03051430).
  */
+#include "services/watchdog.h"
 #include <stdint.h>
 #include <string.h>
 
@@ -441,6 +442,7 @@ static int block_read(uint32_t arg, uint32_t count, void *buf)
 {
     int ret = block_read_once(arg, count, buf);
 
+    watchdog_feed();             /* (long storage work keeps it fed, as stock's FS code does) */
     for (int i = 0; ret && i < 2; i++) {
         MMC[CTRL] |= 2u;                    /* FIFO reset */
         wait_clear(CTRL, 2u, 1000);
@@ -463,6 +465,7 @@ static int raw_write(uint32_t lba, uint32_t count, const void *buf)
 {
     int ret, r;
 
+    watchdog_feed();
     select_mmc(0);
     clk_gate(0x6C, 1);
     if (count == 1u) {
@@ -653,6 +656,7 @@ int sd_bus_width(void)    { return s_sd_4bit ? 4 : 1; }
 
 int sd_read(uint32_t lba, uint32_t count, void *buf)
 {
+    watchdog_feed();
     if (count == 0u)
         return 0;
     if (!s_sd_sectors || lba + count < lba || lba + count > s_sd_sectors)

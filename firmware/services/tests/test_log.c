@@ -169,6 +169,49 @@ static void test_args(void)
     CHECK(1);
 }
 
+/* A flush keeps the history in the RAM ring (what QEMU's fwlog and a debugger read); room is then
+ * made by dropping the oldest saved lines, never an unsaved one. */
+extern char log_ring[];
+extern unsigned int log_ring_head, log_ring_len;
+
+static int ring_has(const char *needle)
+{
+    static char text[4097];
+
+    for (unsigned i = 0; i < log_ring_len && i < 4096u; i++)
+        text[i] = log_ring[(log_ring_head + i) % 4096u];
+    text[log_ring_len < 4096u ? log_ring_len : 4096u] = '\0';
+    return strstr(text, needle) != NULL;
+}
+
+static void test_history(void)
+{
+    char buf[16384];
+    int i;
+
+    log_file_reset();
+    log_init(mock_clock);
+    s_now_ms = 0;
+    log_printf("first line");
+    CHECK(log_flush(NULL) == LOG_OK);
+    CHECK(log_bytes() == 0);                      /* nothing left to write ... */
+    CHECK(ring_has("0.000 first line\n"));        /* ... but the history stays */
+    for (i = 0; i < 300; i++)                      /* more than the ring: saved lines make room */
+        log_printf("hist %03d", i);
+    CHECK(log_dropped() == 27);                   /* the unsaved ones fill it: 273 lines of 15 bytes fit */
+    CHECK(!ring_has("first line"));               /* the oldest saved line went first */
+    CHECK(log_flush(NULL) == LOG_OK);
+    read_log(buf, sizeof(buf));
+    CHECK(strstr(buf, "0.000 first line\n") != NULL);
+    CHECK(strstr(buf, "0.000 hist 272\n") != NULL);
+    CHECK(strstr(buf, "hist 273") == NULL);        /* dropped, not written */
+    CHECK(ring_has("0.000 hist 272\n"));
+    for (i = 0; i < 10; i++)
+        log_printf("after %d", i);                 /* saved history makes room: none dropped */
+    CHECK(log_dropped() == 0);
+    CHECK(ring_has("0.000 after 9\n"));
+}
+
 int main(void)
 {
     if (mkdir(".work", 0777) != 0 && errno != EEXIST) {
@@ -182,6 +225,7 @@ int main(void)
     test_overflow();
     test_flush_error_keeps_buffer();
     test_args();
+    test_history();
 
     printf("test_log: %d checks, %d failures\n", s_checks, s_failures);
     return (s_failures == 0) ? 0 : 1;

@@ -57,6 +57,8 @@ int input_scan(int adc_value, int power);
  * event on release when held less than INPUT_LONG_SCANS (10 ms each), else one
  * event with adc_value == INPUT_ADC_LONG when the hold reaches it. */
 #define INPUT_LONG_SCANS   60
+#define INPUT_PRESS_SCANS  6    /* UP/DOWN act once their band has held this long (~60 ms) */
+#define INPUT_CHORD_SCANS  30   /* the first volume key held this long before the second (~300 ms) */
 #define INPUT_ADC_LONG     (-2)
 #define INPUT_ADC_REPEAT   (-3)
 #define INPUT_REPEAT_START 40

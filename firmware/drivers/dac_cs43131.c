@@ -50,6 +50,7 @@
 
 #include "dac_cs43131.h"
 #include "clock.h"
+#include "services/watchdog.h"
 
 /* ---- MMIO primitives ----------------------------------------------------- */
 
@@ -197,6 +198,20 @@ static void dac_gpio_out(int port, int pin, int level)
  * ACK nothing on I2C — the observed A00 B00 C00. */
 static void dac_power_sequence(void)
 {
+#if BOARD == BOARD_512M
+    /* Stock 512M, both its player and its USB DAC (07_dac_512m.md 2.1, seg11 0x0307B904..0x0307B98A):
+     * GPIO2.14 = 1, GPIO2.0 = 1, GPIO1.4 = 0, GPIO2.2 = 1, then 2 + 1 + 8 ms before the first I2C.
+     * GPIO1.4 is the external +-3 V VCP_FILT supply's enable (CS43131 DS1155 4.3.4: set EXT_VCPFILT,
+     * wait >= 8 ms, only then apply it; Hi-Z while the chip is unpowered): it must be low before the
+     * rails rise. It floats at a cold boot, and ReChord never drove it low here; every DAC session
+     * on the device reset inside DAC init (2026-10-16). 11 ms also covers tPUD (1.5 ms after POR). */
+    dac_gpio_out(2, 14, 1);
+    dac_gpio_out(2, 0, 1);
+    dac_gpio_out(1, 4, 0);
+    dac_gpio_out(2, 2, 1);
+    dac_delay_ms(11);
+    return;
+#endif
     dac_gpio_out(2, 0, 1);
     dac_gpio_out(2, 14, 1);
     dac_gpio_out(2, 2, 1);
@@ -394,6 +409,7 @@ static int dac_map_write(uint32_t map24, uint8_t val)
     frame[2] = (uint8_t)(map24);            /* MAP low  (7:0)             */
     frame[3] = 1;                           /* INCR control byte          */
     frame[4] = val;
+    watchdog_feed();                        /* (a bus held low costs each write its full bounds) */
     rc = i2c_write(dac_chips[0], frame, 5);
     if (rc != DAC_OK)
         worst = rc;
@@ -590,6 +606,15 @@ static void acodec_mux(uint8_t m4, uint8_t m5, uint8_t m6, uint8_t m7)
 /* ---- I2C0 mux candidates + scan --------------------------------------------- */
 
 static int s_step = DAC_STEP_NONE;
+
+/* Each step as it starts, for the boot trail (startup/ap_ui.c): a reset inside dac_init names its
+ * step in the next boot's record (device 2026-10-16: every DAC session reset in here unrecorded). */
+__attribute__((weak)) void dac_trace(int step)
+{
+    (void)step;
+}
+
+#define STEP(x) do { s_step = (x); dac_trace(x); } while (0)
 static uint8_t s_hp_status[2];
 static uint8_t s_scan[3][2];
 
@@ -685,14 +710,14 @@ int dac_init(uint32_t rate_hz)
 
     /* Ref order (FUN_03056550): power/reset GPIOs FIRST, then gates,
      * then the I2C0 soft reset, and only then touch I2C0. */
-    s_step = DAC_STEP_POWER;
+    STEP(DAC_STEP_POWER);
     /* Clock the GPIO/PCLK domain BEFORE the power writes (ref gates 0x95 =
      * PCLK_GPIO1, dac.md §6): if the GPIO bus clock is off the power/reset
      * writes are dropped and the CS43131s stay in power-down, ACKing nothing. */
     cru_gate(G_PCLK_GPIO1, 1);
     dac_power_sequence();
 
-    s_step = DAC_STEP_GATES;
+    STEP(DAC_STEP_GATES);
     cru_gate(G_CLK_ACODEC, 1);
     cru_gate(G_CLK_I2S1_SRC, 1);
     cru_gate(G_CLK_I2S1_FRAC, 1);
@@ -706,13 +731,13 @@ int dac_init(uint32_t rate_hz)
     dac_delay_ms(1);                        /* release (FUN_03051430)     */
     cru_rst(R_I2C0_SRST, 0);
 
-    s_step = DAC_STEP_I2C_SCAN;
+    STEP(DAC_STEP_I2C_SCAN);
     I2C_CON = 0;                            /* ref: idle before CLKDIV    */
     cand = i2c0_scan();
     if (cand < 0)
         return DAC_ERR_NOCHIP;
 
-    s_step = DAC_STEP_RATE;
+    STEP(DAC_STEP_RATE);
     for (i = 0; i < 13; i++) {
         if (dac_rates[i].rate == rate_hz) {
             rt = &dac_rates[i];
@@ -725,16 +750,16 @@ int dac_init(uint32_t rate_hz)
     /* ACODEC mux for this rate (verbatim from ref). */
     acodec_mux(rt->mux[0], rt->mux[1], rt->mux[2], rt->mux[3]);
 
-    s_step = DAC_STEP_I2S;
+    STEP(DAC_STEP_I2S);
     i2s1_setup(rt->rate, rt->mclk);
 
-    s_step = DAC_STEP_DAC_REGS;
+    STEP(DAC_STEP_DAC_REGS);
     dac_map_write(0x000B0000, 0x1F);
     dac_delay_ms(80);
     dac_gpio_out(1, 4, 1);            /* amp/HP enable (ref FUN_03051478)  */
     dac_map_write(0x00020052, 0x02);
 
-    s_step = DAC_STEP_HP_CHECK;
+    STEP(DAC_STEP_HP_CHECK);
     {
         uint8_t st0 = 0, st1 = 0;
 
@@ -742,12 +767,13 @@ int dac_init(uint32_t rate_hz)
         dac_map_read(1, 0x0F0000, &st1);
         s_hp_status[0] = st0;
         s_hp_status[1] = st1;
-        /* Ref aborts only if BOTH chips fail the check. */
-        if ((st0 & 0x03u) == 0x03u && (st1 & 0x03u) == 0x03u)
-            return DAC_ERR_HP;
+        /* (The 8 GB ref aborted here when both chips read bits 1:0 = 11. Those bits are the sticky
+         * PLL_ERROR_INT / PDN_DONE_INT (DS1155 p.134), nothing about headphones; stock 512M ignores
+         * the read (07_dac_512m.md 2.2 step 3). Kept for the log only: an abort here is a
+         * "cannot play" with nothing wrong.) */
     }
 
-    s_step = DAC_STEP_DAC_REGS2;
+    STEP(DAC_STEP_DAC_REGS2);
     dac_map_write(0x000F0010, 0xE7);
     dac_map_write(0x00020000, 0xF6);
     dac_map_write(0x0001000C, 0x04);
@@ -773,11 +799,11 @@ int dac_init(uint32_t rate_hz)
     dac_map_write(0x00090003, 0xEC);
     dac_map_write(0x00090004, 0x00);
 
-    s_step = DAC_STEP_MONO;
+    STEP(DAC_STEP_MONO);
     for (i = 0; i < 24; i++)
         dac_map_write(dac_mono_seq[i].map, dac_mono_seq[i].val);
 
-    s_step = DAC_STEP_DAC_REGS3;
+    STEP(DAC_STEP_DAC_REGS3);
     dac_map_write(0x000B0000, 0x1F);
     dac_delay_ms(80);
     dac_map_write(0x00080000, 0x10);
@@ -798,12 +824,12 @@ int dac_init(uint32_t rate_hz)
     dac_map_write(0x00080032, 0x00);
     dac_map_write(0x00010010, 0x00);
 
-    s_step = DAC_STEP_VOLUME;
+    STEP(DAC_STEP_VOLUME);
     /* Per-rate DAC control byte (ref: MAP 0x01000B). */
     dac_map_write(0x0001000B, rt->dac);
     dac_delay_ms(10);
 
-    s_step = DAC_STEP_UNMUTE;
+    STEP(DAC_STEP_UNMUTE);
     /* Stock FUN_030563b0 output-enable (jack-plugged branch), REA/Ghidra
      * decompiled from ref fw1: GPIO2.14 = 1 then GPIO2.0 = 0 — GPIO2.0 HIGH
      * is a HARDWARE MUTE (the power-on trio drives it high on purpose), so
@@ -821,7 +847,7 @@ int dac_init(uint32_t rate_hz)
     dac_map_write_chan(1, 0x0005000B, 0x0F);
     dac_delay_ms(10);
 
-    s_step = DAC_STEP_DONE;
+    STEP(DAC_STEP_DONE);
     return DAC_OK;
 }
 
@@ -865,7 +891,7 @@ int dac_i2s_feed(const int16_t *pcm, int frames)
     if (pcm == 0 || frames <= 0)
         return DAC_ERR_ARG;
 
-    s_step = DAC_STEP_FEED;
+    STEP(DAC_STEP_FEED);
     for (i = 0; i < frames; i++) {
         unsigned fl;
 

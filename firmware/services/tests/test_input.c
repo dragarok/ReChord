@@ -10,6 +10,8 @@
 #include <stdio.h>
 #include <string.h>
 
+void watchdog_feed(void) { }        /* (services/watchdog.c is target-only) */
+
 static int s_checks;
 static int s_failures;
 
@@ -101,14 +103,18 @@ static void test_adc_map(void)
 static void test_scan(void)
 {
     input_event_t ev;
+    int i;
 
     input_mock_clear();
     CHECK(input_scan(1023, 0) == 0);
     CHECK(input_scan(130, 0) == 0);          /* 1st sample: not stable */
-    CHECK(input_scan(130, 0) == 1);          /* 2nd equal sample: press */
+    CHECK(input_scan(130, 0) == 0);          /* stable: VOL+'s band starts to count */
+    for (i = 1; i < INPUT_PRESS_SCANS; i++)
+        CHECK(input_scan(127, 0) == 0);
+    CHECK(input_scan(127, 0) == 1);          /* held INPUT_PRESS_SCANS: the press acts */
     CHECK(input_scan(127, 0) == 0);          /* hold: no repeat */
     CHECK(input_scan(1023, 0) == 0);
-    CHECK(input_scan(1023, 0) == 0);         /* release */
+    CHECK(input_scan(1023, 0) == 0);         /* release: nothing more */
     CHECK(input_scan(500, 0) == 0);
     CHECK(input_scan(1023, 0) == 0);         /* 1-sample glitch ignored */
     CHECK(input_scan(1023, 1) == 0);
@@ -116,8 +122,49 @@ static void test_scan(void)
     CHECK(input_scan(1023, 0) == 0);
     CHECK(input_scan(1023, 0) == 1);         /* short press: released */
     CHECK(input_pending() == 2);
-    CHECK(input_poll(&ev) == 1 && ev.type == KEY_UP && ev.adc_value == 130);
+    CHECK(input_poll(&ev) == 1 && ev.type == KEY_UP && ev.adc_value == 127);
     CHECK(input_poll(&ev) == 1 && ev.type == KEY_POWER && ev.adc_value == -1);
+    input_mock_clear();
+}
+
+/* The ladder as a soft press on the device drives it (2026-10-16): the voltage settles through
+ * the bands of other keys. Only the key it settles on acts. */
+static void test_sweep(void)
+{
+    input_event_t ev;
+    int i;
+
+    input_mock_clear();
+    /* DOWN pressed softly: VOL+'s band for a while (not INPUT_PRESS_SCANS), then VOL- */
+    CHECK(input_scan(130, 0) == 0);
+    for (i = 0; i < INPUT_PRESS_SCANS - 2; i++)
+        CHECK(input_scan(130, 0) == 0);
+    CHECK(input_scan(30, 0) == 0);
+    for (i = 0; i < INPUT_PRESS_SCANS; i++)
+        CHECK(input_scan(30, 0) == 0);
+    CHECK(input_scan(30, 0) == 1);           /* DOWN acts once its own band held */
+    CHECK(input_scan(1023, 0) == 0);
+    CHECK(input_scan(1023, 0) == 0);
+    CHECK(input_pending() == 1);
+    CHECK(input_poll(&ev) == 1 && ev.type == KEY_DOWN);
+    /* MENU pressed softly: BACK's band first, then MENU's, then released: only MENU */
+    CHECK(input_scan(515, 0) == 0);
+    CHECK(input_scan(515, 0) == 0);
+    CHECK(input_scan(515, 0) == 0);
+    CHECK(input_scan(360, 0) == 0);
+    CHECK(input_scan(360, 0) == 0);
+    CHECK(input_scan(360, 0) == 0);
+    CHECK(input_scan(1023, 0) == 0);
+    CHECK(input_scan(1023, 0) == 1);         /* released: the key it settled on */
+    CHECK(input_pending() == 1);
+    CHECK(input_poll(&ev) == 1 && ev.type == KEY_MENU);
+    /* a quick tap of UP, released before INPUT_PRESS_SCANS: it acts on the release */
+    CHECK(input_scan(130, 0) == 0);
+    CHECK(input_scan(130, 0) == 0);
+    CHECK(input_scan(130, 0) == 0);
+    CHECK(input_scan(1023, 0) == 0);
+    CHECK(input_scan(1023, 0) == 1);
+    CHECK(input_poll(&ev) == 1 && ev.type == KEY_UP);
     input_mock_clear();
 }
 
@@ -148,9 +195,12 @@ static void test_chord(void)
 
     input_mock_clear();
     CHECK(input_scan(130, 0) == 0);
-    CHECK(input_scan(130, 0) == 1);          /* VOL+ press */
-    for (i = 0; i < 3; i++)
+    CHECK(input_scan(130, 0) == 0);
+    for (i = 1; i < INPUT_PRESS_SCANS; i++)
         CHECK(input_scan(130, 0) == 0);
+    CHECK(input_scan(130, 0) == 1);          /* VOL+ press */
+    for (i = INPUT_PRESS_SCANS; i < INPUT_CHORD_SCANS; i++)
+        CHECK(input_scan(130, 0) == 0);      /* held long enough to be a deliberate chord */
     CHECK(input_scan(30, 0) == 0);
     CHECK(input_scan(30, 0) == 1);           /* the other volume key: the chord */
     CHECK(input_scan(130, 0) == 0);
@@ -160,19 +210,13 @@ static void test_chord(void)
     CHECK(input_pending() == 2);
     CHECK(input_poll(&ev) == 1 && ev.type == KEY_UP);
     CHECK(input_poll(&ev) == 1 && ev.type == KEY_CHORD);
-    /* a quick slide from one volume key to the other is two presses */
-    CHECK(input_scan(130, 0) == 0);
-    CHECK(input_scan(130, 0) == 1);
-    CHECK(input_scan(30, 0) == 0);
-    CHECK(input_scan(30, 0) == 1);
-    CHECK(input_poll(&ev) == 1 && ev.type == KEY_UP);
-    CHECK(input_poll(&ev) == 1 && ev.type == KEY_DOWN);
     input_mock_clear();
 }
 
 int main(void)
 {
     test_chord();
+    test_sweep();
     test_queue_fifo();
     test_hold();
     test_overflow();

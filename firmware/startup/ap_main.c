@@ -25,6 +25,7 @@
 #include "drivers/board.h"
 #include "drivers/clock.h"
 #include "ui/theme.h"       /* THEME_* geometry + palette (theme module) */
+#include "services/bootcrumb.h"
 
 void ap_ui_loop(void);   /* ap_ui.c */
 
@@ -36,10 +37,25 @@ uint32_t Main(void)
     uint16_t fg = THEME_COLOR_FG;
     const theme_t *th = theme_get();
 
+    int rc;
+
+    bootcrumb_init();         /* the boot trail on the eMMC, before anything that could stop us */
+    bootcrumb(BC_BOARD);
     board_early_init();       /* board pins first, as the stock reset handler */
-    clock_init();             /* PLL 400 MHz, core A 200 MHz, SysTick time base */
+    adc_init();               /* keys and battery: the ROM leaves the ADC reference off */
+    bootcrumb(BC_CLOCK);
+    /* Stock's 96 MHz UI clock and the SysTick time base. A boot of this build that stopped in here
+     * makes the next one keep the ROM's clocks (drivers/clock_rknanoc.c k_points). */
+    bootcrumb_kv(BCK_CLOCK_POINT, bootcrumb_clock_hangs());
+    rc = clock_init_at(bootcrumb_clock_hangs(), bootcrumb_clock_stage);
+    bootcrumb_kv(BCK_CLOCK_RC, (uint32_t)rc);
+    bootcrumb_kv(BCK_CORE_HZ, clock_core_hz());
+    bootcrumb_kv(0x500100C4u, *(volatile uint32_t *)0x500100C4u);
+    bootcrumb(BC_LOG);
     log_init(log_clock);
+    bootcrumb(BC_DISPLAY);
     display_init();
+    bootcrumb(BC_SPLASH);
 
     /* Fill the whole screen (inclusive coordinates per display.h). */
     display_fill_rect(0, 0, DISPLAY_W - 1, DISPLAY_H - 1, bg);
@@ -55,6 +71,7 @@ uint32_t Main(void)
 
     /* Make both lines visible on the panel. */
     display_flush_rows(0, THEME_TITLE_H + THEME_PAD + THEME_LINE_H);
+    bootcrumb(BC_UI);
 
 #ifdef AP_TRIAL
     /* trial vehicle (firmware/hook/trial_entry.c): hand back to the host fw */

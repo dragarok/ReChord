@@ -42,11 +42,13 @@
  *     panel_init_rknanoc.c).
  */
 
+#include "services/watchdog.h"
 #include <stdint.h>
 
 #include "panel_io.h"
 #include "clock.h"
 #include "rknanoc.h"
+#include "services/input.h"
 
 /* GPIO port register block (see file header). */
 typedef struct {
@@ -149,30 +151,128 @@ void backlight_on(void)
     backlight_set(100);
 }
 
-/* SAR-ADC at 0x400D0000: [0] data, [1] status, [2] ctrl = ch | 0x08 power |
- * 0x10 start, 0x40 done. Scanned as RECHO does (0x03057eb0), one conversion
- * per call (once per 10 ms main-loop pass): channel 1 (the key ladder) three
- * times out of four, the fourth goes round channels 0 (battery), 2, 3. */
+/* SAR-ADC at 0x400D0000: [0] data, [1] status (bit 0: converting), [2] ctrl = ch | 0x08 power |
+ * 0x10 start | 0x20 interrupt enable | 0x40 done (interrupt status). One conversion per call
+ * (once per main-loop pass): channel 1 (the key ladder) three times out of four, the fourth goes
+ * round channels 0 (battery), 2, 3.
+ *
+ * Completion is detected the way stock's own polled conversions do it (BatteryInit, MINIV390 seg01
+ * 0x0307a780..0x0307a7c0: start with the interrupt enable clear, wait 1 ms, then until STATUS bit 0
+ * reads 0, at most 20 ms; it reads DATA either way). Those conversions pass on every stock boot of
+ * the 512 MB unit on battery, so this is proven on that silicon. Waiting for CTRL bit 6 with bit 5
+ * clear, as this driver did, is a combination no working firmware uses; on the device it never
+ * completed and the keys read the initial 1023 forever (work/stock_boot/05_keys_adc.md). A
+ * conversion can no longer wedge the scan: after 20 ms DATA is taken and the next one starts.
+ * The counters say which signal the chip gave (adc_diag, logged once after boot). */
 #define ADC ((volatile uint32_t *)0x400D0000u)
+#define ADC_SETTLE_US  1000u                       /* stock: delay_ms(1) before STATUS */
+#define ADC_TIMEOUT_US 20000u                      /* stock: at most 20 x 1 ms */
 static int s_adc[4] = { -1, 1023, 1023, 1023 };
 static unsigned s_adc_ch = 8u, s_adc_n;           /* channel converting; 8 = none yet */
+static uint64_t s_adc_t0;
+static uint32_t s_adc_diag[ADC_DIAG_N];
+
+static uint64_t adc_now(void)
+{
+    static uint64_t fake;
+    uint64_t t = time_us();
+
+    return t ? t : (fake += 1000u);                /* before the time base: 1 ms per call */
+}
+
+/* The key ladder (channel 1) as stock decodes it (GetKey 0x03062362 and KeyScan 0x0306240a,
+ * work/stock_boot/05_keys_adc.md 1.1-1.3): while a key is down the lowest reading since the last
+ * release is decoded (a release's rising voltage cannot pass through a higher band), a reading in
+ * a gap between bands (184..199, 410..449, 550..1000) keeps the previous key, and a band counts only
+ * once two fresh samples at least 20 ms apart agree (stock: 2 scans 20 ms apart). The UI used to
+ * see the last raw sample on every main-loop pass, so one sample taken while the voltage swept
+ * through another key's band read as a press of that key (device 2026-10-16: a "select" and a
+ * "chord" fired during DOWN presses, PLAY needed three presses). keys_adc() returns a value of the
+ * stable band, which input_scan() maps again. */
+#define KEY_STABLE_US 20000u
+static int s_key_min = 0xFFFF, s_key_out = 1023, s_key_cand = -2, s_key_cand_v;
+static uint64_t s_key_cand_t;
+
+static void key_sample(int v)
+{
+    int k;
+
+    if (v > 1000)
+        s_key_min = 0xFFFF;                     /* released: the next press starts afresh */
+    else {
+        if (v < s_key_min)
+            s_key_min = v;
+        v = s_key_min;
+    }
+    k = input_map_adc(v);
+    if (k == KEY_NONE && v <= 1000)
+        return;                                 /* a gap: the previous key stays */
+    if (k != s_key_cand) {
+        s_key_cand = k;
+        s_key_cand_v = v;
+        s_key_cand_t = adc_now();
+        return;
+    }
+    if (adc_now() - s_key_cand_t >= KEY_STABLE_US)
+        s_key_out = s_key_cand_v;
+}
 
 int keys_adc(void)
 {
     static const uint8_t k_other[3] = { 0, 2, 3 };
     unsigned ch;
 
+    watchdog_feed();                 /* every screen that waits for a key polls here */
+
     if (s_adc_ch < 8u) {
-        if (!(ADC[2] & 0x40u))
-            return s_adc[1];                      /* still converting: next call */
+        uint64_t el = adc_now() - s_adc_t0;
+        uint32_t stas = ADC[1], ctrl = ADC[2];
+
+        if (el < ADC_SETTLE_US || ((stas & 1u) && el < ADC_TIMEOUT_US))
+            return s_key_out;                     /* still converting: next call */
         s_adc[s_adc_ch & 3u] = (int)(ADC[0] & 0x3FFu);
+        if (s_adc_ch == 1u)
+            key_sample(s_adc[1]);
+        s_adc_diag[(stas & 1u) ? ADC_DIAG_TIMEOUTS : ADC_DIAG_DONE]++;
+        if (ctrl & 0x40u)
+            s_adc_diag[ADC_DIAG_BIT6]++;
+        if (!s_adc_diag[ADC_DIAG_FIRST_STAS]) {   /* the first completion, as the chip shows it */
+            s_adc_diag[ADC_DIAG_FIRST_STAS] = 0x80000000u | stas;
+            s_adc_diag[ADC_DIAG_FIRST_CTRL] = ctrl;
+            s_adc_diag[ADC_DIAG_FIRST_DATA] = ADC[0];
+            s_adc_diag[ADC_DIAG_FIRST_US] = (uint32_t)el;
+        }
     }
     s_adc_n++;
     ch = s_adc_n % 4u ? 1u : k_other[(s_adc_n / 4u) % 3u];
     ADC[2] &= ~0x10u;
-    ADC[2] = (ADC[2] & ~0x47u) | ch | 0x18u;
+    ADC[2] = (ADC[2] & ~0x67u) | ch | 0x18u;      /* (interrupt enable clear, as stock's polled path) */
     s_adc_ch = ch;
-    return s_adc[1];
+    s_adc_t0 = adc_now();
+    return s_key_out;
+}
+
+const uint32_t *adc_diag(void)
+{
+    s_adc_diag[ADC_DIAG_LAST_CTRL] = ADC[2];
+    s_adc_diag[ADC_DIAG_LAST_STAS] = ADC[1];
+    return s_adc_diag;
+}
+
+/* The SAR-ADC as stock sets it up (MINIV390 AdcInit, seg01 0x0307a008), write for write: clock
+ * 24 MHz / 24 = 1 MHz (0x03052802(1000000)), reference trim 3 and 5, reference on (0x03053078(3),
+ * 0x0305306a(5), 0x03053086(1): GRF 0x500100CC, write-masked), CLK_SARADC and PCLK_SARADC
+ * ungated, the converter powered. (The ROM's handoff already had the clock and gates so; whether
+ * it leaves the reference on is not measured.) */
+void adc_init(void)
+{
+    RK_CRU[0x2C / 4] = 0x00FF0017u;
+    RK_GRF[0xCC / 4] = 0x000E0006u;
+    RK_GRF[0xCC / 4] = 0x00700050u;
+    RK_GRF[0xCC / 4] = 0x00010001u;
+    cru_gate(10u, 1);
+    cru_gate(0x93u, 1);
+    ADC[2] |= 8u;
 }
 
 int adc_value(unsigned ch)
@@ -192,6 +292,7 @@ int keys_power(void)
  * USB plugged in the player stays powered by VBUS. */
 void board_power_off(void)
 {
+    watchdog_stop();              /* stock's PowerOff: WDT DeInit first (a unit on the cable stays powered) */
     extern void board_power_off_pins(void);   /* board_rknanoc.c */
 
     __asm__ volatile ("cpsid i");

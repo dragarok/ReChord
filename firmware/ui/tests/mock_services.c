@@ -76,6 +76,12 @@ void log_printf(const char *fmt, ...)
     va_end(ap);
 }
 
+int log_flush(const char *tag)
+{
+    (void)tag;
+    return 0;
+}
+
 /* ---- in-memory settings -------------------------------------------------- */
 
 static rechord_settings_t s_store;

@@ -28,6 +28,7 @@
 #include "services/modules.h"
 #include "services/dirlist.h"
 #include "services/queue.h"
+#include "services/bootcrumb.h"
 
 
 #define REG(a)      (*(volatile uint32_t *)(a))
@@ -782,9 +783,11 @@ static const char *s_b_image;            /* module now in core B, NULL: none */
 
 /* Load the image into B's code RAM and let B boot; B keeps the stream state
  * in the shared block, so a swap mid-stream continues where it was. */
+#define B_BOOT_MS 1000u                      /* core B: release to ready (load not included) */
+
 static int b_load(const char *image)
 {
-    uint32_t t0;
+    uint32_t t0, t_load;
     int n;
 
     clock_set_core_b_div(1);                 /* start at full speed; B scales down from its load */
@@ -803,17 +806,26 @@ static int b_load(const char *image)
         log_printf("player: core-B image %s: %d", image, n);
         return -1;
     }
+    t_load = time_ms() - t0;
+    t0 = time_ms();                          /* B's own boot budget starts now: the first play of a
+                                              * boot used to spend the 300 ms on the cold file read
+                                              * (device 2026-10-16: "cannot play (-1)" once, then fine) */
     AS->run = 0;                             /* B idles after boot until A restarts it */
     AS->state = AS_B_BOOT;
     AS->b_hz = clock_core_b_hz();
     AS->b_div = AS->b_div_req = clock_pll_hz() / clock_core_b_hz();
     REG(CRU_SOFTRST3) = CAL_CORE_RST << 16;                      /* release */
     while (AS->state != AS_B_READY) {
-        if (time_ms() - t0 > 300u)
+        if (time_ms() - t0 > B_BOOT_MS) {
+            log_printf("player: core B not ready %u ms after its release (state %u, image %s %d B "
+                       "loaded in %u ms)", (unsigned)(time_ms() - t0), (unsigned)AS->state, image, n,
+                       (unsigned)t_load);
             return -2;
+        }
         cpu_wait_tick();
     }
-    log_printf("player: B up with %s (%d B) in %u ms", image, n, (unsigned)(time_ms() - t0));
+    log_printf("player: B up with %s (%d B): loaded in %u ms, booted in %u ms", image, n,
+               (unsigned)t_load, (unsigned)(time_ms() - t0));
     s_b_image = image;
     s_b_up = 1;
     return 0;
@@ -917,8 +929,13 @@ static int out_rate(uint32_t rate, uint32_t bits)
     if (s_usb)
         return usb_out_set_format(rate, bits) == 0 ? 0 : -5;
     if (!s_dac_up) {
-        if (dac_init(rate) != 0)
+        int r = dac_init(rate);
+
+        bootcrumb(BC_LOOP);                  /* (dac_trace() moved the trail into dac_init) */
+        if (r != 0) {
+            log_printf("audio: DAC init %d at step %d", r, dac_last_step());
             return -4;
+        }
         s_dac_up = 1;
     } else if (dac_set_rate(rate) != 0) {
         return -4;
@@ -989,8 +1006,13 @@ int audio_ext_start(uint32_t rate)
         s_b_image = NULL;
     }
     if (!s_dac_up) {
-        if (dac_init(rate) != 0)
+        int r = dac_init(rate);
+
+        bootcrumb(BC_LOOP);                  /* (dac_trace() moved the trail into dac_init) */
+        if (r != 0) {
+            log_printf("audio: DAC init %d at step %d", r, dac_last_step());
             return -4;
+        }
         s_dac_up = 1;
     } else if (dac_set_rate(rate) != 0) {
         return -4;
@@ -1088,8 +1110,12 @@ int audio_play(int pos)
         return -3;                           /* nothing playable */
     image = family_of(AS->q[0].codec);
     if (!s_b_up || s_b_image != image) {
-        if (b_load(image) != 0)
+        int r = b_load(image);
+
+        if (r != 0) {
+            log_printf("audio: play: core B start failed (%d)", r);
             return -1;
+        }
     } else if (AS->b_div != 1u) {            /* same image: back to full speed for the start */
         clock_set_core_b_div(1);
         AS->b_hz = clock_core_b_hz();
@@ -1098,8 +1124,11 @@ int audio_play(int pos)
     {
         int r = out_rate(s_rate, AS->q[0].bits);
 
-        if (r != 0)
+        if (r != 0) {
+            log_printf("audio: play: output at %u Hz %u-bit failed (%d)", (unsigned)s_rate,
+                       (unsigned)AS->q[0].bits, r);
             return r;
+        }
     }
     out_volume();                            /* before the first sample reaches the DAC */
     AS->rate = s_rate;

@@ -11,6 +11,7 @@
 
 #include "screens.h"
 #include "services/queue.h"
+#include "services/log.h"
 #include "../theme.h"
 #include "../internal/hal.h"
 
@@ -137,7 +138,25 @@ static void player_screen_handle_event(const input_event_t *ev)
     case KEY_SELECT:
         if (hold) {
             player_next();
-        } else if (!s_status[0]) {
+        } else if (s_status[0]) {
+            /* an error view: PLAY tries again (it used to do nothing, so one failure looked like
+             * "cannot play" on every later press, with nothing in the log; device 2026-10-16) */
+            track_info_t ti;
+            int rc;
+
+            if (player_get_track(&ti) == PLAYER_OK) {
+                player_screen_set_status(NULL);
+                rc = player_play();
+                log_printf("player: retry from the error view: %d", rc);
+                if (rc != PLAYER_OK) {
+                    char eb[32];
+
+                    snprintf(eb, sizeof eb, "cannot play (%d)", rc);
+                    player_screen_set_status(eb);
+                    log_flush("error");
+                }
+            }
+        } else {
             if (s_playing)
                 player_pause();
             else

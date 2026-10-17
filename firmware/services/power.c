@@ -127,6 +127,9 @@ static int sample(void)
                    s_bat.pct10 / 10u, s_bat.pct10 % 10u, s_bat.mv_min, s_bat.pct_h10[1] / 10,
                    (unsigned)(s_bat.pct_h10[1] < 0 ? -s_bat.pct_h10[1] : s_bat.pct_h10[1]) % 10u,
                    s_bat.left_min);
+    if (s_ring_n % 6u == 0)              /* (the device showed 14 % idle at 96 MHz, QEMU 0.4 %: measure it) */
+        log_printf("cpu: A %u MHz, load %u.%u %%", (unsigned)(clock_core_hz() / 1000000u),
+                   cpu_load_permille() / 10u, cpu_load_permille() % 10u);
     return s_low >= LOW_COUNT;
 }
 
@@ -135,14 +138,16 @@ static void set_state(int st)
     if (st == s_state)
         return;
     s_state = st;
-    if (st == ST_DAC) {                      /* RECHORD.CFG dac_mhz: 50 (default), 100, 200 */
-        uint32_t mhz = g_cfg.dac_mhz ? g_cfg.dac_mhz : 50u, div = clock_pll_hz() / (mhz * 1000000u);
+    if (st == ST_DAC) {                      /* RECHORD.CFG dac_mhz: 96 (default), 100, 200 */
+        uint32_t mhz = g_cfg.dac_mhz > 96u ? g_cfg.dac_mhz : 96u;   /* (stock never runs USB below 96 MHz;
+                                                                     * the 512 MB unit's DAC sessions at 50
+                                                                     * all reset, 2026-10-16) */
 
-        clock_set_core_a_div(div < 2u ? 2u : div > 8u ? 8u : div);
+        clock_set_core_a_div(clock_div_for(mhz * 1000000u));
     } else if (st == ST_USBOUT) {             /* USB-C earphones: one clock for the whole session, */
-        clock_set_core_a_div(4u);            /* 100 MHz (the bus never changes under a stream) */
+        clock_set_core_a_div(clock_div_for(100000000u));   /* 100 MHz (the bus never changes under a stream) */
     } else {
-        clock_set_core_a_div(st == ST_DARK || st == ST_IDLE ? 8u : 2u);
+        clock_set_core_a_div(clock_div_for(st == ST_DARK || st == ST_IDLE ? 50000000u : 200000000u));
     }
     log_printf("power: %s, A %u MHz", k_state[st], (unsigned)(clock_core_hz() / 1000000u));
 }

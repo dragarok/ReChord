@@ -18,6 +18,13 @@ enum {
 
 int usb_cable(void);         /* 1 = VBUS present */
 
+/* What usb_cable() depends on, for the log (the unit missed a cable plugged in after an RST,
+ * 2026-10-16): w[0] = GRF_SOC_USB_STATUS[3:0] | CRU SOFTRST0[2:0] << 4 (USB resets) |
+ * CLKGATE0 bit 7 << 7 | CLKGATE6 bit 10 << 8 (USB clocks gated) | pins << 9 (DR, DDR of
+ * GPIO0.14, GPIO1.4, GPIO2.0, GPIO2.1, GPIO2.2: two bits each, DR low); w[1] = UOC_CON1 |
+ * UOC_CON2 << 16; w[2] = USBPHY_CON6 | CON7 << 16 (the comparator references). */
+void usb_cable_state(uint32_t w[3]);
+
 /* Shared DWC2 bring-up (PHY + core + FIFOs + EP0) used by MSC and CDC. */
 void usb_dwc2_init(void);
 void usb_dwc2_init_hs(void);         /* the same, allowing high speed (the USB DAC) */
@@ -32,6 +39,25 @@ void usb_dwc2_phy_on(void);
 /* The USB interrupt (NVIC IRQ 5) goes to whichever mode set this (the USB DAC, the host). */
 extern void (*volatile usb_irq_hook)(void);
 void usb_dwc2_phy_off(void);
+/* The USB block as stock keeps it idle (polling CheckVbus 0x03053d00 from its VBUS task): the PHY
+ * taken out of suspend while the block still runs, then the block held in reset with its clocks
+ * gated (01_entry_init.md B2e..B2h; SDK app_main.c SysCpuInit). Nothing if it is held already.
+ * The device (2026-10-16) never saw a cable plugged in after boot while the block stayed as the
+ * ROM left it. */
+void usb_dwc2_park(void);
+/* GOTGCTL, GUSBCFG, GINTSTS, PCGCCTL, GHWCFG2..4, GSNPSID, UOC_CON0, DSTS (zeros while held). */
+void usb_regs_read(uint32_t r[10]);
+
+/* The USB detect test (startup/ap_ui.c): put the block in candidate idle state n, then the user
+ * plugs and unplugs; which states see both settles the device question. */
+#define USB_DETECT_STATES 4
+extern const char *const usb_detect_names[USB_DETECT_STATES];
+void usb_detect_state(int n);
+
+/* 1 once VBUS has been absent for 1 s (stock's 100-tick rule): what a session takes as an unplug.
+ * usb_cable_settle() restarts the count (the PHY just came up). */
+int usb_cable_gone(void);
+void usb_cable_settle(void);
 
 /* Last session: [7:0] last SCSI opcode, [15:8] last START STOP byte 4,
  * [19:16] GINTSTS bits 10..13 ever seen (early suspend, suspend, reset, enum). */

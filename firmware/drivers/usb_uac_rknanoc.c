@@ -16,12 +16,14 @@
 #include <string.h>
 
 #include "clock.h"
+#include "services/watchdog.h"
 #include "dac_cs43131.h"
 #include "rknanoc.h"
 #include "usb_msc.h"
 #include "usb_uac.h"
 #include "audio/audio.h"
 #include "services/log.h"
+#include "services/bootcrumb.h"
 
 #define OTG(off)    (*(volatile uint32_t *)(0x60080000u + (off)))
 #define DIEPCTL(n)  OTG(0x900u + (n) * 0x20u)
@@ -50,6 +52,9 @@ enum {
 #define GI_OEPINT   (1u << 19)
 #define GI_INCOMPISOIN  (1u << 20)
 #define GI_INCOMPISOOUT (1u << 21)
+#define GI_ERLYSUSP (1u << 10)
+#define GI_SESSREQ  (1u << 30)
+#define GI_WKUP     (1u << 31)
 
 #define EP_ENA      0x80000000u
 #define EP_DIS      0x40000000u
@@ -771,6 +776,16 @@ static void uac_irq(void)
 {
     uint32_t gi = OTG(GINTSTS) & OTG(GINTMSK);
 
+    /* core_init()'s GINTMSK has these in (stock's mask) and they latch until written 1: early
+     * suspend fires 3 ms after every connect (the bus idles until the host resets it, USB 2.0
+     * 7.1.7.6), then at every host suspend; wake-up at every resume; session request at a
+     * B-session edge. Not cleared, the line stays up and the session loop never runs (USB DAC
+     * audit 2026-10-16, Linux dwc2 clears ErlySusp the same way). */
+    if (gi & (GI_ERLYSUSP | GI_SESSREQ | GI_WKUP))
+        OTG(GINTSTS) = gi & (GI_ERLYSUSP | GI_SESSREQ | GI_WKUP);
+    if (gi & GI_WKUP)
+        s.suspended = 0;
+
     if (gi & GI_USBRST) {
         OTG(GINTSTS) = GI_USBRST;
         bus_reset();
@@ -852,6 +867,8 @@ static void dac_apply_volume(void)
     }
 }
 
+static int dac_on;                           /* the DAC powered for this session (usb_uac_run) */
+
 int usb_uac_run(int (*tick)(void), void (*status)(const usb_uac_status_t *))
 {
     uint32_t t_status = 0, t_log = 0, drain_ms = 0;
@@ -860,9 +877,18 @@ int usb_uac_run(int (*tick)(void), void (*status)(const usb_uac_status_t *))
     memset(&s, 0, sizeof s);
     s.rate = 48000;
     s.local_db = audio_get_volume_db();      /* the host's volume starts at 0 dB (until it sets one) */
-    if (audio_ext_start(s.rate) != 0)
+    /* (Stock powers the DAC only once the host streams, 07_dac_512m.md 4.1. Here it comes up first:
+     * starting it later means the USB interrupt off for its ~200 ms of init, and packets lost. What
+     * the order must not do is what hw_on() did: drive the DAC's supply pins low after it came up,
+     * so usb_dwc2_init_hs() leaves the audio pins alone.) */
+    bootcrumb(BC_DAC_AUDIO);
+    dac_on = audio_ext_start(s.rate) == 0;
+    log_printf("uac: DAC up at %u Hz: %d (step %d)", (unsigned)s.rate, dac_on ? 0 : -1, dac_last_step());
+    if (!dac_on)
         return USB_EXIT_IO;
+    bootcrumb(BC_DAC_VOLUME);
     dac_apply_volume();
+    bootcrumb(BC_DAC_USB);
     usb_dwc2_init_hs();
     if ((OTG(GHWCFG3) >> 16) >= 0x160u) {    /* the FIFO RAM, in words, either FIFO mode: */
         OTG(GRXFSIZ) = 0x120u;               /* RX 1152 B (a 192 kHz 32-bit packet is 200 B), */
@@ -875,11 +901,15 @@ int usb_uac_run(int (*tick)(void), void (*status)(const usb_uac_status_t *))
     usb_irq_hook = uac_irq;
     OTG(GAHBCFG) |= 1u;                      /* global interrupt */
     NVIC_ISER0 = 1u << USB_IRQ;
+    bootcrumb(BC_DAC_WAIT);
     log_printf("uac: waiting for the host");
     while (!ret) {
         uint32_t now = time_ms();
 
-        if (!usb_cable())
+        watchdog_feed();             /* (device 2026-10-16: the DAC session never fed it and reset at ~11 s) */
+
+
+        if (usb_cable_gone())
             ret = USB_EXIT_UNPLUG;
         else if (tick && tick())
             ret = USB_EXIT_USER;
@@ -909,7 +939,7 @@ int usb_uac_run(int (*tick)(void), void (*status)(const usb_uac_status_t *))
             }
             NVIC_ISER0 = 1u << USB_IRQ;
         }
-        if (s.vol_req || audio_get_volume_db() != s.local_db) {   /* the host's, or the keys' */
+        if (dac_on && (s.vol_req || audio_get_volume_db() != s.local_db)) {   /* the host's, or the keys' */
             s.vol_req = 0;
             s.local_db = audio_get_volume_db();
             dac_apply_volume();

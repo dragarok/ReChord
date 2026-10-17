@@ -16,6 +16,7 @@
 #include "../internal/hal.h"
 #include "services/dirlist.h"
 #include "services/fs_target.h"
+#include "services/log.h"
 
 static browser_state_t s_state;
 static char s_root[BROWSER_PATH_MAX];
@@ -196,6 +197,7 @@ static void show_result(int rc, const char *name)
         player_screen_set_track(shown, 0);
         player_screen_set_status(eb);
         log_printf("browser: play '%s' failed (%d)", shown, rc);
+        log_flush("error");              /* on the disk now, whatever happens next */
     }
     ui_push_screen(&player_screen);
 }

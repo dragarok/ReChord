@@ -4,6 +4,9 @@
  * IPC ring nothing consumed. Opening a file plays its directory from that file
  * on, gapless across tracks.
  */
+#include "services/bootcrumb.h"
+#include "services/log.h"
+#include "drivers/dac_cs43131.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -94,7 +97,19 @@ int player_play(void)
     }
     if (!s_open)
         return PLAYER_ERR_EMPTY;
-    return audio_play(queue_pos()) == 0 ? PLAYER_OK : PLAYER_ERR;
+    {   /* the result in the boot trail (raw sectors, carried to the next boot): no device log has
+         * ever held a playback session (2026-10-16), the trail survives what ended those boots */
+        static uint32_t s_plays;
+        int r = audio_play(queue_pos());
+
+        s_plays++;
+        bootcrumb_set(BCK_PLAY, ((uint32_t)r & 0xFFFFu) | s_plays << 16);
+        if (r != 0) {
+            log_printf("player: play failed: %d (DAC step %d)", r, dac_last_step());
+            bootcrumb_set(BCK_PLAY_FAIL, ((uint32_t)r & 0xFFFFu) | (uint32_t)dac_last_step() << 16);
+        }
+        return r == 0 ? PLAYER_OK : PLAYER_ERR;
+    }
 }
 
 int player_mode(void) { return queue_mode(); }

@@ -9,11 +9,13 @@
  * teardown 0x03054bcc, VBUS 0x03051b1c. No interrupts: GAHBCFG global
  * interrupt stays off and everything is polled from usb_msc_run().
  */
+#include "services/watchdog.h"
 #include <stdint.h>
 #include "services/scratch.h"
 #include <string.h>
 
 #include "emmc.h"
+#include "clock.h"
 #include "rknanoc.h"
 #include "usb_msc.h"
 
@@ -56,7 +58,8 @@ static struct {
 } s;
 
 uint32_t usb_msc_diag;
-static int s_want_hs;                /* core_init(): allow high speed (DCFG speed 0) */
+static int s_want_hs;
+static int s_keep_audio;             /* usb_dwc2_init_hs(): the DAC is up, hw_on() leaves its pins */                /* core_init(): allow high speed (DCFG speed 0) */
 
 static const uint8_t k_dev[18] = {
     0x12, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x40,
@@ -83,6 +86,24 @@ static const uint8_t k_mode10[8] = { 0, 6, 0, 0, 0, 0, 0, 0 };
 int usb_cable(void)
 {
     return (int)((RK_GRF[0xE8 / 4] >> 1) & 1u);
+}
+
+void usb_cable_state(uint32_t w[3])
+{
+    static const uint32_t base[3] = { 0x40160000u, 0x40170000u, 0x50030000u };
+    static const uint8_t pin[5][2] = { { 0, 14 }, { 1, 4 }, { 2, 0 }, { 2, 1 }, { 2, 2 } };
+    uint32_t pins = 0;
+
+    for (unsigned i = 0; i < 5u; i++) {
+        volatile const uint32_t *g = (volatile const uint32_t *)base[pin[i][0]];
+
+        pins |= ((g[0] >> pin[i][1]) & 1u) << (2u * i);
+        pins |= ((g[1] >> pin[i][1]) & 1u) << (2u * i + 1u);
+    }
+    w[0] = (RK_GRF[0xE8 / 4] & 0xFu) | (RK_CRU[0x30] & 7u) << 4 | (RK_CRU[0x20] >> 7 & 1u) << 7 |
+           (RK_CRU[0x26] >> 10 & 1u) << 8 | pins << 9;
+    w[1] = (RK_GRF[0xB4 / 4] & 0xFFFFu) | (RK_GRF[0xB8 / 4] & 0xFFFFu) << 16;
+    w[2] = (RK_GRF[0x98 / 4] & 0xFFFFu) | (RK_GRF[0x9C / 4] & 0xFFFFu) << 16;
 }
 
 static void wait_clear(unsigned off, uint32_t mask)
@@ -354,6 +375,9 @@ static void poll(void)
 {
     uint32_t gi = OTG(GINTSTS);
 
+    watchdog_feed();                 /* every wait of the session polls here: an idle host is not a hang
+                                      * (device 2026-10-16: ~11 s without a command reset the player) */
+
     rx_drain();
     if (gi & INT_RESET) {
         OTG(GINTSTS) = INT_RESET;
@@ -383,7 +407,7 @@ static void poll(void)
         s.setup_pending = 0;
         handle_setup();
     }
-    if (!usb_cable())
+    if (usb_cable_gone())
         s.exit = USB_EXIT_UNPLUG;
     if (!s.exit && s.user_exit && s.user_exit())
         s.exit = USB_EXIT_USER;
@@ -579,8 +603,26 @@ static void gpio_out(unsigned port, unsigned pin, int on)
     g[1] |= 1u << pin;
 }
 
+static void phy_config(void)
+{
+    RK_GRF[0x88 / 4] = 0x0C000C00u;                  /* CON2[11:10] = 11: auto compensation bypass (ODT) */
+    RK_GRF[0x84 / 4] = 0xE01F0003u;                  /* CON1: as above */
+    RK_GRF[0x8C / 4] = 0x001C0014u;                  /* CON3[4:2] = 5: bias current reference 425 mV */
+    RK_GRF[0x80 / 4] = 0x00070004u;                  /* CON0[2:0] = 4: HS eye-diagram adjust outside chirp */
+}
+
+/* CON0..3 as the ROM leaves them (rung 1, 2026-10-16: 8518 e007 02a7 0200), for the detect test. */
+static void phy_config_rom(void)
+{
+    RK_GRF[0x80 / 4] = 0xFFFF8518u;
+    RK_GRF[0x84 / 4] = 0xFFFFE007u;
+    RK_GRF[0x88 / 4] = 0xFFFF02A7u;
+    RK_GRF[0x8C / 4] = 0xFFFF0200u;
+}
+
 static void hw_on(void)
 {
+    usb_cable_settle();
     cru_gate(7, 1);
     cru_gate(0x6A, 1);
     cru_reset(1, 0);
@@ -600,13 +642,12 @@ static void hw_on(void)
      * (bit 0: squelch trigger bit 3) and CON1[15:13] (HS eye height, low bits) = 000.
      * RECHO 0.9.2 writes 0x1FE00003 there instead (clears CON1[12:5], leaves [4:0] and [15:13]);
      * earlier ReChord copied that. docs/USB_COMPLIANCE.md section 1. */
-    RK_GRF[0x88 / 4] = 0x0C000C00u;                  /* CON2[11:10] = 11: auto compensation bypass (ODT) */
-    RK_GRF[0x84 / 4] = 0xE01F0003u;                  /* CON1: as above */
-    RK_GRF[0x8C / 4] = 0x001C0014u;                  /* CON3[4:2] = 5: bias current reference 425 mV */
-    RK_GRF[0x80 / 4] = 0x00070004u;                  /* CON0[2:0] = 4: HS eye-diagram adjust outside chirp */
-    gpio_out(1, 4, 0);
-    gpio_out(2, 0, 1);
-    gpio_out(2, 2, 0);
+    phy_config();
+    if (!s_keep_audio) {             /* the audio path off, as stock's VBUS-insert host path; not on */
+        gpio_out(1, 4, 0);           /* the USB DAC's path, where the DAC is already up: 2.2 low there */
+        gpio_out(2, 0, 1);           /* cut its supply while I2S and I2C still drive its pins */
+        gpio_out(2, 2, 0);           /* (CS43131 audit 2026-10-16) */
+    }
 }
 
 static void hw_off(void)
@@ -691,7 +732,9 @@ void usb_dwc2_init(void)
 void usb_dwc2_init_hs(void)
 {
     s_want_hs = 1;
+    s_keep_audio = 1;
     hw_on();
+    s_keep_audio = 0;
     core_init();
 }
 
@@ -723,6 +766,140 @@ void usb_dwc2_phy_off(void)
     hw_off();
 }
 
+/* The USB block's states, from the SDK's own pieces (UsbAdapterProbe.c, grf.c Grf_otgphy_suspend,
+ * app_main.c SysCpuInit): block_run = clocks on, resets released (UsbAdapterProbeStart's first
+ * steps); phy_resume/phy_suspend = Grf_otgphy_suspend(0/1); block_hold = resets asserted, clocks
+ * gated (CpuSoftResetInit/CpuClockGateInit, UsbAdapterProbeStop's last steps). */
+static void block_run(void)
+{
+    cru_gate(7, 1);
+    cru_gate(0x6A, 1);
+    cru_reset(1, 0);
+    cru_reset(2, 0);
+    cru_reset(0, 0);
+    rk_delay_us(5);
+}
+
+static void phy_resume(void)
+{
+    RK_GRF[0xB8 / 4] = 0x00010000u;
+    RK_GRF[0xB4 / 4] = 0x000E0002u;
+    RK_GRF[0x98 / 4] = 0x00040004u;
+    RK_GRF[0xB4 / 4] = 0x00010000u;
+    rk_delay_us(200);                                /* (stock 0x03068518: DelayUs(200)) */
+}
+
+static void phy_suspend(void)
+{
+    RK_GRF[0xB4 / 4] = 0x00010001u;
+    RK_GRF[0xB4 / 4] = 0x000E0004u;
+    RK_GRF[0xB8 / 4] = 0x00010001u;
+    RK_GRF[0x98 / 4] = 0x00040000u;
+}
+
+static void block_hold(void)
+{
+    cru_reset(1, 1);
+    cru_reset(2, 1);
+    cru_reset(0, 1);
+    cru_gate(7, 0);
+    cru_gate(0x6A, 0);
+}
+
+void usb_regs_read(uint32_t r[10])
+{
+    for (unsigned i = 0; i < 10u; i++)
+        r[i] = 0;
+    if ((RK_CRU[0x30] & 7u) || (RK_CRU[0x26] >> 10 & 1u))
+        return;                                      /* held or unclocked: not readable */
+    r[0] = OTG(0x000);                               /* GOTGCTL */
+    r[1] = OTG(0x00C);                               /* GUSBCFG */
+    r[2] = OTG(0x014);                               /* GINTSTS */
+    r[3] = OTG(0xE00);                               /* PCGCCTL */
+    r[4] = OTG(0x048);                               /* GHWCFG2 */
+    r[5] = OTG(0x04C);                               /* GHWCFG3 */
+    r[6] = OTG(0x050);                               /* GHWCFG4 */
+    r[7] = OTG(0x040);                               /* GSNPSID */
+    r[8] = RK_GRF[0xB0 / 4] & 0xFFFFu;               /* UOC_CON0 */
+    r[9] = OTG(0x808);                               /* DSTS */
+}
+
+void usb_dwc2_park(void)
+{
+    if ((RK_CRU[0x30] & 7u) == 7u)                   /* held already (after a session or the probe) */
+        return;
+    /* Stock's boot order (B2e then B2g/B2h) plus the PHY's analog configuration (stock's
+     * Grf_Otgphy_Driver_Confige, CON0..3). Device, 2026-10-16: a cable plugged in after boot was
+     * seen only after the probe or USB diag had run hw_on(), whose one write none of the four
+     * detect-test states made is this configuration (CON2 compensation bypass, CON3 bias
+     * reference: ROM 02a7/0200, configured 0ea7/0214). GRF keeps it across power-downs, which is
+     * why plugs were seen after any session. */
+    phy_resume();
+    phy_config();
+    block_hold();
+}
+
+const char *const usb_detect_names[USB_DETECT_STATES] = {
+    "idle, ROM analog", "idle + analog cfg", "session end + cfg", "idle, CON3 only",
+};
+
+void usb_detect_state(int n)
+{
+    block_run();
+    switch (n) {
+    case 0:                                          /* stock's idle with the ROM's analog values */
+        phy_config_rom();
+        phy_resume();
+        block_hold();
+        break;
+    case 1:                                          /* stock's idle + Grf_Otgphy_Driver_Confige */
+        phy_config_rom();
+        phy_resume();
+        phy_config();
+        block_hold();
+        break;
+    case 2:                                          /* as a session's end leaves it, configured */
+        phy_config_rom();
+        phy_resume();
+        phy_config();
+        phy_suspend();
+        block_hold();
+        break;
+    default:                                         /* only the bias reference (CON3[4:2] = 5) */
+        phy_config_rom();
+        phy_resume();
+        RK_GRF[0x8C / 4] = 0x001C0014u;
+        block_hold();
+        break;
+    }
+}
+
+/* Stock's VBUS task (0x03066fbe) acts on a change of CheckVbus only once it has held 100 ticks
+ * (1 s). A session ends on an unplug only then: right after the PHY comes up the comparators
+ * have not settled (stock waits 200 ms after Grf_otgphy_suspend(0) in its USB start, 0x030684d0),
+ * and the device (2026-10-16) quit the DAC and the disk from the menu at once, reading "no cable". */
+static uint32_t s_cable_low_ms;
+static int s_cable_low;
+
+void usb_cable_settle(void)
+{
+    s_cable_low = 0;
+}
+
+int usb_cable_gone(void)
+{
+    if (usb_cable()) {
+        s_cable_low = 0;
+        return 0;
+    }
+    if (!s_cable_low) {
+        s_cable_low = 1;
+        s_cable_low_ms = time_ms();
+        return 0;
+    }
+    return time_ms() - s_cable_low_ms >= 1000u;
+}
+
 void usb_dwc2_stop(void)
 {
     OTG(DCTL) |= 2u;                                 /* soft disconnect */
@@ -751,7 +928,7 @@ int usb_msc_run(const usb_lun_t *luns, unsigned nluns, int (*user_exit)(void),
     hw_on();
     core_init();
     for (int i = 0; !(OTG(GINTSTS) & INT_RESET); i++) {
-        if (!usb_cable()) {
+        if (usb_cable_gone()) {
             ret = USB_EXIT_UNPLUG;
             goto out;
         }
@@ -768,6 +945,8 @@ int usb_msc_run(const usb_lun_t *luns, unsigned nluns, int (*user_exit)(void),
     while (!s.exit) {
         const uint8_t *b = (const uint8_t *)cbw;
         int n;
+
+        watchdog_feed();            /* the host can keep a disk session going for hours */
 
         if (!s.configured || s.out_halt) {
             poll();

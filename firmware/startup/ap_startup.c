@@ -137,6 +137,7 @@ WEAK_HANDLER(MAILBOX0_IRQHandler);     /* 9..12 */
 WEAK_HANDLER(MAILBOX1_IRQHandler);
 WEAK_HANDLER(MAILBOX2_IRQHandler);
 WEAK_HANDLER(MAILBOX3_IRQHandler);
+WEAK_HANDLER(WDT_IRQHandler);          /* 8 */
 WEAK_HANDLER(TIMER1_IRQHandler);       /* 18 */
 WEAK_HANDLER(TIMER0_IRQHandler);       /* 19 */
 WEAK_HANDLER(SARADC_IRQHandler);       /* 20 */
@@ -165,7 +166,7 @@ const uint32_t ap_vectors[16 + AP_IRQS]
     D, D, D, D, D,                          /* SFC SYNTH EBC EMMC SDMMC      */
     (uint32_t)&USBC_IRQHandler,             /* 5  USB OTG                    */
     (uint32_t)&DMA_IRQHandler,              /* 6  DMA                        */
-    D, D,                                   /* IMDCT WDT                     */
+    D, (uint32_t)&WDT_IRQHandler,           /* 7 IMDCT, 8 WDT (services/watchdog.c) */
     (uint32_t)&MAILBOX0_IRQHandler,         /* 9                             */
     (uint32_t)&MAILBOX1_IRQHandler,
     (uint32_t)&MAILBOX2_IRQHandler,

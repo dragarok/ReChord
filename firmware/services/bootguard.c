@@ -8,6 +8,7 @@
 #include <stdint.h>
 
 #include "bootguard.h"
+#include "bootcrumb.h"
 #include "drivers/clock.h"
 #include "drivers/panel_io.h"
 
@@ -43,6 +44,7 @@ void bootguard_fault(const uint32_t *frame, uint32_t exc)
     REC->lr = lr;
     REC->check = check(n, pc, lr);
     __asm__ volatile("dsb");
+    bootcrumb_fault(pc, lr, exc);                    /* and on the eMMC, if the trail is on */
     if (n >= BOOTGUARD_MAX_CRASHES)
         board_power_off();                           /* no reset loop: off, the record kept */
     SCB_AIRCR = 0x05FA0004u;                         /* SYSRESETREQ: if the chip resets, the ROM boots */

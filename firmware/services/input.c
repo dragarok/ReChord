@@ -4,6 +4,7 @@
  * The queue and mapping are ours; the hardware hookup is the only part that
  * touches the SDK and is marked TODO below. No third-party code is used.
  */
+#include "watchdog.h"
 #include "input.h"
 
 #include <stddef.h>
@@ -85,6 +86,7 @@ int input_poll(input_event_t *ev)
 }
 
 static unsigned s_held_scans;        /* scans the debounced key has been held */
+static int s_pressed;                /* the held press-acting key has acted */
 
 /* UP/DOWN act on the press (and repeat while held); the other keys have a press
  * and a hold meaning, so they act on release (short) or at INPUT_LONG_SCANS. */
@@ -97,6 +99,7 @@ int input_scan(int adc_value, int power)
 {
     int key = power ? KEY_POWER : input_map_adc(adc_value), prev, r = 0;
 
+    watchdog_feed();             /* a loop that scans the keys is alive */
     if (key != s_scan_last) {          /* not stable yet */
         s_scan_last = key;
         return 0;
@@ -113,6 +116,12 @@ int input_scan(int adc_value, int power)
             return 0;
         s_held_scans++;
         if (acts_on_press(key)) {
+            /* a press acts once its band has held INPUT_PRESS_SCANS: a soft press of another key
+             * sweeps through this band for tens of ms on its way (device 2026-10-16) */
+            if (s_held_scans == INPUT_PRESS_SCANS && !s_pressed) {
+                s_pressed = 1;
+                return input_push(key, adc_value) == INPUT_OK;
+            }
             if (s_held_scans >= INPUT_REPEAT_START &&
                 (s_held_scans - INPUT_REPEAT_START) % INPUT_REPEAT_EVERY == 0)
                 return input_push(key, INPUT_ADC_REPEAT) == INPUT_OK;
@@ -122,18 +131,32 @@ int input_scan(int adc_value, int power)
         return 0;
     }
     prev = s_scan_held;
-    /* RECHO's chord: one volume key held (3 scans), then the ladder reads the other */
-    if (((prev == KEY_UP && key == KEY_DOWN) || (prev == KEY_DOWN && key == KEY_UP)) && s_held_scans >= 3) {
+    /* RECHO's chord: one volume key held (now INPUT_CHORD_SCANS, a deliberate hold, not the
+     * sweep of a soft press), then the ladder reads the other */
+    if (((prev == KEY_UP && key == KEY_DOWN) || (prev == KEY_DOWN && key == KEY_UP)) &&
+        s_held_scans >= INPUT_CHORD_SCANS) {
         s_scan_held = KEY_CHORD;
         s_held_scans = 0;
         return input_push(KEY_CHORD, adc_value) == INPUT_OK;
     }
-    if (prev != KEY_NONE && !acts_on_press(prev) && s_held_scans < INPUT_LONG_SCANS)
-        r = input_push(prev, prev == KEY_POWER ? -1 : 0) == INPUT_OK;       /* short press, on release */
+    if (prev != KEY_NONE && key != KEY_NONE && prev != KEY_POWER && key != KEY_POWER) {
+        /* one ladder key to another with no release between: the voltage is still settling and
+         * the lowest reading wins (drivers: keys_adc), so no event for the one it passed; as stock's
+         * KeyScan 0x0306240a, the count goes on (work/stock_boot/05_keys_adc.md 1.3) */
+        s_scan_held = key;
+        if (acts_on_press(key) && !s_pressed)
+            s_held_scans = 0;          /* (a press key counts its own settling time) */
+        return 0;
+    }
+    if (prev != KEY_NONE) {
+        if (!acts_on_press(prev) && s_held_scans < INPUT_LONG_SCANS)
+            r = input_push(prev, prev == KEY_POWER ? -1 : 0) == INPUT_OK;   /* short press, on release */
+        else if (acts_on_press(prev) && !s_pressed)
+            r = input_push(prev, 0) == INPUT_OK;      /* a tap released before it acted: now */
+    }
     s_scan_held = key;
     s_held_scans = 0;
-    if (key != KEY_NONE && acts_on_press(key))
-        r |= input_push(key, adc_value) == INPUT_OK;
+    s_pressed = 0;
     return r;
 }
 
@@ -143,6 +166,7 @@ void input_mock_clear(void)
     s_count = 0;
     s_scan_last = KEY_NONE;
     s_scan_held = KEY_NONE;
+    s_pressed = 0;
 }
 
 unsigned input_pending(void)

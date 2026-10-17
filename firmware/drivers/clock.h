@@ -23,11 +23,17 @@
 
 #define CLOCK_TICK_HZ 100u
 
-/* Bring up the PLL (400 MHz) with core A at 200 MHz, then start the time
- * base. Returns 0, or -1 if the PLL did not lock (cores stay on 24 MHz). */
+/* clock_init_at(0, 0). Returns 0, or -1 if the PLL did not lock (cores stay on 24 MHz). */
 int clock_init(void);
+/* Operating point 0 (stock's 96 MHz UI clock: PLL 96, A/B /1, pclk 48); 1 and up keep the ROM's
+ * clocks. trace(n), if given, is called before each stage of the sequence (1..8; 0x14 = no lock),
+ * so a boot that stops in here leaves where. */
+int clock_init_at(unsigned point, void (*trace)(uint32_t));
+int clock_keep_rom(void);            /* the ROM's clocks, read back; no CRU write (returns 1) */
+/* The core A divider for hz, or the nearest below it (core A never above 200 MHz). */
+unsigned clock_div_for(uint32_t hz);
 
-/* Core A divider of the PLL (2 = 200 MHz .. 8 = 50 MHz); reprograms the APB
+/* Core A divider of the PLL (1..8, core A at most 200 MHz); reprograms the APB
  * divider and SysTick. Call from thread context only. */
 void clock_set_core_a_div(unsigned div);
 /* Core B divider of the PLL (1 = 400 MHz .. 8 = 50 MHz). */

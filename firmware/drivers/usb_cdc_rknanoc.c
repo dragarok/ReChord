@@ -15,6 +15,7 @@
 
 #include <stdint.h>
 #include "clock.h"
+#include "services/watchdog.h"
 #include "usb_cdc.h"
 #include "usb_msc.h"                 /* usb_dwc2_init() shared bring-up     */
 
@@ -420,6 +421,7 @@ int usb_cdc_run(void)
 {
     usb_cdc_init();
     while (!s.exit) {
+        watchdog_feed();             /* (the console waits on the host for as long as it likes) */
         usb_cdc_poll();
         rk_delay_us(10);
     }

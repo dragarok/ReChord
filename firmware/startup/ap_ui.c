@@ -28,10 +28,12 @@
 #include "services/screenshot.h"
 #include "audio/audio.h"
 #include "player.h"
+#include "services/bootcrumb.h"
+#include "services/watchdog.h"
 #include "ui/ui.h"
 #include "ui/screens/screens.h"
 
-static int s_adc = 1023, s_adc2 = 1023, s_power, s_cable;
+static int s_adc = 1023, s_adc2 = 1023, s_power, s_cable, s_phy_parked;
 static int s_power_press_ok;
 static uint32_t s_log_flushed;  /* time_ms() of the last periodic log write */
 static uint32_t s_shortcut_at;  /* VOL+/VOL- chord: a shortcut key may follow within 2 s */
@@ -263,6 +265,90 @@ static void power_off(const char *why)
  * edge opens the CDC console instead): expose the user volume (LUN 0) and
  * the SD card (LUN 1, read-only) until eject/unplug/power key. */
 /* Before a USB device mode (disk, console, DAC) or the probe: the core back from host. */
+/* USB detect test (menu, last row): which idle state of the USB block lets the PHY's comparators see
+ * a cable plugged in after boot. For each candidate (usb_detect_names): unplug, the state applied,
+ * plug in within 15 s, unplug within 15 s. Each result to the log and the trail (bit 2n: plug
+ * seen, 2n+1: unplug seen). BACK leaves. The ROM's own state is the boot's (never sees one). */
+static void usb_out_off(void);
+
+static int detect_wait(int want, uint32_t ms, uint32_t *took)
+{
+    uint32_t t0 = time_ms();
+    input_event_t ev;
+
+    while (time_ms() - t0 < ms) {
+        if (usb_cable() == want) {
+            *took = time_ms() - t0;
+            return 1;
+        }
+        input_scan(keys_adc(), keys_power());
+        if (input_poll(&ev) > 0 && ev.type == KEY_BACK)
+            return -1;
+        cpu_wait_tick();
+    }
+    *took = ms;
+    return 0;
+}
+
+static void usb_detect_test(void)
+{
+    uint32_t result = 0, took;
+    char buf[48];
+
+    usb_out_off();
+    player_stop();
+    input_mock_clear();
+    for (int n = 0; n < USB_DETECT_STATES; n++) {
+        uint32_t st[3];
+        int in, out;
+
+        screen("USB detect test");
+        snprintf(buf, sizeof buf, "%d/%d: %s", n + 1, USB_DETECT_STATES, usb_detect_names[n]);
+        line(1, buf);
+        line(3, "unplug the cable");
+        display_flush_rows(0, DISPLAY_H - 1);
+        if (detect_wait(0, 15000u, &took) < 0)
+            break;
+        bootcrumb(BC_USBDET + (uint32_t)n);
+        usb_detect_state(n);
+        line(3, "PLUG IN the cable now");
+        line(4, "(15 s; BACK: stop)");
+        display_flush_rows(0, DISPLAY_H - 1);
+        in = detect_wait(1, 15000u, &took);
+        if (in < 0)
+            break;
+        usb_cable_state(st);
+        log_printf("usbdet: %s: plug %s in %u ms, usbst e8 %x rst %x gate %x uoc %08x con6/7 %08x",
+                   usb_detect_names[n], in ? "seen" : "NOT seen", (unsigned)took, (unsigned)(st[0] & 0xFu),
+                   (unsigned)(st[0] >> 4 & 7u), (unsigned)(st[0] >> 7 & 3u), (unsigned)st[1], (unsigned)st[2]);
+        line(3, in ? "seen. UNPLUG now" : "not seen. UNPLUG now");
+        display_flush_rows(0, DISPLAY_H - 1);
+        out = in ? detect_wait(0, 15000u, &took) : 0;
+        if (out < 0)
+            break;
+        if (in)
+            log_printf("usbdet: %s: unplug %s in %u ms", usb_detect_names[n], out ? "seen" : "NOT seen", (unsigned)took);
+        result |= (uint32_t)(in > 0) << (2 * n) | (uint32_t)(out > 0) << (2 * n + 1);
+        bootcrumb_set(BCK_USBDET_RESULT, result | 0x80000000u);
+    }
+    usb_detect_state(1);                     /* back to the configured idle (usb_dwc2_park's) */
+    bootcrumb(BC_LOOP);
+    log_printf("usbdet: result %02x", (unsigned)result);
+    log_flush("usbdet");
+    screen("USB detect test");
+    snprintf(buf, sizeof buf, "result %02x (see ECHOLOG)", (unsigned)result);
+    line(2, buf);
+    display_flush_rows(0, DISPLAY_H - 1);
+    panel_io_delay_ms(1500);
+    ui_invalidate_all();
+}
+
+/* drivers/dac_cs43131.c: each dac_init step in the trail (a reset there names it next boot) */
+void dac_trace(int step)
+{
+    bootcrumb(BC_DAC_STEP + (uint32_t)step);
+}
+
 static void usb_out_off(void)
 {
     if (usb_out_active()) {
@@ -294,6 +380,8 @@ static void usb_session(void)
     r = usb_msc_run(luns, 2, keys_power, &rd, &wr);
     fs_target_mount_rw(0, "Internal", emmc_read, emmc_write, s_user);   /* host may have written */
     snprintf(s_usb, sizeof s_usb, "x%d r%uM w%uM", r, (unsigned)(rd >> 11), (unsigned)(wr >> 11));
+    log_printf("usb: disk session ended: exit %d, read %u MB, written %u MB, cable %d", r,
+               (unsigned)(rd >> 11), (unsigned)(wr >> 11), usb_cable());
     while (keys_power())                 /* don't leak the exit press */
         cpu_wait_tick();
     /* Scan for an update on ANY session exit the screen advertises:
@@ -547,7 +635,7 @@ static void usb_console_run(void)
     for (;;) {
         int c;
         usb_cdc_poll();
-        if (keys_power() || !usb_cable())
+        if (keys_power() || usb_cable_gone())
             break;
         /* Live enumeration state, refreshed every ~256 polls. */
         if ((frames++ & 0xFFu) == 0u) {
@@ -734,6 +822,7 @@ static const menu_item_t k_root_items[] = {
     { "Battery",     power_battery_text, battery_info_run },
     { "USB DAC",     NULL,      usb_dac_session },       /* (last but one: tests count rows to Files) */
     { "USB-C probe", NULL,      usb_probe_menu },
+    { "USB detect",  NULL,      usb_detect_test },       /* (appended: tests count rows from the top) */
 };
 #define ROOT_CPU_ROW 6               /* index of "CPU" in k_root_items */
 #define ROOT_BAT_ROW 12
@@ -905,6 +994,17 @@ static void usb_dac_session(void)
 {
     int r;
 
+    if (!usb_cable()) {                  /* from the menu without a cable: nothing to wait for (on the
+                                          * device this path hung with no way out, 2026-10-16) */
+        screen("USB DAC");
+        line(2, "Plug in a USB cable first");
+        display_flush_rows(0, DISPLAY_H - 1);
+        log_printf("ui: USB DAC: no cable");
+        panel_io_delay_ms(1500);
+        ui_invalidate_all();
+        return;
+    }
+    bootcrumb(BC_DAC);                   /* the session's steps, on the eMMC as they start */
     usb_out_off();
     player_stop();
     save_state("usb dac");
@@ -929,6 +1029,7 @@ static void usb_dac_session(void)
     uac_draw(1);
     r = usb_uac_run(uac_tick, uac_status);
     log_printf("ui: USB DAC ended (%d)", r);
+    bootcrumb(BC_LOOP);
     if (s_dac_sw) {
         s_dac_sw = s_dac_vbus = 0;
         board_usb_supply(BOARD_SUPPLY_NORMAL);   /* charging again */
@@ -1175,9 +1276,14 @@ void ap_ui_loop(void)
     boot_key_sample();    /* first: the keys work whatever comes after */
     if (s_boot_key == KEY_DOWN)   /* before our storage driver runs at all (it might be what fails) */
         rockusb_flow("VOL- held at power-on");
+    bootcrumb(BC_EMMC);
     emmc_probe();
+    bootcrumb_kv(BCK_EMMC_RC, (uint32_t)s_storage_failed);
+    bootcrumb_kv(BCK_EMMC_SECTORS, emmc_sectors());
+    bootcrumb_kv(BCK_EMMC_WIDTH, (uint32_t)emmc_width());
     if (s_storage_failed)
         rockusb_flow(s_emmc[0] ? s_emmc : "storage failed");
+    bootcrumb(BC_SLOTS);
     if (s_user) {         /* a slot left invalid (an update cut short): copied from the good one */
         int r;
 
@@ -1189,16 +1295,22 @@ void ap_ui_loop(void)
         if (r < 0)
             line(3, "firmware slots: repair failed");
     }
+    bootcrumb(BC_RECOVERY);
     recovery_menu();      /* a fault last time, or VOL+ held: before anything else */
+    bootcrumb(BC_UPDATE);
     if (s_user)
         update_prompt();  /* at boot too, as stock and RECHO check */
+    bootcrumb(BC_PLAYER);
     player_init();       /* register wav/mp3/flac codecs (registry) */
+    bootcrumb(BC_CONFIG);
     config_load();
     queue_set_mode(g_cfg.play);
     audio_set_volume_db(g_cfg.volume == CFG_VOLUME_MUTE ? -90 : g_cfg.volume);
     log_printf("cfg: play %s, volume %d, resume %u", queue_mode_name(g_cfg.play), g_cfg.volume, g_cfg.resume);
     log_flush("boot");
+    bootcrumb(BC_POWER);
     power_init();
+    bootcrumb(BC_UI_INIT);
     ui_init();
     menu_screen_bind(&k_root);
     ui_push_screen(&menu_screen);
@@ -1212,9 +1324,41 @@ void ap_ui_loop(void)
         ui_push_screen(&player_screen);
         log_printf("ui: resumed %s", g_cfg.track);
     }
+    {   /* the USB block as the ROM left it, before the park (USB DAC audit D6, SoC report 6.1) */
+        uint32_t r[10];
+
+        usb_regs_read(r);
+        log_printf("usb: ROM state: gotgctl %08x gusbcfg %08x gintsts %08x pcgcctl %x hwcfg2 %08x hwcfg3 %08x "
+                   "hwcfg4 %08x snpsid %08x uoc0 %04x dsts %x", (unsigned)r[0], (unsigned)r[1], (unsigned)r[2],
+                   (unsigned)r[3], (unsigned)r[4], (unsigned)r[5], (unsigned)r[6], (unsigned)r[7], (unsigned)r[8],
+                   (unsigned)r[9]);
+        bootcrumb_kv(BCK_USB_HWCFG3, r[5]);
+        bootcrumb_kv(BCK_USB_HWCFG4, r[6]);
+        bootcrumb_kv(BCK_USB_SNPSID, r[7]);
+    }
+    bootcrumb(BC_LOOP);
+    watchdog_start();                /* as stock, once the boot is done (services/watchdog.c) */
     for (;;) {
+        uint32_t t_pass = time_ms(), t_keys, t_play, t_draw;
         int adc = keys_adc(), power = keys_power(), cable = usb_cable();
         int adc2 = board_adc_ch2();
+        static int s_adc_logged;
+
+        if (!s_adc_logged && time_ms() > 3000u) {   /* how the converter behaved (keys_adc) */
+            const uint32_t *d = adc_diag();
+
+            s_adc_logged = 1;
+            log_printf("adc: %u done, %u timed out, bit6 %u; first: stas %x ctrl %x data %x after %u us; "
+                       "now ctrl %x stas %x; ch0..3 %d %d %d %d", (unsigned)d[ADC_DIAG_DONE],
+                       (unsigned)d[ADC_DIAG_TIMEOUTS], (unsigned)d[ADC_DIAG_BIT6],
+                       (unsigned)d[ADC_DIAG_FIRST_STAS], (unsigned)d[ADC_DIAG_FIRST_CTRL],
+                       (unsigned)d[ADC_DIAG_FIRST_DATA], (unsigned)d[ADC_DIAG_FIRST_US],
+                       (unsigned)d[ADC_DIAG_LAST_CTRL], (unsigned)d[ADC_DIAG_LAST_STAS],
+                       adc_value(0), adc_value(1), adc_value(2), adc_value(3));
+            for (unsigned i = 0; i < ADC_DIAG_N; i++)
+                bootcrumb_kv(BCK_ADC_DIAG + i, d[i]);
+            bootcrumb(BC_LOOP);                     /* persisted with them */
+        }
 
         if (sd_present() != s_sd_in) {   /* card inserted / removed */
             s_sd_in = sd_present();
@@ -1224,10 +1368,32 @@ void ap_ui_loop(void)
             ui_invalidate_all();
         }
 
+        {                                /* what the cable reading depends on, when it changes */
+            static uint32_t s_st[3];
+            static unsigned s_st_lines;
+            uint32_t st[3];
+
+            usb_cable_state(st);
+            if ((st[0] != s_st[0] || st[1] != s_st[1] || st[2] != s_st[2]) && s_st_lines < 40u) {
+                s_st_lines++;
+                log_printf("usbst: e8 %x rst %x gate %x pins %03x uoc %08x con6/7 %08x", (unsigned)(st[0] & 0xFu),
+                           (unsigned)(st[0] >> 4 & 7u), (unsigned)(st[0] >> 7 & 3u), (unsigned)(st[0] >> 9),
+                           (unsigned)st[1], (unsigned)st[2]);
+            }
+            s_st[0] = st[0];
+            s_st[1] = st[1];
+            s_st[2] = st[2];
+        }
         if (usb_out_active())
             cable = 0;                   /* (VBUS is the player's own while host) */
-        if (cable && !s_cable)           /* the cable in (also at boot) */
+        if (cable && !s_cable) {         /* the cable in (also at boot) */
             cable_connected();
+            if (!usb_out_active())
+                usb_dwc2_park();         /* (charge only: no session parked it) */
+        } else if (!cable && !s_phy_parked && !usb_out_active()) {
+            usb_dwc2_park();             /* no cable at boot: as stock, so a later plug is seen */
+        }
+        s_phy_parked = 1;
         s_cable = cable;
         usb_out_tick();
 
@@ -1302,17 +1468,32 @@ void ap_ui_loop(void)
         }
         if (ui_stack_depth() == 0)       /* BACK on the root menu */
             ui_push_screen(&menu_screen);
+        t_keys = time_ms();
 
         /* audio pump + Now Playing sync (no-ops without a playing track) */
         (void)player_process();
+        t_play = time_ms();
         config_poll();
         bootguard_poll();                /* a fault record is cleared after a minute of normal running */
         /* the RAM ring keeps the oldest lines when full: write it out once half full
          * (at most once a minute), so a long session's log reaches ECHOLOG.TXT whole */
-        if ((log_bytes() > 2048u && time_ms() - s_log_flushed >= 60000u) ||
-            (log_bytes() > 3072u && time_ms() - s_log_flushed >= 5000u)) {   /* (a burst) */
-            s_log_flushed = time_ms();
-            log_flush(NULL);
+        /* (any pending line within 10 s: a hang that needs RST loses only those; 2026-10-16 the
+         * device lost a whole playback session's lines that way) */
+        /* While a track plays, core A feeds core B from storage and a log append stalls it: one took
+         * 618 ms on the SD NAND (device 2026-10-16, "slow pass ... rest 618"), and playback stuttered
+         * every 13..18 s. So during playback only a ring 3/4 full is written. */
+        if (player_get_state() == PLAYER_PLAYING ? log_bytes() > 3072u :
+            ((log_bytes() > 0u && time_ms() - s_log_flushed >= 10000u) ||
+             (log_bytes() > 3072u && time_ms() - s_log_flushed >= 5000u))) {   /* (a burst) */
+            uint32_t t0 = time_ms();
+            int rc;
+
+            s_log_flushed = t0;
+            rc = log_flush(NULL);
+            if (rc != 0 || time_ms() - t0 >= 100u) {
+                log_printf("log: flush %d in %u ms", rc, (unsigned)(time_ms() - t0));
+                bootcrumb_kv(BCK_LOG_FLUSH, (uint32_t)(time_ms() - t0) | (uint32_t)(rc & 0xFF) << 24);
+            }
         }
         switch (power_poll(player_get_state() == PLAYER_PLAYING, 0)) {
         case POWER_OFF_IDLE:
@@ -1338,8 +1519,27 @@ void ap_ui_loop(void)
             ;                            /* backlight off: nothing to draw */
         else if (ui_top_screen() == &player_screen)
             player_screen_refresh();     /* only while it is on screen */
+        t_draw = time_ms();
         if (power_screen_on())
             ui_render();
+        {   /* a pass that held the UI (the device froze 23 s in Files, 2026-10-16): where */
+            static unsigned s_slow;
+            uint32_t now = time_ms();
+
+            static uint32_t s_slowest;
+
+            if (now - t_pass > s_slowest && now - t_pass >= 300u) {
+                s_slowest = now - t_pass;
+                bootcrumb_set(BCK_SLOW_PASS, s_slowest | (uint32_t)ui_stack_depth() << 24);
+            }
+            if (now - t_pass >= 300u && s_slow < 30u) {
+                s_slow++;
+                log_printf("ui: slow pass %u ms on %s: keys+events %u, player %u, rest %u, draw %u",
+                           (unsigned)(now - t_pass), ui_top_screen() ? ui_top_screen()->name : "-",
+                           (unsigned)(t_keys - t_pass), (unsigned)(t_play - t_keys),
+                           (unsigned)(t_draw - t_play), (unsigned)(now - t_draw));
+            }
+        }
         cpu_wait_tick();                 /* sleep (WFI) until the next 10 ms tick */
     }
 }
