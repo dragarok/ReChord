@@ -407,9 +407,11 @@ void panel_io_delay_ms(uint16_t ms)
 
 static int s_wr_stores = 3;
 
-/* The path display=auto takes. */
+/* The path display=auto takes: the GPIO bus, as stock drives it, until the VOP + DMA path has run
+ * on the 512 MB unit (it is proven in QEMU only; a wrong VOP timing would show a garbled screen,
+ * which no trial marker catches). display=dma opts in, behind the trial guard. */
 #ifndef PANEL_PATH_DEFAULT
-#define PANEL_PATH_DEFAULT PANEL_PATH_DMA
+#define PANEL_PATH_DEFAULT PANEL_PATH_PIO
 #endif
 #define PANEL_ROW_OFFSET_PHYS PANEL_ROW_OFFSET
 
