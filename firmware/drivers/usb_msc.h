@@ -39,12 +39,17 @@ void usb_dwc2_phy_on(void);
 /* The USB interrupt (NVIC IRQ 5) goes to whichever mode set this (the USB DAC, the host). */
 extern void (*volatile usb_irq_hook)(void);
 void usb_dwc2_phy_off(void);
-/* The USB block as stock keeps it idle (polling CheckVbus 0x03053d00 from its VBUS task): the PHY
- * taken out of suspend while the block still runs, then the block held in reset with its clocks
- * gated (01_entry_init.md B2e..B2h; SDK app_main.c SysCpuInit). Nothing if it is held already.
- * The device (2026-10-16) never saw a cable plugged in after boot while the block stayed as the
- * ROM left it. */
+/* Idle for a later plug: the PHY run configured (as a session's hw_on) for USB_ARM_MS, then held
+ * as a session's end leaves it (usb_dwc2_idle_tick does the hold). The device (ECHOLOG
+ * 2026-10-16/17): its comparators track VBUS in the held state only after the PHY has run
+ * configured for a while -- after a disk session an unplug (e8 e->c->8) and a plug (e8 e) were
+ * seen with the block held; the boot park and every detect-test state, each held ~200 us after
+ * the configuration, never saw a plug. Nothing if it is held already. While it runs, usb_cable()
+ * keeps the value it had (the comparators read invalid for ~200 ms after the resets are released). */
+#define USB_ARM_MS 1000u
 void usb_dwc2_park(void);
+void usb_dwc2_idle_tick(void);
+int usb_dwc2_arming(void);
 /* GOTGCTL, GUSBCFG, GINTSTS, PCGCCTL, GHWCFG2..4, GSNPSID, UOC_CON0, DSTS (zeros while held). */
 void usb_regs_read(uint32_t r[10]);
 

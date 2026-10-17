@@ -271,12 +271,23 @@ static void power_off(const char *why)
  * seen, 2n+1: unplug seen). BACK leaves. The ROM's own state is the boot's (never sees one). */
 static void usb_out_off(void);
 
+static unsigned s_det_lines;
+
 static int detect_wait(int want, uint32_t ms, uint32_t *took)
 {
     uint32_t t0 = time_ms();
     input_event_t ev;
 
+    uint32_t st[3], last = 0x10u;
+
     while (time_ms() - t0 < ms) {
+        usb_cable_state(st);
+        if ((st[0] & 0xFu) != last && s_det_lines < 80u) {   /* each comparator change, for the log */
+            s_det_lines++;
+            last = st[0] & 0xFu;
+            log_printf("usbdet: +%u ms e8 %x rst %x gate %x", (unsigned)(time_ms() - t0), (unsigned)last,
+                       (unsigned)(st[0] >> 4 & 7u), (unsigned)(st[0] >> 7 & 3u));
+        }
         if (usb_cable() == want) {
             *took = time_ms() - t0;
             return 1;
@@ -331,7 +342,7 @@ static void usb_detect_test(void)
         result |= (uint32_t)(in > 0) << (2 * n) | (uint32_t)(out > 0) << (2 * n + 1);
         bootcrumb_set(BCK_USBDET_RESULT, result | 0x80000000u);
     }
-    usb_detect_state(1);                     /* back to the configured idle (usb_dwc2_park's) */
+    usb_detect_state(3);                     /* back to the armed idle (as usb_dwc2_park leaves it) */
     bootcrumb(BC_LOOP);
     log_printf("usbdet: result %02x", (unsigned)result);
     log_flush("usbdet");
@@ -1395,6 +1406,7 @@ void ap_ui_loop(void)
         }
         s_phy_parked = 1;
         s_cable = cable;
+        usb_dwc2_idle_tick();            /* the armed PHY held after USB_ARM_MS */
         usb_out_tick();
 
         /* hold power 2 s to switch off; the press that switched us on may

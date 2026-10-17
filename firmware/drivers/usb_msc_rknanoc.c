@@ -18,6 +18,7 @@
 #include "clock.h"
 #include "rknanoc.h"
 #include "usb_msc.h"
+#include "services/log.h"
 
 #define OTG(off)    (*(volatile uint32_t *)(0x60080000u + (off)))
 #define DIEPCTL(n)  OTG(0x900u + (n) * 0x20u)
@@ -83,8 +84,13 @@ static const uint8_t k_inquiry[36] = {
 static const uint8_t k_mode6[4] = { 3, 0, 0, 0 };
 static const uint8_t k_mode10[8] = { 0, 6, 0, 0, 0, 0, 0, 0 };
 
+static uint32_t s_arm_ms;            /* usb_dwc2_park(): when the PHY was armed (0: not arming) */
+static int s_arm_cable;              /* usb_cable() while arming */
+
 int usb_cable(void)
 {
+    if (s_arm_ms)
+        return s_arm_cable;
     return (int)((RK_GRF[0xE8 / 4] >> 1) & 1u);
 }
 
@@ -622,6 +628,7 @@ static void phy_config_rom(void)
 
 static void hw_on(void)
 {
+    s_arm_ms = 0;                    /* a session takes over an arming PHY */
     usb_cable_settle();
     cru_gate(7, 1);
     cru_gate(0x6A, 1);
@@ -652,6 +659,7 @@ static void hw_on(void)
 
 static void hw_off(void)
 {
+    s_arm_ms = 0;
     OTG(DCTL) |= 2u;                                 /* soft disconnect */
     RK_GRF[0xB4 / 4] = 0x00010001u;
     RK_GRF[0xB4 / 4] = 0x000E0004u;
@@ -768,7 +776,7 @@ void usb_dwc2_phy_off(void)
 
 /* The USB block's states, from the SDK's own pieces (UsbAdapterProbe.c, grf.c Grf_otgphy_suspend,
  * app_main.c SysCpuInit): block_run = clocks on, resets released (UsbAdapterProbeStart's first
- * steps); phy_resume/phy_suspend = Grf_otgphy_suspend(0/1); block_hold = resets asserted, clocks
+ * steps); phy_resume = Grf_otgphy_suspend(0) (hw_off has the (1)); block_hold = resets asserted, clocks
  * gated (CpuSoftResetInit/CpuClockGateInit, UsbAdapterProbeStop's last steps). */
 static void block_run(void)
 {
@@ -787,14 +795,6 @@ static void phy_resume(void)
     RK_GRF[0x98 / 4] = 0x00040004u;
     RK_GRF[0xB4 / 4] = 0x00010000u;
     rk_delay_us(200);                                /* (stock 0x03068518: DelayUs(200)) */
-}
-
-static void phy_suspend(void)
-{
-    RK_GRF[0xB4 / 4] = 0x00010001u;
-    RK_GRF[0xB4 / 4] = 0x000E0004u;
-    RK_GRF[0xB8 / 4] = 0x00010001u;
-    RK_GRF[0x98 / 4] = 0x00040000u;
 }
 
 static void block_hold(void)
@@ -824,52 +824,63 @@ void usb_regs_read(uint32_t r[10])
     r[9] = OTG(0x808);                               /* DSTS */
 }
 
-void usb_dwc2_park(void)
+/* The PHY up and configured as hw_on() brings it up, without its audio-pin writes (music may
+ * be playing) and with no D+ pull-up of ours (nothing is connected). */
+static void phy_arm(void)
 {
-    if ((RK_CRU[0x30] & 7u) == 7u)                   /* held already (after a session or the probe) */
-        return;
-    /* Stock's boot order (B2e then B2g/B2h) plus the PHY's analog configuration (stock's
-     * Grf_Otgphy_Driver_Confige, CON0..3). Device, 2026-10-16: a cable plugged in after boot was
-     * seen only after the probe or USB diag had run hw_on(), whose one write none of the four
-     * detect-test states made is this configuration (CON2 compensation bypass, CON3 bias
-     * reference: ROM 02a7/0200, configured 0ea7/0214). GRF keeps it across power-downs, which is
-     * why plugs were seen after any session. */
+    block_run();
     phy_resume();
+    rk_delay_us(10000);                              /* (hw_on: 10.2 ms before the configuration) */
     phy_config();
-    block_hold();
+    OTG(DCTL) |= 2u;                                 /* soft disconnect */
 }
 
+void usb_dwc2_park(void)
+{
+    if ((RK_CRU[0x30] & 7u) == 7u || s_arm_ms)       /* held already (after a session or the probe) */
+        return;
+    s_arm_cable = (int)((RK_GRF[0xE8 / 4] >> 1) & 1u);
+    phy_arm();
+    s_arm_ms = time_ms() | 1u;
+}
+
+int usb_dwc2_arming(void)
+{
+    return s_arm_ms != 0;
+}
+
+void usb_dwc2_idle_tick(void)
+{
+    if (s_arm_ms && time_ms() - s_arm_ms >= USB_ARM_MS) {
+        hw_off();                                    /* as a session's end leaves it */
+        log_printf("usb: PHY ran configured %u ms, held for a later plug (e8 %x)", (unsigned)USB_ARM_MS,
+                   (unsigned)(RK_GRF[0xE8 / 4] & 0xFu));
+    }
+}
+
+/* In this order: the boot's own idle first (the fix under test), then the old quick re-park
+ * (does it undo it?), then how long a run settles the comparators. */
 const char *const usb_detect_names[USB_DETECT_STATES] = {
-    "idle, ROM analog", "idle + analog cfg", "session end + cfg", "idle, CON3 only",
+    "as booted (armed 1 s)", "quick re-park (old)", "run 300 ms, hold", "run 1 s, hold",
 };
 
 void usb_detect_state(int n)
 {
-    block_run();
     switch (n) {
-    case 0:                                          /* stock's idle with the ROM's analog values */
-        phy_config_rom();
-        phy_resume();
-        block_hold();
+    case 0:                                          /* leave the idle usb_dwc2_park() left */
         break;
-    case 1:                                          /* stock's idle + Grf_Otgphy_Driver_Confige */
+    case 1:                                          /* rechord8's park: held ~200 us after the cfg */
+        block_run();
         phy_config_rom();
         phy_resume();
         phy_config();
         block_hold();
         break;
-    case 2:                                          /* as a session's end leaves it, configured */
+    default:
         phy_config_rom();
-        phy_resume();
-        phy_config();
-        phy_suspend();
-        block_hold();
-        break;
-    default:                                         /* only the bias reference (CON3[4:2] = 5) */
-        phy_config_rom();
-        phy_resume();
-        RK_GRF[0x8C / 4] = 0x001C0014u;
-        block_hold();
+        phy_arm();
+        delay_ms(n == 2 ? 300u : 1000u);
+        hw_off();
         break;
     }
 }
