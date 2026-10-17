@@ -50,7 +50,10 @@ static int s_strap = -1;              /* GPIO2.9 at boot: 0 = the 0x66666666 boa
 
 void board_early_init(void)
 {
-    REG32(0x5002004Cu) = 0xFFFF0000u;    /* PMU_SYS_REG3: no stale loader request (we are running) */
+    /* PMU_SYS_REG3 (0x5002004C) is not touched: the boot ROM leaves 0x18DF there at every
+     * power-on and reads it at the next reset; stock never writes it but for its USB-loader
+     * reboot. Clearing it here (as RECHO does) changed what the ROM saw on the user's
+     * reset-and-keys path into maskrom, the one way back from a bad image. */
     /* GRF_INTER_CON0 bit 0 (FORCE_JTAG) off: the ROM leaves it 1 (device, 2026-10-16), stock clears
      * it in Gpio_Init (MINIV390 0x03053AF4 -> 0x03053056(0)), the SDK before muxing GPIO2.14/2.15
      * ("JTAG0", app_main.c), and GPIO2.15 is the panel's reset. */

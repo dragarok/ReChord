@@ -39,6 +39,22 @@ published yet.
 | Updater: power-cut-safe, both slots, slot repair, ROM USB loader fallback | done | QEMU, maskrom flashing on the device |
 | UI | basic: menus, browser, now playing, settings, Bluetooth and power pages; 8x8 ASCII font | device |
 
+## The recovery path comes first
+
+The way back from any bad image is the boot ROM's maskrom:
+1. Unplug USB.
+2. Press RST with a paperclip.
+3. Hold every key except power.
+4. Plug USB in.
+
+`rkdeveloptool` can then write any image. The ROM decides this before any of our code runs.
+Nothing in ReChord may change what the ROM sees on that path:
+- **PMU_SYS_REG3** is the ROM's boot-mode register. The ROM leaves `0x18DF` there at every
+  power-on and, as stock's code implies, reads it at the next reset. ReChord never writes it,
+  except for the stock-style USB-loader reboot (`0x18AF`). QEMU fails any other write as a
+  VIOLATION.
+- No other mechanism into the loader will be added, such as RECHO 0.10's `MASKROM.REQ` file.
+
 ## Next
 
 ### 1. A proper UI
@@ -69,7 +85,7 @@ The current UI is functional but plain. In order:
 ### 3. Features
 - A 10-band EQ and ReplayGain applied on core B.
 - A real-time clock, a persistent queue across power-off, hold-to-boot, a battery-empty
-  shutdown, reboot to the USB loader, and swap up/down.
+  shutdown, and swap up/down.
 - A spectrum view.
 - Key gestures like the official firmware: long, double and triple press, and seek.
 - Settings from a phone or a computer. Open question: the stock Bluetooth module has no data
