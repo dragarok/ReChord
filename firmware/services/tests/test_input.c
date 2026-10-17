@@ -394,6 +394,60 @@ static void test_repeat(void)
     reset();
 }
 
+/* The ladder as QEMU's key-ramp-ms=25 drives it, with the driver's edges (input_sample_edges): a
+ * second PLAY tap whose voltage holds MENU's band 20 ms on the way down is still x2; times come
+ * from the edges, not from when a band was stable. */
+static uint32_t s_t;
+static void edges(int adc, int n, uint32_t press, uint32_t release)
+{
+    while (n-- > 0) {
+        s_t += 10;
+        input_sample_edges(adc, 0, s_t, press, release);
+    }
+}
+
+static void test_edges(void)
+{
+    input_event_t ev;
+    uint32_t p1, r1, p2, r2;
+
+    reset();
+    s_t = 100000;
+    edges(1023, 3, 0, 0);
+    while (input_next(&ev) == 1)
+        ;
+    p1 = s_t + 5;                            /* tap 1: PLAY straight */
+    edges(260, 2 + 8, p1, 0);
+    r1 = s_t + 5;
+    edges(260, 4, p1, r1);                   /* (the band kept while the voltage rises) */
+    edges(1023, 2, p1, r1);
+    CHECK(next_is(KEY_SELECT, IG_DOWN, 1));
+    CHECK(input_next(&ev) == 1 && ev.gesture == IG_TAP && ev.t_ms == r1 && ev.held_ms == r1 - p1);
+    edges(1023, 15, 0, r1);
+    p2 = s_t + 5;                            /* tap 2: MENU's band stable 30 ms first */
+    edges(360, 2 + 2, p2, 0);
+    edges(260, 2 + 6, p2, 0);
+    r2 = s_t + 5;
+    edges(260, 4, p2, r2);
+    edges(1023, 2, p2, r2);
+    CHECK(next_is(KEY_SELECT, IG_DOWN, 2));
+    CHECK(input_next(&ev) == 1 && ev.gesture == IG_TAP && ev.taps == 2 && ev.t_ms == r2);
+    CHECK(input_next(&ev) == 0);             /* (no END for the band it passed) */
+    edges(1023, 40, 0, r2);
+    CHECK(next_is(KEY_SELECT, IG_END, 2));
+    /* a hold: 500 ms after the edge, whenever the band became stable */
+    p1 = s_t + 5;
+    edges(515, 3, p1, 0);                    /* BACK's band on the way (as long as you like) */
+    edges(260, 70, p1, 0);
+    CHECK(next_is(KEY_SELECT, IG_DOWN, 1));
+    CHECK(input_next(&ev) == 1 && ev.gesture == IG_HOLD && ev.t_ms - p1 >= 500 && ev.t_ms - p1 < 510);
+    r1 = s_t + 5;
+    edges(260, 5, p1, r1);
+    edges(1023, 2, p1, r1);
+    CHECK(input_next(&ev) == 1 && ev.gesture == IG_RELEASE && ev.t_ms == r1 && ev.held_ms == r1 - p1);
+    reset();
+}
+
 int main(void)
 {
     test_boot_press();
@@ -406,6 +460,7 @@ int main(void)
     test_scan();
     test_multi();
     test_repeat();
+    test_edges();
 
     printf("test_input: %d checks, %d failures\n", s_checks, s_failures);
     return (s_failures == 0) ? 0 : 1;
