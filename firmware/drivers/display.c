@@ -239,8 +239,8 @@ static HOT void render(uint16_t *buf, int by, int bh, int cx0, int cx1)
             draw_text8(o, buf, by, a, b, xa, xb);
             break;
         case OP_TEXT:
-            (void)text_draw_band(o->p, buf + (a - by) * DISPLAY_W, a, b - a + 1, o->ox, o->oy, xa, xb,
-                                 s_text + o->arg, o->len, o->c);
+            (void)text_draw_band(o->p, buf + (a - by) * DISPLAY_W, a, b - a + 1, o->ox, o->oy, xa, xb + 1,
+                                 s_text + o->arg, o->len, o->c);   /* (text.h: clip_x1 exclusive) */
             break;
         case OP_ICON:
             draw_icon(o, buf, by, a, b, xa, xb);

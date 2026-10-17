@@ -98,7 +98,7 @@ void display_draw_text(int x, int y, const char *s, uint16_t fg, uint16_t bg);
 /*
  * A UTF-8 run in a proportional font (drivers/text.h, text_draw_band): pen at x, baseline in panel
  * coordinates, glyphs (2-bit alpha) blended over what lies below in fg. Drawn only inside the clip
- * box x0..x1, y0..y1, which is also the op's bounding box: give the box the text lives in (a list
+ * box x0..x1, y0..y1 (inclusive, like every display.h box; display.c hands text.h its exclusive end), which is also the op's bounding box: give the box the text lives in (a list
  * row, a header field). Not opaque. The bytes are copied (the string may be a temporary); the
  * font is not (a const font_t from text.h).
  */

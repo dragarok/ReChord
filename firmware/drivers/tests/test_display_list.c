@@ -16,8 +16,10 @@
 #include "text.h"
 #include "test_util.h"
 
-struct font { int adv; };
-static const font_t k_font = { 7 };
+/* (a handle only: the fake engine ignores what it points to, so the real text.h's struct font fits) */
+static const uint8_t k_font_handle[4];
+#define k_font (*(const font_t *)(const void *)k_font_handle)
+#define ADV 7
 static int s_text_calls;
 
 static uint16_t blend(uint16_t d, uint16_t s)
@@ -25,17 +27,18 @@ static uint16_t blend(uint16_t d, uint16_t s)
     return (uint16_t)(((d & 0xF7DEu) >> 1) + ((s & 0xF7DEu) >> 1));
 }
 
-/* Glyph i of the run: a 6 x 10 cell at pen + 7 i, rows baseline - 9 .. baseline; its pixels where
+/* (text.h contract: clip_x1 is exclusive.) Glyph i of the run: a 6 x 10 cell at pen + 7 i, rows baseline - 9 .. baseline; its pixels where
  * (x * 7 + y * 3 + byte) % 5 == 0, blended (so the order of drawing shows). */
 int text_draw_band(const font_t *f, uint16_t *band, int band_y, int band_h,
                    int x, int baseline, int clip_x0, int clip_x1,
                    const char *utf8, int nbytes, uint16_t fg)
 {
+    (void)f;
     s_text_calls++;
     for (int i = 0; i < nbytes; i++)
         for (int y = baseline - 9; y <= baseline; y++)
-            for (int px = x + i * f->adv; px < x + i * f->adv + 6; px++) {
-                if (y < band_y || y >= band_y + band_h || px < clip_x0 || px > clip_x1)
+            for (int px = x + i * ADV; px < x + i * ADV + 6; px++) {
+                if (y < band_y || y >= band_y + band_h || px < clip_x0 || px >= clip_x1)
                     continue;
                 if ((px * 7 + y * 3 + (uint8_t)utf8[i]) % 5 == 0) {
                     uint16_t *p = &band[(y - band_y) * DISPLAY_W + px];
@@ -43,13 +46,14 @@ int text_draw_band(const font_t *f, uint16_t *band, int band_y, int band_h,
                     *p = blend(*p, fg);
                 }
             }
-    return nbytes * f->adv;
+    return nbytes * ADV;
 }
 
 int text_width(const font_t *f, const char *utf8, int nbytes)
 {
+    (void)f;
     (void)utf8;
-    return nbytes * f->adv;
+    return nbytes * ADV;
 }
 
 /* A progress bar: arg = 0..1000 per mille filled; opaque. */
