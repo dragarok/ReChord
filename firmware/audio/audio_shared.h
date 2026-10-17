@@ -119,6 +119,8 @@ typedef struct {
     volatile uint32_t rate;          /* A: sample rate the output runs at */
     volatile uint32_t cmd;           /* A -> B */
     volatile uint32_t run;           /* A: 1 = decode; 0 = B leaves every counter alone */
+    volatile uint32_t b_div_ack;     /* B: the b_div its SysTick now runs at (A: a slower clock's
+                                      * memory wait state comes off after this) */
 } audio_shared_t;
 
 #define AS ((audio_shared_t *)AS_SHARED)

@@ -89,6 +89,12 @@ void SysTick_Handler(void)
 {
     AS->ticks++;
     recycle_blocks();
+    /* falling behind (the PCM ring under half full while the DMA runs): full speed now, not at the
+     * next 1 s load window (a slow clock kept from a pause or a quiet passage drained the ring
+     * first; OURS_AUDIT 3.3a). Core A applies it from its own SysTick. */
+    if (AS->state == AS_B_PLAYING && AS->b_div > 1u && AS->pcm_wr >= AS_PCM_BLOCKS &&
+        AS->pcm_wr - AS->pcm_played < AS_PCM_BLOCKS / 2u)
+        AS->b_div_req = 1;
     if (++s_win == TICK_HZ) {
         stack_check();
         uint32_t cyc = (s_reload + 1u) * TICK_HZ, idle = s_idle_cyc;
@@ -555,6 +561,7 @@ int b_main(void)
 
     heap_reset();
     systick_start();
+    AS->b_div_ack = div_seen;
     AS->state = AS_B_READY;
     for (;;) {
         if (AS->cmd == AS_CMD_STOP) {
@@ -576,6 +583,7 @@ int b_main(void)
         if (AS->b_div != div_seen) {                 /* core A changed our clock */
             div_seen = AS->b_div;
             systick_start();
+            AS->b_div_ack = div_seen;                /* (A may now drop a faster clock's wait state) */
         }
         if (!produce())
             cpu_idle();

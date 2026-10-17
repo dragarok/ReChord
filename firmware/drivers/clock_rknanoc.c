@@ -21,13 +21,18 @@
  * slowed down. */
 #define GRF_INTER_CON0 (*(volatile uint32_t *)0x500100C4u)
 #define MEM_FAST_A_HZ  180000000u
-#define MEM_FAST_B_HZ  300000000u
+/* Core B's half (bits 15:14, RECHO 0.10's "HIGHRAM response cycle", work/recho010/STATIC.md C.4):
+ * on above 150 MHz [code], set before B speeds up past it and cleared only once B has acked a
+ * slower clock (clock_core_b_settled). Stock set it at 300 MHz and up; RECHO 0.9.2 raised the clock
+ * first and never cleared it. ReChord's B never runs above the 96 MHz PLL point today, so this
+ * keeps the order for when it does. */
+#define MEM_FAST_B_HZ  150000000u
 #define CORE_A_MAX_HZ  200000000u
 
 static void mem_timing(uint32_t a_hz, uint32_t b_hz)
 {
     GRF_INTER_CON0 = 0xF0400000u | (a_hz >= MEM_FAST_A_HZ ? 0x3040u : 0u) |
-                     (b_hz >= MEM_FAST_B_HZ ? 0xC000u : 0u);
+                     (b_hz > MEM_FAST_B_HZ ? 0xC000u : 0u);
     __asm__ volatile ("dsb" ::: "memory");
 }
 
@@ -42,6 +47,7 @@ static void mem_timing(uint32_t a_hz, uint32_t b_hz)
 #define TICK_US (1000000u / CLOCK_TICK_HZ)
 
 static uint32_t s_pll_hz = OSC_HZ, s_a_hz = OSC_HZ, s_b_hz = OSC_HZ, s_pclk_hz = OSC_HZ;
+static uint32_t s_b_mem_hz = OSC_HZ;       /* the core-B clock the memory timing is set for */
 static unsigned s_pclk_shift;
 
 /* time base: time = base + ticks * TICK_US + partial tick from the SysTick counter */
@@ -298,7 +304,8 @@ int clock_init_at(unsigned point, void (*trace)(uint32_t))
     }
     TRACE(5);
     s_pll_hz = k_points[point].pll_hz;
-    mem_timing(s_pll_hz / k_points[point].a_div, s_pll_hz / k_points[point].b_div);
+    s_b_mem_hz = s_pll_hz / k_points[point].b_div;
+    mem_timing(s_pll_hz / k_points[point].a_div, s_b_mem_hz);
     TRACE(6);
     apply_dividers(k_points[point].a_div, k_points[point].b_div);
     TRACE(7);
@@ -334,7 +341,7 @@ int clock_keep_rom(void)
 
     s_pll_hz = (CRU(MODE_CON) & 1u) && fb && p1 && p2 && ref ? OSC_HZ / ref * fb / p1 / p2 : OSC_HZ;
     s_a_hz = s_pll_hz / ((CRU(CLKSEL0) & 7u) + 1u);
-    s_b_hz = s_pll_hz / (((CRU(CLKSEL0) >> 12) & 7u) + 1u);
+    s_b_hz = s_b_mem_hz = s_pll_hz / (((CRU(CLKSEL0) >> 12) & 7u) + 1u);
     s_pclk_shift = (CRU(CLKSEL1) >> 8) & 3u;
     s_pclk_hz = s_a_hz >> s_pclk_shift;
     systick_start();
@@ -351,9 +358,9 @@ void clock_set_core_a_div(unsigned div)
     __asm__ volatile ("cpsid i" ::: "memory");
     s_base_us = time_us();
     s_base_ms = time_ms();
-    mem_timing(a > s_a_hz ? a : s_a_hz, s_b_hz);   /* the timing for the faster of old and new */
+    mem_timing(a > s_a_hz ? a : s_a_hz, s_b_mem_hz);   /* the timing for the faster of old and new */
     apply_dividers(div, s_pll_hz / s_b_hz);
-    mem_timing(s_a_hz, s_b_hz);                     /* then for the new */
+    mem_timing(s_a_hz, s_b_mem_hz);                     /* then for the new */
     systick_start();
     __asm__ volatile ("cpsie i" ::: "memory");
 }
@@ -365,10 +372,21 @@ void clock_set_core_b_div(unsigned div)
     if (div < 1u || div > 8u || s_pll_hz == OSC_HZ)
         return;
     b = s_pll_hz / div;
-    mem_timing(s_a_hz, b > s_b_hz ? b : s_b_hz);
+    if (b > s_b_mem_hz) {                  /* faster: the memory timing for it first */
+        s_b_mem_hz = b;
+        mem_timing(s_a_hz, s_b_mem_hz);
+    }
     s_b_hz = b;
     CRU(CLKSEL0) = 0x70000000u | (div - 1u) << 12;
-    mem_timing(s_a_hz, s_b_hz);
+    /* slower: the timing stays for the old clock until B has acked (clock_core_b_settled) */
+}
+
+void clock_core_b_settled(void)
+{
+    if (s_b_mem_hz != s_b_hz) {
+        s_b_mem_hz = s_b_hz;
+        mem_timing(s_a_hz, s_b_mem_hz);
+    }
 }
 
 uint32_t clock_pll_hz(void)    { return s_pll_hz; }

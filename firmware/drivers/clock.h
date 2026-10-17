@@ -38,6 +38,8 @@ unsigned clock_div_for(uint32_t hz);
 void clock_set_core_a_div(unsigned div);
 /* Core B divider of the PLL (1 = 400 MHz .. 8 = 50 MHz). */
 void clock_set_core_b_div(unsigned div);
+/* Core B acked its new clock (audio_shared b_div_ack): a slower clock's memory timing applies now. */
+void clock_core_b_settled(void);
 
 uint32_t clock_pll_hz(void);
 uint32_t clock_core_hz(void);       /* core A */

@@ -52,7 +52,7 @@ int audio_skip(int dir);
  * stops on a change (1 is returned); the caller plays again. */
 int audio_set_output(int usb);
 int audio_output_usb(void);
-/* 1 = pause, 0 = resume; returns the paused state. */
+/* 1 = pause, 0 = resume (core B back at full speed first); returns the paused state. */
 int audio_pause(int on);
 int audio_paused(void);
 /* 1 when a storage write may start: nothing plays, or the input ring holds AUDIO_WRITE_MIN_MS
@@ -60,5 +60,7 @@ int audio_paused(void);
  * asks 100 ms, the device's writes are ~75 ms each and a slow one more). */
 #define AUDIO_WRITE_MIN_MS 250u      /* ~3 of the SD NAND's ~75 ms writes (OURS_AUDIT 1.6) */
 int audio_write_ok(void);
+/* Core A's SysTick (every 10 ms, interrupt context): core B's clock requests applied. */
+void audio_tick(void);
 
 #endif

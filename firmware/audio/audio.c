@@ -787,6 +787,56 @@ static const char *family_of(uint32_t codec)
 
 static const char *s_b_image;            /* module now in core B, NULL: none */
 
+/* ---- core B's clock -------------------------------------------------------
+ *
+ * One place changes it: the main loop (play, resume, an underrun, a rate switch) and core A's
+ * SysTick (audio_tick(): B's own requests, so a main loop held up by the storage no longer holds
+ * up a faster clock B asked for, OURS_AUDIT 3.3). clock_set_core_b_div() keeps RECHO 0.10's order
+ * for the memory wait state; B is told b_hz, then b_div, restarts its SysTick at the new clock and
+ * acks (b_div_ack), and only then may a slower clock's wait state come off (clock_core_b_settled). */
+static uint32_t irq_off(void)
+{
+    uint32_t m;
+
+    __asm__ volatile ("mrs %0, primask\n cpsid i" : "=r" (m) :: "memory");
+    return m;
+}
+
+static void irq_restore(uint32_t m)
+{
+    __asm__ volatile ("msr primask, %0" :: "r" (m) : "memory");
+}
+
+static void b_clock(unsigned div)
+{
+    uint32_t m = irq_off();
+
+    if (div >= 1u && div <= 8u && AS->b_div != div) {
+        clock_set_core_b_div(div);
+        AS->b_hz = clock_core_b_hz();
+        __asm__ volatile ("dmb" ::: "memory");   /* B reads b_hz once it sees b_div change */
+        AS->b_div = div;
+    }
+    irq_restore(m);
+}
+
+/* Full speed now (play, resume, refill after a switch, an underrun): B scales down from its load. */
+static void b_full_speed(void)
+{
+    b_clock(1);
+    AS->b_div_req = 1;
+}
+
+void audio_tick(void)
+{
+    if (!s_b_up || !s_playing)
+        return;
+    if (AS->b_div_req != AS->b_div)          /* core B asked for another clock */
+        b_clock(AS->b_div_req);
+    if (AS->b_div_ack == AS->b_div)
+        clock_core_b_settled();
+}
+
 /* Load the image into B's code RAM and let B boot; B keeps the stream state
  * in the shared block, so a swap mid-stream continues where it was. */
 #define B_BOOT_MS 1000u                      /* core B: release to ready (load not included) */
@@ -1122,10 +1172,8 @@ int audio_play(int pos)
             log_printf("audio: play: core B start failed (%d)", r);
             return -1;
         }
-    } else if (AS->b_div != 1u) {            /* same image: back to full speed for the start */
-        clock_set_core_b_div(1);
-        AS->b_hz = clock_core_b_hz();
-        AS->b_div = AS->b_div_req = 1;
+    } else {                                 /* same image: back to full speed for the start */
+        b_full_speed();
     }
     {
         int r = out_rate(s_rate, AS->q[0].bits);
@@ -1172,6 +1220,11 @@ int audio_pause(int on)
 {
     if (!s_playing || !s_dma_on || on == s_paused)
         return s_paused;
+    if (!on)
+        b_full_speed();                      /* B slowed itself down while paused (its load fell,
+                                              * 96 -> 12 MHz); resuming there drained the PCM ring
+                                              * before its next 1 s window (device: "underrun, input
+                                              * 65536 B buffered" 0.5 s after a resume, OURS_AUDIT 3.3a) */
     if (s_usb)
         usb_out_pause(on);
     else if (on)
@@ -1214,11 +1267,7 @@ static void check_underrun(void)
 
     if (n == s_underruns)
         return;
-    if (AS->b_div != 1u) {
-        clock_set_core_b_div(1);
-        AS->b_hz = clock_core_b_hz();
-        AS->b_div = AS->b_div_req = 1;
-    }
+    b_full_speed();
     if (!s_underrun_log || time_ms() - s_underrun_log >= 1000u) {
         log_printf("audio: underrun (%u in all), input %u B buffered", (unsigned)n,
                    (unsigned)(AS->in_wr - AS->in_rd));
@@ -1294,11 +1343,7 @@ void audio_poll(void)
     if (!s_playing)
         return;
     check_underrun();
-    if (AS->b_div_req != AS->b_div) {        /* core B asked for another clock */
-        clock_set_core_b_div(AS->b_div_req);
-        AS->b_hz = clock_core_b_hz();
-        AS->b_div = AS->b_div_req;
-    }
+    audio_tick();                            /* (also from SysTick: audio_tick) */
     if (!emmc_busy())                        /* the card programs a queued write: a read would wait */
         refill();
     /* start output once B has filled the ring (or the whole stream is shorter) */
@@ -1340,11 +1385,8 @@ static void stream_switch(void)
             return;
         }
     }
-    if (s_b_up && AS->b_div != 1u) {         /* full speed while the ring refills */
-        clock_set_core_b_div(1);
-        AS->b_hz = clock_core_b_hz();
-        AS->b_div = AS->b_div_req = 1;
-    }
+    if (s_b_up)                              /* full speed while the ring refills */
+        b_full_speed();
     if (rate != s_rate) {
         log_printf("audio: rate %u -> %u Hz", (unsigned)s_rate, (unsigned)rate);
         if (out_rate(rate, n->bits) != 0) {
