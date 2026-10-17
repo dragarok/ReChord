@@ -1364,6 +1364,7 @@ void ap_ui_loop(void)
     input_event_t ev;
     uint32_t t_first = 0;
 
+    log_set_sync(emmc_sync);   /* a named log flush is on the disk when it returns (log.h) */
     input_set_clock(time_ms);
     input_set_observer(log_gesture);
     keys_isr_start();     /* the keys sampled every 10 ms from now on (ap_tick.c), whatever runs */
@@ -1401,7 +1402,7 @@ void ap_ui_loop(void)
     queue_set_mode(g_cfg.play);
     audio_set_volume_db(g_cfg.volume == CFG_VOLUME_MUTE ? -90 : g_cfg.volume);
     log_printf("cfg: play %s, volume %d, resume %u", queue_mode_name(g_cfg.play), g_cfg.volume, g_cfg.resume);
-    log_flush("boot");
+    log_flush_async("boot");     /* (on the disk within a few passes: not ahead of the first frame) */
     bootcrumb(BC_POWER);
     power_init();
     bt_app_init();                   /* the BT module on only if the setting says so (ap_bt.c) */

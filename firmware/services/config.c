@@ -25,6 +25,7 @@ static const char *const k_usb_vbus[] = { "port", "gpio2.1" };       /* USB_OUT_
 static const char *const k_cpu[] = { "auto", "max" };
 
 static uint32_t s_hash, s_save_at;
+static int s_idle_only;              /* the save waiting is the volume's alone: not while playing */
 
 static int s_ready;                  /* settings loaded or defaulted: only then may they be written */
 
@@ -259,8 +260,17 @@ int config_save(void)
     return 0;
 }
 
+void config_save_idle(void)
+{
+    int pending = s_save_at && !s_idle_only;
+
+    config_save_later();
+    s_idle_only = !pending;
+}
+
 void config_save_later(void)
 {
+    s_idle_only = 0;
     s_save_at = time_ms() + 5000u;
     if (!s_save_at)
         s_save_at = 1;
@@ -268,7 +278,7 @@ void config_save_later(void)
 
 void config_poll(int defer)
 {
-    if (s_save_at && !defer && (int32_t)(time_ms() - s_save_at) >= 0)
+    if (s_save_at && (!defer || !s_idle_only) && (int32_t)(time_ms() - s_save_at) >= 0)
         config_save();
 }
 

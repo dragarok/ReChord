@@ -49,10 +49,12 @@ void config_reset(void);         /* everything to defaults */
 int config_load(void);           /* 0, or < 0 (defaults stay) */
 /* Writes the file when its text changed since the last load/save. 0, or < 0. */
 int config_save(void);
-/* Ask for a save in 5 s (coalesces volume key bursts); config_poll() does it, but not while defer
- * is set (music playing: DESIGN 4.7, no config writes while playing; the save comes at the pause,
- * the stop, screen off or power off). */
+/* Ask for a save in 5 s (coalesces bursts); config_poll() does it. config_save_idle(): the same
+ * for the volume, which changes in bursts all through a session: that save waits while defer is set
+ * (music playing: DESIGN 4.7, no config write for it mid-track; it comes at the pause, the stop,
+ * screen off or power off). A setting changed meanwhile is saved at its time, the volume with it. */
 void config_save_later(void);
+void config_save_idle(void);
 void config_poll(int defer);
 int config_save_due(void);      /* a save is waiting */
 

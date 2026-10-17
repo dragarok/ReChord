@@ -160,7 +160,7 @@ long player_get_position_ms(void)
 int player_set_volume(int db)
 {
     g_cfg.volume = (int16_t)audio_set_volume_db(db);
-    config_save_later();
+    config_save_idle();                      /* (not mid-track: at the pause, screen off, power off) */
     return PLAYER_OK;
 }
 

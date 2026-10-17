@@ -33,7 +33,8 @@ void ap_bg_poll(void)
     int playing = player_get_state() == PLAYER_PLAYING;
     uint32_t now = time_ms();
 
-    emmc_wq_step(audio_write_ok());
+    if (!emmc_wq_step(audio_write_ok()))
+        log_durable();                   /* (the log written so far is on the disk) */
     config_poll(playing);
     if (!emmc_wq_pending() && log_bytes() &&
         (log_bytes() > LOG_SOON_BYTES || now - s_log_at >= (playing ? LOG_PLAYING_MS : LOG_IDLE_MS))) {

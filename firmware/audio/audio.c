@@ -636,7 +636,7 @@ static int open_next(void)
             u->name[sizeof u->name - 1] = 0;
         }
         s_rd_bps = t.frames && t.rate ? (uint32_t)((uint64_t)t.bytes * t.rate / t.frames) : 0u;
-        if (s_rd_bps < 16000u)
+        if (!s_rd_bps)
             s_rd_bps = 600000u;              /* unknown: as a hi-res FLAC (the cautious side) */
         AS->q[AS->q_wr % AS_QUEUE] = t;
         __asm__ volatile ("dmb" ::: "memory");   /* the entry before the count that publishes it */

@@ -15,13 +15,23 @@
 
 char log_ring[RING];                     /* not static: a debugger/QEMU can read it */
 uint32_t log_ring_head, log_ring_len;    /* oldest byte, bytes held (the recent history) */
-/* The last s_unsaved bytes of the history are not on the disk yet. A flush writes only those and
+/* The last s_unwritten bytes of the history are not written to the file yet. A flush writes only those and
  * keeps the history, so the RAM ring still shows the recent lines after they reach ECHOLOG.TXT
  * (the 10 s periodic flush used to empty it, 2026-10-16); room is made by dropping the oldest
  * saved lines, and only a ring full of unsaved lines drops a new one. */
+static uint32_t s_unwritten;
+/* ...and the last s_unsaved bytes are not on the disk yet: written, the storage may still hold them
+ * (drivers/emmc.h's queue) until log_durable(). tools/emu_run.py reads it: ECHOLOG.TXT + the
+ * ring's last s_unsaved bytes is the whole log once. */
 static uint32_t s_unsaved;
 static unsigned long s_dropped, s_lines;
 static log_clock_fn s_clock;
+static int (*s_sync)(void);
+
+void log_set_sync(int (*sync)(void))
+{
+    s_sync = sync;
+}
 
 void log_init(log_clock_fn clock_ms)
 {
@@ -40,7 +50,7 @@ unsigned log_pending(void)
 
 unsigned log_bytes(void)
 {
-    return (unsigned)s_unsaved;
+    return (unsigned)s_unwritten;
 }
 
 void log_printf(const char *fmt, ...)
@@ -60,7 +70,7 @@ void log_printf(const char *fmt, ...)
     if (n > (int)sizeof line - 2)
         n = (int)sizeof line - 2;
     line[n++] = '\n';
-    if (s_unsaved + (unsigned)n > RING) {
+    if (s_unwritten + (unsigned)n > RING) {
         s_dropped++;
         return;
     }
@@ -71,18 +81,21 @@ void log_printf(const char *fmt, ...)
             c = log_ring[log_ring_head];
             log_ring_head = (log_ring_head + 1u) % RING;
             log_ring_len--;
-        } while (c != '\n' && log_ring_len > s_unsaved);
+        } while (c != '\n' && log_ring_len > s_unwritten);
     }
     for (int i = 0; i < n; i++)
         log_ring[(log_ring_head + log_ring_len + (unsigned)i) % RING] = line[i];
     log_ring_len += (unsigned)n;
+    s_unwritten += (unsigned)n;
     s_unsaved += (unsigned)n;
+    if (s_unsaved > log_ring_len)
+        s_unsaved = log_ring_len;            /* (the oldest written lines made room) */
     s_lines++;
 }
 
 static int write_ring(void);
 
-int log_flush(const char *tag)
+static int flush(const char *tag)
 {
     unsigned long dropped = s_dropped;
     int r;
@@ -95,23 +108,48 @@ int log_flush(const char *tag)
     return write_ring();
 }
 
+void log_durable(void)
+{
+    s_unsaved = s_unwritten;
+}
+
+int log_flush(const char *tag)
+{
+    int r = flush(tag);
+
+    if (r == LOG_OK && tag && s_sync) {
+        if (s_sync() != 0)
+            r = LOG_ERR_IO;
+        else
+            log_durable();
+    }
+    if (!s_sync)
+        log_durable();                       /* (written straight to the disk) */
+    return r;
+}
+
+int log_flush_async(const char *tag)
+{
+    return flush(tag);
+}
+
 static int write_ring(void)
 {
     fs_file_t *f;
     int ok = 1;
 
-    if (!s_unsaved)
+    if (!s_unwritten)
         return LOG_OK;
     f = fs_open_append(LOG_PATH);
     if (!f)
         return LOG_ERR_OPEN;
-    while (ok && s_unsaved) {
-        uint32_t at = (log_ring_head + log_ring_len - s_unsaved) % RING;
-        uint32_t k = RING - at < s_unsaved ? RING - at : s_unsaved;
+    while (ok && s_unwritten) {
+        uint32_t at = (log_ring_head + log_ring_len - s_unwritten) % RING;
+        uint32_t k = RING - at < s_unwritten ? RING - at : s_unwritten;
 
         ok = fs_write(f, log_ring + at, k) == (long)k;
         if (ok)
-            s_unsaved -= k;
+            s_unwritten -= k;
     }
     if (fs_close(f) != 0)
         ok = 0;
