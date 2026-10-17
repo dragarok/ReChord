@@ -266,8 +266,13 @@ void config_save_later(void)
         s_save_at = 1;
 }
 
-void config_poll(void)
+void config_poll(int defer)
 {
-    if (s_save_at && (int32_t)(time_ms() - s_save_at) >= 0)
+    if (s_save_at && !defer && (int32_t)(time_ms() - s_save_at) >= 0)
         config_save();
+}
+
+int config_save_due(void)
+{
+    return s_save_at != 0;
 }

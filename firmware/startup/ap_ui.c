@@ -34,13 +34,14 @@
 #include "ui/screens/screens.h"
 
 extern const ui_screen_t bt_screen;   /* ap_bt.c */
+void ap_bg_poll(void);                /* ap_bg.c: the queued writes, the log, the settings */
+void ap_bg_sync(void);
 void bt_app_init(void);
 void bt_app_tick(void);
 void bt_app_external(int streaming);
 
 static int s_adc = 1023, s_adc2 = 1023, s_power, s_cable, s_phy_parked;
 static int s_power_press_ok;
-static uint32_t s_log_flushed;  /* time_ms() of the last periodic log write */
 static uint32_t s_shortcut_at;  /* VOL+/VOL- chord: a shortcut key may follow within 2 s */
 static uint32_t s_vol_at;       /* the last volume key press, and the volume before it */
 static int s_vol_before;  /* the power key's current press began after boot's was released */
@@ -80,7 +81,7 @@ static void emmc_probe(void)
         snprintf(s_emmc, sizeof s_emmc, "%uM u%x", (unsigned)(emmc_sectors() >> 11),
                  (unsigned)(s_user = user));
     if (s_user)
-        fs_target_mount_rw(0, "Internal", emmc_read, emmc_write, s_user);
+        fs_target_mount_rw(0, "Internal", emmc_read, emmc_write_async, s_user);
 }
 
 static const char *emmc_text(void) { return s_emmc; }
@@ -240,6 +241,7 @@ static void save_state(const char *why)
     }
     config_save();
     log_flush(why);
+    ap_bg_sync();                        /* (everything queued on the card before it ends) */
 }
 
 /* RECHO's order (docs/RECHO_POWER_CFG.md C.6): stop, save, say so, 500 ms,
@@ -394,7 +396,7 @@ static void usb_session(void)
     line(1, "eject on the PC or press power");
     display_flush_rows(0, DISPLAY_H - 1);
     r = usb_msc_run(luns, 2, keys_power, &rd, &wr);
-    fs_target_mount_rw(0, "Internal", emmc_read, emmc_write, s_user);   /* host may have written */
+    fs_target_mount_rw(0, "Internal", emmc_read, emmc_write_async, s_user);   /* host may have written */
     snprintf(s_usb, sizeof s_usb, "x%d r%uM w%uM", r, (unsigned)(rd >> 11), (unsigned)(wr >> 11));
     log_printf("usb: disk session ended: exit %d, read %u MB, written %u MB, cable %d", r,
                (unsigned)(rd >> 11), (unsigned)(wr >> 11), usb_cable());
@@ -1174,6 +1176,7 @@ static void rockusb_flow(const char *why)
 {
     log_printf("rockusb: %s", why);
     log_flush("rockusb");                        /* (if the storage lets us) */
+    ap_bg_sync();
     power_screen(1);
     for (;;) {
         screen("USB recovery (boot ROM)");
@@ -1320,6 +1323,7 @@ static void recovery_menu(void)
 void ap_ui_loop(void)
 {
     input_event_t ev;
+    uint32_t t_first = 0;
 
     boot_key_sample();    /* first: the keys work whatever comes after */
     if (s_boot_key == KEY_DOWN)   /* before our storage driver runs at all (it might be what fails) */
@@ -1532,28 +1536,8 @@ void ap_ui_loop(void)
         /* audio pump + Now Playing sync (no-ops without a playing track) */
         (void)player_process();
         t_play = time_ms();
-        config_poll();
         bootguard_poll();                /* a fault record is cleared after a minute of normal running */
-        /* the RAM ring keeps the oldest lines when full: write it out once half full
-         * (at most once a minute), so a long session's log reaches ECHOLOG.TXT whole */
-        /* (any pending line within 10 s: a hang that needs RST loses only those; 2026-10-16 the
-         * device lost a whole playback session's lines that way) */
-        /* While a track plays, core A feeds core B from storage and a log append stalls it: one took
-         * 618 ms on the SD NAND (device 2026-10-16, "slow pass ... rest 618"), and playback stuttered
-         * every 13..18 s. So during playback only a ring 3/4 full is written. */
-        if (player_get_state() == PLAYER_PLAYING ? log_bytes() > 3072u :
-            ((log_bytes() > 0u && time_ms() - s_log_flushed >= 10000u) ||
-             (log_bytes() > 3072u && time_ms() - s_log_flushed >= 5000u))) {   /* (a burst) */
-            uint32_t t0 = time_ms();
-            int rc;
-
-            s_log_flushed = t0;
-            rc = log_flush(NULL);
-            if (rc != 0 || time_ms() - t0 >= 100u) {
-                log_printf("log: flush %d in %u ms", rc, (unsigned)(time_ms() - t0));
-                bootcrumb_kv(BCK_LOG_FLUSH, (uint32_t)(time_ms() - t0) | (uint32_t)(rc & 0xFF) << 24);
-            }
-        }
+        ap_bg_poll();                    /* queued writes, the log, the settings: never waits (ap_bg.c) */
         switch (power_poll(player_get_state() == PLAYER_PLAYING, 0)) {
         case POWER_OFF_IDLE:
             power_off(NULL);
@@ -1591,6 +1575,31 @@ void ap_ui_loop(void)
             if (now - t_pass > s_slowest && now - t_pass >= 300u) {
                 s_slowest = now - t_pass;
                 bootcrumb_set(BCK_SLOW_PASS, s_slowest | (uint32_t)ui_stack_depth() << 24);
+            }
+            static uint32_t s_worst, s_worst_at, s_worst_parts[4];
+            static const char *s_worst_on;
+
+            if (!t_first) {
+                t_first = now;
+                s_worst_at = time_stamp(now);
+                log_printf("ui: first frame at %u ms", (unsigned)now);
+            }
+            if (now - t_pass > s_worst) {    /* the worst pass of every 10 s, when it is 20 ms or more */
+                s_worst = now - t_pass;
+                s_worst_parts[0] = t_keys - t_pass;
+                s_worst_parts[1] = t_play - t_keys;
+                s_worst_parts[2] = t_draw - t_play;
+                s_worst_parts[3] = now - t_draw;
+                s_worst_on = ui_top_screen() ? ui_top_screen()->name : "-";
+            }
+            if (now - s_worst_at >= 10000u) {
+                if (s_worst >= 20u)
+                    log_printf("ui: worst pass %u ms on %s: keys+events %u, player %u, rest %u, draw %u",
+                               (unsigned)s_worst, s_worst_on, (unsigned)s_worst_parts[0],
+                               (unsigned)s_worst_parts[1], (unsigned)s_worst_parts[2],
+                               (unsigned)s_worst_parts[3]);
+                s_worst_at = time_stamp(now);
+                s_worst = 0;
             }
             if (now - t_pass >= 300u && s_slow < 30u) {
                 s_slow++;

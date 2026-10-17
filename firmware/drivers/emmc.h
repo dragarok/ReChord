@@ -17,6 +17,28 @@ int emmc_read(uint32_t lba, uint32_t count, void *buf);
 /* Only LBAs >= the user volume start found by emmc_layout(); -30 otherwise. */
 int emmc_write(uint32_t lba, uint32_t count, const void *buf);
 
+/* The write-behind queue (emmc_rknanoc.c): the main loop never waits while the card programs.
+ * emmc_write_async(): as emmc_write(), but the blocks are copied into a queue (in order; waits only
+ * when it is full; more than half the queue at once is written at once, after it). emmc_wq_step():
+ * once per main-loop pass: sees the block in flight done, and with may_start sends the next one;
+ * returns the blocks still queued. emmc_busy(): a block is being programmed (a read now waits for
+ * it). emmc_sync(): everything on the card (power off, USB sessions, reboot), 0 or -32 if a queued
+ * write failed. emmc_quiesce(): the block in flight finished (for code that drives the controller
+ * itself: bootcrumb.c). emmc_read() and emmc_write() see and keep the queue's order. */
+int emmc_write_async(uint32_t lba, uint32_t count, const void *buf);
+int emmc_wq_step(int may_start);
+int emmc_busy(void);
+unsigned emmc_wq_pending(void);
+unsigned emmc_wq_free(void);
+int emmc_sync(void);
+void emmc_quiesce(void);
+typedef struct {
+    uint32_t queued, merged, written, errors, waits, syncs, stuck, peak;
+    int last_error;
+    uint32_t wait_lr, wait_ms;      /* the last read that waited for a write: its caller, how long */
+} emmc_wq_stats_t;
+const emmc_wq_stats_t *emmc_wq_stats(void);
+
 /* Loader layout from the IDB: firmware area = [0x2000, user_start),
  * user volume = [user_start, emmc_sectors()). 0 on success. */
 int emmc_layout(uint32_t *user_start);

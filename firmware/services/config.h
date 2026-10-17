@@ -49,9 +49,12 @@ void config_reset(void);         /* everything to defaults */
 int config_load(void);           /* 0, or < 0 (defaults stay) */
 /* Writes the file when its text changed since the last load/save. 0, or < 0. */
 int config_save(void);
-/* Ask for a save in 5 s (coalesces volume key bursts); config_poll() does it. */
+/* Ask for a save in 5 s (coalesces volume key bursts); config_poll() does it, but not while defer
+ * is set (music playing: DESIGN 4.7, no config writes while playing; the save comes at the pause,
+ * the stop, screen off or power off). */
 void config_save_later(void);
-void config_poll(void);
+void config_poll(int defer);
+int config_save_due(void);      /* a save is waiting */
 
 /* Seconds / minutes of the screen_off / auto_off index; 0 = never. */
 uint32_t config_screen_off_s(void);

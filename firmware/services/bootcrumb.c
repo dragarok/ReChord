@@ -149,8 +149,14 @@ static int mmc_write(uint32_t arg, const uint32_t *buf)
 
 /* The controller as the ROM or our driver left it: clocks on for the access, everything the
  * driver relies on put back after. */
+/* (drivers/emmc_rknanoc.c: a queued write the card is programming finishes first; weak, so the
+ * tests that link this file alone need no driver) */
+extern void emmc_quiesce(void) __attribute__((weak));
+
 static int begin(void)
 {
+    if (emmc_quiesce)
+        emmc_quiesce();
     if (REG(CRU_SRST1) & 2u)
         return -1;
     s_g1 = REG(CRU_GATE1);

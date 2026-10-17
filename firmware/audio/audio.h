@@ -55,5 +55,10 @@ int audio_output_usb(void);
 /* 1 = pause, 0 = resume; returns the paused state. */
 int audio_pause(int on);
 int audio_paused(void);
+/* 1 when a storage write may start: nothing plays, or the input ring holds AUDIO_WRITE_MIN_MS
+ * and the PCM ring is at least half full (the card is not readable while it programs; DESIGN 4.2
+ * asks 100 ms, the device's writes are ~75 ms each and a slow one more). */
+#define AUDIO_WRITE_MIN_MS 250u      /* ~3 of the SD NAND's ~75 ms writes (OURS_AUDIT 1.6) */
+int audio_write_ok(void);
 
 #endif

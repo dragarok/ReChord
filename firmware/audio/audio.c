@@ -21,6 +21,7 @@
 #include "mp4.h"
 #include "asf.h"
 #include "drivers/clock.h"
+#include "drivers/emmc.h"
 #include "drivers/dac_cs43131.h"
 #include "drivers/usb_out.h"
 #include "drivers/usb_msc.h"
@@ -66,6 +67,7 @@ static int s_usb;                    /* the output is USB audio (usb_out.h), not
 static uint32_t s_underruns, s_underrun_log;   /* B's count when last seen; ms of the last log */
 static uint32_t s_rate, s_rate_changes;
 static audio_track_t s_tracks[AS_QUEUE];   /* titles/durations by seq, for the UI */
+static uint32_t s_rd_bps;                  /* bytes per second of the track being read (headroom) */
 static uint32_t s_sv_ticks, s_sv_ticks_at, s_sv_pcm, s_sv_pcm_at, s_sv_done, s_sv_fails, s_sv_aborts;
 
 static uint32_t be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
@@ -633,6 +635,9 @@ static int open_next(void)
             strncpy(u->name, name, sizeof u->name - 1);
             u->name[sizeof u->name - 1] = 0;
         }
+        s_rd_bps = t.frames && t.rate ? (uint32_t)((uint64_t)t.bytes * t.rate / t.frames) : 0u;
+        if (s_rd_bps < 16000u)
+            s_rd_bps = 600000u;              /* unknown: as a hi-res FLAC (the cautious side) */
         AS->q[AS->q_wr % AS_QUEUE] = t;
         __asm__ volatile ("dmb" ::: "memory");   /* the entry before the count that publishes it */
         AS->q_wr++;
@@ -1182,6 +1187,23 @@ int audio_paused(void)
     return s_playing && s_paused;
 }
 
+/* Room for a storage write (OURS_AUDIT 1.6 step 2, DESIGN 4.2/4.3): the card cannot be read while
+ * it programs a block (tens of ms on the SD NAND), so with music playing a write starts only while
+ * at least AUDIO_WRITE_MIN_MS of input is buffered and the PCM ring is at least half full. */
+int audio_write_ok(void)
+{
+    uint32_t used;
+
+    if (!s_playing || s_paused || !s_b_up)
+        return 1;
+    if (!s_dma_on || AS->pcm_wr - AS->pcm_played < AS_PCM_BLOCKS / 2u)
+        return 0;                            /* starting, or B is behind */
+    if (AS->in_closed)
+        return 1;                            /* the rest of the playlist is in the ring */
+    used = AS->in_wr - AS->in_rd;
+    return (uint64_t)used * 1000u >= (uint64_t)s_rd_bps * AUDIO_WRITE_MIN_MS;
+}
+
 static void stream_switch(void);
 
 /* B fell behind the DMA (input late, or its clock too low): back to full speed,
@@ -1277,7 +1299,8 @@ void audio_poll(void)
         AS->b_hz = clock_core_b_hz();
         AS->b_div = AS->b_div_req;
     }
-    refill();
+    if (!emmc_busy())                        /* the card programs a queued write: a read would wait */
+        refill();
     /* start output once B has filled the ring (or the whole stream is shorter) */
     if (!s_dma_on && !AS->cmd &&
         (AS->pcm_wr >= AS_PCM_BLOCKS || (AS->pcm_end && AS->pcm_wr >= AS->pcm_end))) {
