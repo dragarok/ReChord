@@ -162,8 +162,15 @@ $(CFW_ELF): $(CFW_OBJS) $(AP_LDSCRIPT)
 # 512 MB MINIVnnn.IMG, 8 GB HIFIECnn.IMG. 900/90 sort above any stock version.
 UPDATE_IMG := $(if $(filter 8g,$(BOARD)),HIFIEC90.IMG,MINIV900.IMG)
 
-cfw-img: $(CFW_ELF) $(COREB_BINS)
-	$(PYTHON) tools/make_fw1.py $(CFW_ELF) -o build/ReChord_AP.IMG $(if $(FONT_IMG),--fonts $(FONT_IMG)) $(COREB_MODULES)
+# The baked fonts (tools/gen_font.py in the project repo), loaded at boot by
+# firmware/drivers/text_load.c into the fonts window (firmware_ap.ld).
+TEXT_FONTS := firmware/drivers/fonts/rechord_fonts.bin
+TEXT_FONTS_MAX := 99840
+cfw-img: $(CFW_ELF) $(COREB_BINS) $(TEXT_FONTS)
+	@test $$(wc -c < $(TEXT_FONTS)) -le $(TEXT_FONTS_MAX) || \
+	    { echo "$(TEXT_FONTS) is over the fonts window ($(TEXT_FONTS_MAX) B, firmware_ap.ld)"; exit 1; }
+	$(PYTHON) tools/make_fw1.py $(CFW_ELF) -o build/ReChord_AP.IMG $(if $(FONT_IMG),--fonts $(FONT_IMG)) $(COREB_MODULES) \
+	    --module fonts=$(TEXT_FONTS)
 	cp build/ReChord_AP5M.IMG build/$(UPDATE_IMG)
 	@echo "  update file for the $(BOARD) board: build/$(UPDATE_IMG)"
 
@@ -323,6 +330,11 @@ test-dsp: firmware/rechord_dsp_core.c firmware/rechord_dsp_core.h firmware/test_
 host-tests:
 	CC=$(HOSTCC) sh firmware/services/tests/run_tests.sh
 	CC=$(HOSTCC) sh firmware/drivers/tests/run_tests.sh
+	@mkdir -p build/host
+	$(HOSTCC) -std=c99 -Wall -Werror -Ifirmware/theme -o build/host/test_theme firmware/theme/tests/test_theme.c \
+	  firmware/theme/theme.c firmware/theme/themes_builtin.c firmware/theme/theme_file.c
+	build/host/test_theme > build/host/test_theme.txt || { cat build/host/test_theme.txt; exit 1; }
+	@tail -1 build/host/test_theme.txt
 	HOSTCC=$(HOSTCC) $(PYTHON) tools/test_fs_write.py
 	@mkdir -p build/host
 	$(HOSTCC) -O2 -Wall -Ifirmware -o build/host/test_fw_powercut firmware/services/test_fw_powercut.c \

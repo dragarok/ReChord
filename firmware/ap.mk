@@ -80,7 +80,12 @@ AP_DRIVER_SRCS := \
   firmware/drivers/dac_cs43131.c \
   firmware/drivers/board_rknanoc.c \
   firmware/drivers/clock_rknanoc.c \
-  firmware/drivers/bt_jieli.c
+  firmware/drivers/bt_jieli.c \
+  firmware/drivers/text.c \
+  firmware/drivers/text_load.c \
+  firmware/drivers/icons.c \
+  firmware/drivers/fonts/fonts_s8.c \
+  firmware/drivers/fonts/icons_data.c
 
 # Services: settings/log/input + the target fs backend (same set as
 # $(SERVICES_TARGET_SRCS) in firmware/services/services.mk).
