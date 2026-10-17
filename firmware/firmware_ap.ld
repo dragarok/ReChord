@@ -125,20 +125,26 @@ SECTIONS
        the display trial's marker). In our own RAM, which the boot ROM leaves
        alone at power-on (device, rung 1: noise there), never in the ROM's own
        record at 0x0308FFE8 (docs/ROADMAP.md: the recovery path comes first). */
-    .noinit ALIGN(4) (NOLOAD) :
+    /* At the top of FW_RAM, far from .bss: the loader's row 1 zeroes past
+       .data, and whether it counts its last field from the start of .data
+       (tools/pack_fw1.py) or from its end (the QEMU model) is not measured;
+       either way the zeroing ends well below here. */
+    .noinit (ORIGIN(FW_RAM) + LENGTH(FW_RAM) - 0x40) (NOLOAD) :
     {
-        . = ALIGN(4);
         _noinit_start = .;
         *(.noinit*)
         . = ALIGN(4);
         _noinit_end = .;
     } > FW_RAM
+    ASSERT(_noinit_end <= ORIGIN(FW_RAM) + LENGTH(FW_RAM), ".noinit must fit in its 64 bytes")
+    ASSERT(_bss_end + SIZEOF(.data) + 0x100 <= _noinit_start,
+           ".noinit must stay clear of the loader's zeroing past .bss")
 
-    /* Remaining SRAM between .noinit and the top of FW_RAM is the heap
+    /* Remaining SRAM between .bss and .noinit is the heap
        (symbolic only: no allocator is wired in milestone 1).  The stack zone
        below 0x03004000 is NOT heap. */
-    __heap_start = _noinit_end;
-    __heap_end   = ORIGIN(FW_RAM) + LENGTH(FW_RAM);
+    __heap_start = _bss_end;
+    __heap_end   = _noinit_start;
 
     /* Flash/load-resident address of the .data init image (inside the blob). */
     _data_load_start = LOADADDR(.data);
