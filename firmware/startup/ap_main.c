@@ -54,6 +54,7 @@ uint32_t Main(void)
     bootcrumb(BC_LOG);
     log_init(log_clock);
     bootcrumb(BC_DISPLAY);
+    display_set_logger(log_printf);   /* "ui: frame ..." when slow, "ui: key->px ..." */
     display_init();
     bootcrumb(BC_SPLASH);
 

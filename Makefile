@@ -335,6 +335,9 @@ host-tests:
 	  firmware/theme/theme.c firmware/theme/themes_builtin.c firmware/theme/theme_file.c
 	build/host/test_theme > build/host/test_theme.txt || { cat build/host/test_theme.txt; exit 1; }
 	@tail -1 build/host/test_theme.txt
+	$(HOSTCC) -std=c99 -Wall -Werror -Ifirmware/ui -Ifirmware -Ifirmware/drivers -o build/host/test_dirty_rects \
+	  firmware/ui/tests/test_dirty_rects.c firmware/ui/ui.c
+	build/host/test_dirty_rects
 	HOSTCC=$(HOSTCC) $(PYTHON) tools/test_fs_write.py
 	@mkdir -p build/host
 	$(HOSTCC) -O2 -Wall -Ifirmware -o build/host/test_fw_powercut firmware/services/test_fw_powercut.c \

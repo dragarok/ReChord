@@ -12,5 +12,6 @@
 void watchdog_start(void);
 void watchdog_feed(void);
 void watchdog_stop(void);
+int watchdog_running(void);   /* 1 = armed (a hang ends in a reset) */
 
 #endif

@@ -1,7 +1,7 @@
 /*
  * panel_io.h -- ReChord display transport abstraction (clean-room).
  *
- * The display driver speaks to the panel only through these five calls,
+ * The display driver speaks to the panel only through these calls,
  * so the same driver code runs:
  *   - on target:   panel_io_rknanoc.c (RKNanoC VOP MCU register interface),
  *   - on the host: panel_io_sim.c (simulated DCS panel, writes PPM files),
@@ -30,6 +30,35 @@ void panel_io_send_data(uint8_t data);
 /* Send one RGB565 pixel (two data bytes, high byte first) -- the fast
  * path used after RAMWR (0x2C). */
 void panel_io_send_pixel(uint16_t rgb565);
+
+/* A block of pixels into a panel window (the flush path): CASET x0..x1, RASET y0..y1 (PHYSICAL
+ * panel rows), RAMWR, then (x1-x0+1) x (y1-y0+1) pixels from src, rows 'pitch' pixels apart. The
+ * transport may still be reading src when this returns (DMA): src must stay unchanged until the
+ * next panel_io call (every call waits for the block before it) or panel_io_sync(). */
+void panel_io_blit(int x0, int y0, int x1, int y1, const uint16_t *src, int pitch);
+/* Wait until every block is on the panel. */
+void panel_io_sync(void);
+/* The path pixels take now ("pio" = GPIO bit-bang, "vop" = VOP MCU, CPU-fed, "dma" = VOP + DMA). */
+const char *panel_io_path(void);
+
+/*
+ * The pixel path (config key display=auto|pio|pio2|vop|dma). The boot always runs on the GPIO bus
+ * (proven on the device); panel_io_select() moves to the VOP afterwards, only with the watchdog
+ * running, as a TRIAL guarded the way RECHO 0.10 guards it: a marker in SRAM that a warm reset
+ * keeps (and the boot trail's step on the eMMC), cleared once the new path has pushed frames for
+ * 5 s (panel_io_poll(), every main-loop pass). A boot that finds the marker of an unfinished trial
+ * (a hang, then the watchdog's reset) refuses the VOP until power-off. A band that does not finish
+ * (DMA: 50 ms) falls back to the CPU-fed VOP; a VOP that stays busy falls back to GPIO, latched.
+ * Returns the path now in use.
+ */
+enum { PANEL_PATH_PIO = 0, PANEL_PATH_VOP, PANEL_PATH_DMA, PANEL_PATH_PIO2, PANEL_PATH_AUTO };
+int panel_io_select(int path);
+void panel_io_poll(void);
+/* Counters: [0] DMA bands, [1] DMA band timeouts, [2] VOP busy timeouts, [3] slowest band us. */
+const uint32_t *panel_io_counters(void);
+/* Time for the frame accounting: microseconds (for differences; wraps) and time_ms(). */
+uint32_t panel_io_now_us(void);
+uint32_t panel_io_now_ms(void);
 
 /* Millisecond delay hook for init sequences (power-on delays).
  * The sim backend counts but never sleeps. */

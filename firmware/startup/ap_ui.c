@@ -157,6 +157,7 @@ static int ask(int any_key)
         while (input_poll(&ev) > 0) {
             static const char *const k_names[] = { "none", "up", "down", "select", "back", "power", "menu", "chord" };
 
+            display_mark_input(time_ms());   /* key->px: logged when the answer is on the panel */
             log_printf("ui: key %s%s on %s", ev.type >= 0 && ev.type < 8 ? k_names[ev.type] : "?",
                        ev.adc_value == INPUT_ADC_LONG ? " (hold)" : ev.adc_value == INPUT_ADC_REPEAT ? " (repeat)" : "",
                        ui_top_screen() ? ui_top_screen()->name : "-");
@@ -1389,6 +1390,8 @@ void ap_ui_loop(void)
     }
     bootcrumb(BC_LOOP);
     watchdog_start();                /* as stock, once the boot is done (services/watchdog.c) */
+    (void)panel_io_select(g_cfg.display);   /* the panel's pixel path: the VOP as a trial, now the
+                                             * watchdog ends a hang (drivers/panel_io.h) */
     for (;;) {
         uint32_t t_pass = time_ms(), t_keys, t_play, t_draw;
         int adc = keys_adc(), power = keys_power(), cable = usb_cable();
@@ -1490,6 +1493,7 @@ void ap_ui_loop(void)
         while (input_poll(&ev) > 0) {
             static const char *const k_names[] = { "none", "up", "down", "select", "back", "power", "menu", "chord" };
 
+            display_mark_input(time_ms());   /* key->px: logged when the answer is on the panel */
             log_printf("ui: key %s%s on %s", ev.type >= 0 && ev.type < 8 ? k_names[ev.type] : "?",
                        ev.adc_value == INPUT_ADC_LONG ? " (hold)" : ev.adc_value == INPUT_ADC_REPEAT ? " (repeat)" : "",
                        ui_top_screen() ? ui_top_screen()->name : "-");
@@ -1536,6 +1540,7 @@ void ap_ui_loop(void)
         t_play = time_ms();
         config_poll();
         bootguard_poll();                /* a fault record is cleared after a minute of normal running */
+        panel_io_poll();                 /* the VOP trial's marker cleared after 5 s of frames */
         /* the RAM ring keeps the oldest lines when full: write it out once half full
          * (at most once a minute), so a long session's log reaches ECHOLOG.TXT whole */
         /* (any pending line within 10 s: a hang that needs RST loses only those; 2026-10-16 the

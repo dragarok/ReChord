@@ -49,6 +49,9 @@
 #include "clock.h"
 #include "rknanoc.h"
 #include "services/input.h"
+#include "services/log.h"
+#include "services/bootcrumb.h"
+#include "display.h"
 
 /* GPIO port register block (see file header). */
 typedef struct {
@@ -350,25 +353,579 @@ void panel_io_init(void)
     panel_io_delay_ms(120);
 }
 
+static int s_path;                /* PANEL_PATH_PIO, _VOP, _DMA: where bytes go now (below) */
+static void vop_send_cmd(uint8_t cmd);
+static void vop_send_data(uint8_t data);
+
 void panel_io_send_cmd(uint8_t cmd)
 {
-    bus_write(cmd, 0);            /* D/C low = command byte */
+    if (s_path != PANEL_PATH_PIO) {
+        panel_io_sync();          /* (a band still on its way first) */
+        vop_send_cmd(cmd);
+    } else {
+        bus_write(cmd, 0);        /* D/C low = command byte */
+    }
 }
 
 void panel_io_send_data(uint8_t data)
 {
-    bus_write(data, PIN_DC);      /* D/C high = parameter/data byte */
+    if (s_path != PANEL_PATH_PIO) {
+        panel_io_sync();
+        vop_send_data(data);
+    } else {
+        bus_write(data, PIN_DC);  /* D/C high = parameter/data byte */
+    }
 }
 
 void panel_io_send_pixel(uint16_t rgb565)
 {
     /* Two data bytes on the wire, HIGH byte first (panel_io contract;
      * the reference's flush loop sends them exactly this way). */
-    bus_write((uint8_t)(rgb565 >> 8), PIN_DC);
-    bus_write((uint8_t)(rgb565 & 0xFFu), PIN_DC);
+    panel_io_send_data((uint8_t)(rgb565 >> 8));
+    panel_io_send_data((uint8_t)(rgb565 & 0xFFu));
 }
 
 void panel_io_delay_ms(uint16_t ms)
 {
     delay_ms(ms);
+}
+
+/* ---- the flush path ------------------------------------------------------------------------------
+ * GPIO (bit-bang) pixel writer: every byte is the extracted pattern -- the whole GPIO0 DR from the
+ * shadow with the byte in 16..23, D/C high, WR low, written twice, then once more with WR high
+ * (the panel latches on the rising edge) -- but with the shadow word, the DR address and the
+ * WR bit in registers, 4 pixels per loop, no call per byte. s_wr_stores = 2 drops the repeated
+ * WR-low store (2 stores a byte: ~42 ns low, ~42 ns high at pclk 48 MHz, inside the ST7789's 15 /
+ * 15 / 66 ns on paper) -- a measurement option (display=pio2), never the default: the repeated
+ * store is what the reference does on this board. */
+
+#if defined(__GNUC__) && !defined(__clang__)
+#define HOT __attribute__((optimize("O2")))
+#else
+#define HOT
+#endif
+
+static int s_wr_stores = 3;
+
+/* The path display=auto takes. */
+#ifndef PANEL_PATH_DEFAULT
+#define PANEL_PATH_DEFAULT PANEL_PATH_DMA
+#endif
+#define PANEL_ROW_OFFSET_PHYS PANEL_ROW_OFFSET
+
+#define BYTE3(dr, lo, b) do { uint32_t w_ = (lo) | (b); *(dr) = w_; *(dr) = w_; *(dr) = w_ | PIN_WR; } while (0)
+#define BYTE2(dr, lo, b) do { uint32_t w_ = (lo) | (b); *(dr) = w_; *(dr) = w_ | PIN_WR; } while (0)
+/* a pixel's bytes in place for the DR: high byte (bits 15..8 -> 23..16), then low (7..0 -> 23..16) */
+#define HI(p) (((uint32_t)(p) & 0xFF00u) << 8)
+#define LO(p) (((uint32_t)(p) & 0x00FFu) << 16)
+
+static HOT void gpio_pixels3(const uint16_t *src, int n)
+{
+    volatile uint32_t *dr = &GPIO0->dr;
+    uint32_t lo = (bus_ctl | PIN_DC) & ~PIN_WR;
+
+    for (; n >= 4; n -= 4, src += 4) {
+        uint32_t a = ((const uint32_t *)(const void *)src)[0], b = ((const uint32_t *)(const void *)src)[1];
+
+        BYTE3(dr, lo, HI(a)); BYTE3(dr, lo, LO(a));
+        BYTE3(dr, lo, HI(a >> 16)); BYTE3(dr, lo, LO(a >> 16));
+        BYTE3(dr, lo, HI(b)); BYTE3(dr, lo, LO(b));
+        BYTE3(dr, lo, HI(b >> 16)); BYTE3(dr, lo, LO(b >> 16));
+    }
+    for (; n > 0; n--, src++) {
+        BYTE3(dr, lo, HI(*src));
+        BYTE3(dr, lo, LO(*src));
+    }
+}
+
+static HOT void gpio_pixels2(const uint16_t *src, int n)
+{
+    volatile uint32_t *dr = &GPIO0->dr;
+    uint32_t lo = (bus_ctl | PIN_DC) & ~PIN_WR;
+
+    for (; n >= 4; n -= 4, src += 4) {
+        uint32_t a = ((const uint32_t *)(const void *)src)[0], b = ((const uint32_t *)(const void *)src)[1];
+
+        BYTE2(dr, lo, HI(a)); BYTE2(dr, lo, LO(a));
+        BYTE2(dr, lo, HI(a >> 16)); BYTE2(dr, lo, LO(a >> 16));
+        BYTE2(dr, lo, HI(b)); BYTE2(dr, lo, LO(b));
+        BYTE2(dr, lo, HI(b >> 16)); BYTE2(dr, lo, LO(b >> 16));
+    }
+    for (; n > 0; n--, src++) {
+        BYTE2(dr, lo, HI(*src));
+        BYTE2(dr, lo, LO(*src));
+    }
+}
+
+/* CASET x0..x1, RASET y0..y1, RAMWR over the GPIO bus. */
+static void gpio_window(int x0, int y0, int x1, int y1)
+{
+    bus_write(0x2A, 0);
+    bus_write((uint8_t)(x0 >> 8), PIN_DC);
+    bus_write((uint8_t)x0, PIN_DC);
+    bus_write((uint8_t)(x1 >> 8), PIN_DC);
+    bus_write((uint8_t)x1, PIN_DC);
+    bus_write(0x2B, 0);
+    bus_write((uint8_t)(y0 >> 8), PIN_DC);
+    bus_write((uint8_t)y0, PIN_DC);
+    bus_write((uint8_t)(y1 >> 8), PIN_DC);
+    bus_write((uint8_t)y1, PIN_DC);
+    bus_write(0x2C, 0);
+}
+
+static void gpio_blit(int x0, int y0, int x1, int y1, const uint16_t *src, int pitch)
+{
+    int w = x1 - x0 + 1;
+
+    gpio_window(x0, y0, x1, y1);
+    for (int y = y0; y <= y1; y++, src += pitch) {
+        if ((uintptr_t)src & 2u) {               /* (the word loads want a word-aligned row) */
+            if (s_wr_stores == 2) {
+                BYTE2(&GPIO0->dr, (bus_ctl | PIN_DC) & ~PIN_WR, HI(*src));
+                BYTE2(&GPIO0->dr, (bus_ctl | PIN_DC) & ~PIN_WR, LO(*src));
+            } else {
+                BYTE3(&GPIO0->dr, (bus_ctl | PIN_DC) & ~PIN_WR, HI(*src));
+                BYTE3(&GPIO0->dr, (bus_ctl | PIN_DC) & ~PIN_WR, LO(*src));
+            }
+            if (s_wr_stores == 2)
+                gpio_pixels2(src + 1, w - 1);
+            else
+                gpio_pixels3(src + 1, w - 1);
+        } else if (s_wr_stores == 2) {
+            gpio_pixels2(src, w);
+        } else {
+            gpio_pixels3(src, w);
+        }
+    }
+}
+
+/* ---- the VOP MCU interface (0x60070000) ----------------------------------------------------------
+ * What drives the panel on the 512 MB board under stock (MINIV390, work/stock_boot/02_display.md
+ * §2-3: pins 16..25 and 15 on function 1, MCU_CON 0x800 for commands and parameters, 0x002 for
+ * pixels, CMD +0x28, DATA +0x2C) and what RECHO 0.10 uses with DMA on the 8 GB board
+ * (work/recho010/sections/30_display.md D.2-D.4: MCU_CON 0x16 = two pixels a word, DMAC channel
+ * 0, destination handshake 14, 50 ms band timeout, a STATUS poll every 4 pixels when the CPU
+ * feeds it, the bus timing from the core clock). Register names: SDK driver/vop/hw_vop.h. */
+#define VOP_R(o)     (*(volatile uint32_t *)(0x60070000u + (o)))
+#define VOP_CON      0x00u
+#define VOP_TIMING   0x08u
+#define VOP_SIZE     0x0Cu
+#define VOP_WM       0x10u
+#define VOP_INT_CLR  0x1Cu
+#define VOP_INT_ST   0x20u
+#define VOP_STATUS   0x24u                 /* bit 0: busy (RECHO's use) */
+#define VOP_CMD      0x28u
+#define VOP_DATA     0x2Cu
+#define CON_CMD      0x800u                /* BYPASS_FIFO, SPLIT_ONE: a write = a bus byte */
+#define CON_PIX      0x002u                /* SPLIT_TWO: a write = an RGB565 pixel, high byte first */
+#define CON_DMA      0x016u                /* SPLIT_FOUR | HWORD_SWAP: a word = 2 pixels, low half first */
+#define VOP_POLLS    100001u               /* RECHO's bound on a STATUS poll */
+
+#define DMAC_R(o)    (*(volatile uint32_t *)(0x60000000u + (o)))
+#define DMA_CH       0u                    /* RECHO's; audio is channel 5 (audio/audio.c) */
+#define CH_R(o)      DMAC_R(DMA_CH * 0x58u + (o))
+#define DMA_RAW_TFR  0x2C0u
+#define DMA_MASK_TFR 0x310u
+#define DMA_MASK_BLK 0x318u
+#define DMA_MASK_SRC 0x320u
+#define DMA_CLR_TFR  0x338u
+#define DMA_CLR_BLK  0x340u
+#define DMA_CLR_ERR  0x358u
+#define DMA_CFG      0x398u
+#define DMA_CHEN     0x3A0u
+/* CTL_L: 32 -> 32 bit, source increments, destination fixed, bursts of 16, memory to peripheral,
+ * source on master 2 (RECHO's 0x0210D924), with INT_EN: the raw transfer-done bit is then set
+ * under any reading of the databook; the channel stays masked, nothing interrupts. */
+#define DMA_CTL_L    0x0210D925u
+#define DMA_CFG_L    0x00000800u           /* source: software handshake; priority 0 (audio has 2) */
+#define DMA_CFG_H    0x00007007u           /* FCMODE, FIFO_MODE, PROTCTL 1, destination handshake 14 */
+#define DMA_TIMEOUT_US 50000u              /* RECHO: 50 ms */
+#define DMA_MAX_WORDS  4095u               /* the block size field */
+
+/* The trial marker: two words that a warm reset keeps, in the spare bytes above the PCM ring's DMA
+ * descriptors (AS_LLI + 8 x 28 B = 0x0308FFE0; services/bootguard.c's record is at 0x0308FFE8).
+ * Not RECHO's 0x0309FFA0: our PCM ring fills the last 64 KiB of SRAM. The second word is the first
+ * one inverted, so SRAM noise at power-on reads as "no marker". */
+#define MARK         (*(volatile uint32_t *)0x0308FFE0u)
+#define MARK_INV     (*(volatile uint32_t *)0x0308FFE4u)
+#define MARK_TRIAL   0x564F5031u           /* 'VOP1': a trial started and has not proven itself */
+#define MARK_FAIL    0x564F5046u           /* 'VOPF': refused until power-off */
+#define TRIAL_MS     5000u
+
+static unsigned s_vop_con = 0xFFFFFFFFu;  /* MCU_CON as last written */
+static uint32_t s_vop_hz;                 /* the core clock TIMING was set for */
+static int s_dma_busy;                    /* a band is on its way */
+static uint32_t s_dma_t0, s_dma_done_us;
+static int s_dma_y0, s_dma_y1, s_dma_x0, s_dma_x1;
+static const uint16_t *s_dma_src;
+static uint32_t s_trial_ms, s_trial_frames;
+static int s_vop_stuck;                   /* a wait for STATUS idle timed out (cleared by to_gpio) */
+static uint32_t s_cnt[4];
+
+static uint32_t mark_get(void)
+{
+    uint32_t a = MARK;
+
+    return (a ^ MARK_INV) == 0xFFFFFFFFu ? a : 0u;
+}
+
+static void mark_set(uint32_t v)
+{
+    MARK = v;
+    MARK_INV = ~v;
+}
+
+static void iomux_func(unsigned port, unsigned pin, unsigned func)
+{
+    *(volatile uint32_t *)(0x50010000u + port * 0x20u + (pin >> 3) * 4u) =
+        (0x30000u << ((pin & 7u) * 2u)) | (func << ((pin & 7u) * 2u));
+}
+
+/* The panel pins: D0-7 = GPIO0.16-23, WRN 0.24, RS 0.25, CSN 0.15; RD (0.12) stays a GPIO. */
+static void pins_to(unsigned func)
+{
+    for (unsigned pin = 15; pin <= 25; pin++)
+        iomux_func(0, pin, func);
+}
+
+/* Up to VOP_POLLS reads of STATUS until it is idle; 0 = idle, -1 = still busy. Right after a DMA,
+ * first 12 us (RECHO's settle after a band). */
+static int vop_idle(void)
+{
+    if (s_dma_done_us) {
+        while ((uint32_t)time_us() - s_dma_done_us < 12u)
+            ;
+        s_dma_done_us = 0;
+    }
+    for (uint32_t n = 0; n < VOP_POLLS; n++)
+        if (!(VOP_R(VOP_STATUS) & 1u))
+            return 0;
+    s_vop_stuck = 1;
+    return -1;
+}
+
+/* The bus timing for the core clock (RECHO 0.10, D.2): a write pulse >= 20 ns, a cycle >= 70 ns
+ * (ST7789: 15 ns, 66 ns): 0x1044 at 96 MHz, 0x1022 at 48 MHz. */
+static void vop_timing(void)
+{
+    uint32_t hz = clock_core_hz(), mhz = hz / 1000000u, rwpw, t70, rwcs;
+
+    if (hz == s_vop_hz)
+        return;
+    rwpw = mhz ? (mhz * 20u + 999u) / 1000u : 1u;
+    t70 = (mhz * 70u + 999u) / 1000u;
+    rwcs = t70 > rwpw + 2u ? t70 - 1u - rwpw : 1u;
+    if (vop_idle())
+        return;                                      /* (never while bytes go out) */
+    delay_us(1);
+    VOP_R(VOP_TIMING) = 0x1000u | rwpw << 5 | rwcs;
+    s_vop_hz = hz;
+}
+
+static void vop_con(unsigned v)
+{
+    if (s_vop_con != v) {
+        if (vop_idle())
+            return;                                  /* (never while bytes go out) */
+        delay_us(1);
+        VOP_R(VOP_CON) = v;
+        s_vop_con = v;
+    }
+}
+
+/* LCDC soft reset (RECHO's vop_reset): after a band that did not finish, or a VOP stuck busy. */
+static void vop_reset(void)
+{
+    cru_reset(13u, 1);
+    delay_us(10);
+    cru_reset(13u, 0);
+    delay_us(100);
+    s_vop_con = 0xFFFFFFFFu;
+    s_vop_hz = 0;
+}
+
+static void vop_send_cmd(uint8_t cmd)
+{
+    vop_con(CON_CMD);
+    VOP_R(VOP_CMD) = cmd;
+}
+
+static void vop_send_data(uint8_t data)
+{
+    vop_con(CON_CMD);
+    VOP_R(VOP_DATA) = data;
+}
+
+/* The window; -1 = the VOP stays busy (a reset did not help): the caller leaves the VOP. */
+static int vop_window(int x0, int y0, int x1, int y1)
+{
+    s_vop_stuck = 0;                                 /* (a new transaction: judged afresh) */
+    if (vop_idle()) {
+        vop_reset();
+        s_vop_stuck = 0;
+        if (vop_idle())
+            return -1;
+    }
+    vop_timing();
+    vop_send_cmd(0x2A);
+    vop_send_data((uint8_t)(x0 >> 8));
+    vop_send_data((uint8_t)x0);
+    vop_send_data((uint8_t)(x1 >> 8));
+    vop_send_data((uint8_t)x1);
+    vop_send_cmd(0x2B);
+    vop_send_data((uint8_t)(y0 >> 8));
+    vop_send_data((uint8_t)y0);
+    vop_send_data((uint8_t)(y1 >> 8));
+    vop_send_data((uint8_t)y1);
+    vop_send_cmd(0x2C);
+    return s_vop_stuck ? -1 : 0;
+}
+
+/* The CPU feeds the VOP: 4 pixels, then STATUS until idle (RECHO's PIO over the VOP). -1 = the
+ * VOP stayed busy. */
+static HOT int vop_pixels(const uint16_t *src, int n)
+{
+    volatile uint32_t *data = &VOP_R(VOP_DATA), *status = &VOP_R(VOP_STATUS);
+
+    for (; n > 0; n -= 4, src += 4) {
+        uint32_t polls = VOP_POLLS;
+
+        data[0] = src[0];
+        if (n > 1)
+            data[0] = src[1];
+        if (n > 2)
+            data[0] = src[2];
+        if (n > 3)
+            data[0] = src[3];
+        while ((*status & 1u) && --polls)
+            ;
+        if (!polls)
+            return -1;
+    }
+    return 0;
+}
+
+static void to_gpio(const char *why, int fault);
+static void dma_abort(void);
+
+static int vop_blit(int x0, int y0, int x1, int y1, const uint16_t *src, int pitch)
+{
+    if (vop_window(x0, y0, x1, y1))
+        return -1;
+    vop_con(CON_PIX);
+    if (s_vop_stuck)
+        return -1;
+    for (int y = y0; y <= y1; y++, src += pitch)
+        if (vop_pixels(src, x1 - x0 + 1))
+            return -1;
+    return 0;
+}
+
+/* One band by DMA: the window by the CPU, then the pixels from src (contiguous, word aligned, an
+ * even count) as words. Returns at once (0); dma_wait() finishes it. -1 = the VOP stays busy. */
+static int dma_start(int x0, int y0, int x1, int y1, const uint16_t *src)
+{
+    uint32_t words = (uint32_t)(x1 - x0 + 1) * (uint32_t)(y1 - y0 + 1) / 2u;
+
+    if (vop_window(x0, y0, x1, y1))
+        return -1;
+    VOP_R(VOP_WM) = 0x808u;
+    VOP_R(VOP_SIZE) = (uint32_t)(y1 - y0) << 12 | (uint32_t)(x1 - x0);
+    vop_con(CON_DMA);
+    if (s_vop_stuck)
+        return -1;
+    if (!(DMAC_R(DMA_CFG) & 1u))
+        DMAC_R(DMA_CFG) = 1u;
+    DMAC_R(DMA_CLR_TFR) = 1u << DMA_CH;
+    DMAC_R(DMA_CLR_BLK) = 1u << DMA_CH;
+    DMAC_R(DMA_CLR_ERR) = 1u << DMA_CH;
+    DMAC_R(DMA_MASK_TFR) = 0x100u << DMA_CH;         /* (write enable, value 0: masked) */
+    DMAC_R(DMA_MASK_BLK) = 0x100u << DMA_CH;
+    DMAC_R(DMA_MASK_SRC) = 0x100u << DMA_CH;
+    CH_R(0x00) = (uint32_t)(uintptr_t)src;
+    CH_R(0x08) = 0x60070000u + VOP_DATA;
+    CH_R(0x10) = 0;
+    CH_R(0x40) = DMA_CFG_L;
+    CH_R(0x44) = DMA_CFG_H;
+    CH_R(0x18) = DMA_CTL_L;
+    CH_R(0x1C) = words;
+    s_dma_x0 = x0; s_dma_y0 = y0; s_dma_x1 = x1; s_dma_y1 = y1;
+    s_dma_src = src;
+    s_dma_t0 = (uint32_t)time_us();
+    s_dma_busy = 1;
+    DMAC_R(DMA_CHEN) = 0x101u << DMA_CH;
+    return 0;
+}
+
+static void dma_abort(void)
+{
+    DMAC_R(DMA_CHEN) = 0x100u << DMA_CH;             /* (write enable, value 0) */
+    for (uint32_t n = 0; n < VOP_POLLS && (DMAC_R(DMA_CHEN) & (1u << DMA_CH)); n++)
+        ;
+    DMAC_R(DMA_CLR_TFR) = 1u << DMA_CH;
+    s_dma_busy = 0;
+}
+
+/* The band in flight is on the panel (or, after 50 ms, sent again by the CPU: a band that does not
+ * finish moves the path to the CPU-fed VOP, as RECHO does). */
+static void dma_wait(void)
+{
+    uint32_t us;
+
+    if (!s_dma_busy)
+        return;
+    while (!(DMAC_R(DMA_RAW_TFR) & (1u << DMA_CH))) {
+        if ((uint32_t)time_us() - s_dma_t0 > DMA_TIMEOUT_US) {
+            dma_abort();
+            s_cnt[1]++;
+            log_printf("display: DMA band %d..%d did not finish in 50 ms: the CPU feeds the VOP from now on",
+                       s_dma_y0 - PANEL_ROW_OFFSET_PHYS, s_dma_y1 - PANEL_ROW_OFFSET_PHYS);
+            s_path = PANEL_PATH_VOP;
+            (void)vop_idle();
+            vop_reset();
+            if (vop_blit(s_dma_x0, s_dma_y0, s_dma_x1, s_dma_y1, s_dma_src, s_dma_x1 - s_dma_x0 + 1))
+                to_gpio("stayed busy after a DMA timeout", 1);
+            return;
+        }
+    }
+    us = (uint32_t)time_us();
+    DMAC_R(DMA_CLR_TFR) = 1u << DMA_CH;
+    s_dma_busy = 0;
+    s_dma_done_us = us ? us : 1u;
+    s_cnt[0]++;
+    if (us - s_dma_t0 > s_cnt[3])
+        s_cnt[3] = us - s_dma_t0;
+}
+
+/* Back to the GPIO bus, for the rest of this power cycle (a fault: the VOP misbehaved). */
+static void to_gpio(const char *why, int fault)
+{
+    s_cnt[2] += fault ? 1u : 0u;
+    log_printf("display: the VOP %s: back to the GPIO bus until power-off", why);
+    if (s_dma_busy)
+        dma_abort();
+    vop_reset();
+    pins_to(0);
+    GPIO0->ddr |= PANEL_DDR_MASK;
+    bus_ctl = (GPIO0->dr & ~PANEL_DDR_MASK) | PIN_WR | PIN_CS;
+    GPIO0->dr = bus_ctl;
+    s_path = PANEL_PATH_PIO;
+    s_vop_stuck = 0;
+    mark_set(MARK_FAIL);
+    if (s_trial_ms) {                                /* off the VOP: nothing left to hang */
+        s_trial_ms = 0;
+        if (bootcrumb_step() == BC_DISPLAY_TRIAL)
+            bootcrumb(BC_LOOP);
+    }
+}
+
+void panel_io_blit(int x0, int y0, int x1, int y1, const uint16_t *src, int pitch)
+{
+    int w = x1 - x0 + 1, h = y1 - y0 + 1;
+
+    if (s_path == PANEL_PATH_DMA) {
+        dma_wait();                                  /* (the band before: its buffer is free then) */
+        if (s_path == PANEL_PATH_DMA && pitch == w && !((uintptr_t)src & 3u) && !((w * h) & 1) &&
+            (uint32_t)(w * h / 2) <= DMA_MAX_WORDS) {
+            if (!dma_start(x0, y0, x1, y1, src)) {
+                s_trial_frames++;
+                return;
+            }
+            to_gpio("stayed busy", 1);
+            gpio_blit(x0, y0, x1, y1, src, pitch);
+            return;
+        }
+    }
+    if (s_path == PANEL_PATH_DMA || s_path == PANEL_PATH_VOP) {
+        if (!vop_blit(x0, y0, x1, y1, src, pitch)) {
+            s_trial_frames++;
+            return;
+        }
+        to_gpio("stayed busy", 1);
+    }
+    gpio_blit(x0, y0, x1, y1, src, pitch);
+}
+
+void panel_io_sync(void)
+{
+    if (s_path == PANEL_PATH_DMA)
+        dma_wait();
+}
+
+const char *panel_io_path(void)
+{
+    return s_path == PANEL_PATH_DMA ? "dma" : s_path == PANEL_PATH_VOP ? "vop" : s_wr_stores == 2 ? "pio2" : "pio";
+}
+
+const uint32_t *panel_io_counters(void)
+{
+    return s_cnt;
+}
+
+int panel_io_select(int path)
+{
+    uint32_t m = mark_get();
+
+    if (path == PANEL_PATH_AUTO)
+        path = PANEL_PATH_DEFAULT;
+    panel_io_sync();
+    if (path == PANEL_PATH_PIO || path == PANEL_PATH_PIO2) {
+        if (s_path != PANEL_PATH_PIO)
+            to_gpio("is not wanted", 0);            /* (latches: a switch back needs a power cycle) */
+        s_wr_stores = path == PANEL_PATH_PIO2 ? 2 : 3;
+        return s_path;
+    }
+    if (s_path != PANEL_PATH_PIO) {                  /* VOP <-> DMA: no new trial */
+        s_path = path;
+        return s_path;
+    }
+    if (m == MARK_FAIL || m == MARK_TRIAL || bootcrumb_prev_step() == BC_DISPLAY_TRIAL) {
+        mark_set(MARK_FAIL);
+        log_printf("display: %s refused: the last VOP trial did not finish (%s); GPIO until power-off",
+                   path == PANEL_PATH_DMA ? "dma" : "vop",
+                   m == MARK_FAIL ? "latched" : m == MARK_TRIAL ? "marker" : "boot trail");
+        return s_path;
+    }
+    if (!watchdog_running()) {
+        log_printf("display: %s refused: no watchdog to end a hang", path == PANEL_PATH_DMA ? "dma" : "vop");
+        return s_path;
+    }
+    mark_set(MARK_TRIAL);
+    bootcrumb(BC_DISPLAY_TRIAL);
+    s_trial_ms = time_stamp(time_ms());
+    s_trial_frames = 0;
+    log_printf("display: %s trial (marker set; cleared after %u s of frames)", path == PANEL_PATH_DMA ? "dma" : "vop",
+               (unsigned)(TRIAL_MS / 1000u));
+    cru_gate(127u, 1);                               /* HCLK_LCDC */
+    if (path == PANEL_PATH_DMA)
+        cru_gate(125u, 1);                           /* HCLK_DMA (audio's too: only ever switched on) */
+    vop_reset();                                     /* (LCDC_SRST pulse) */
+    vop_con(CON_CMD);
+    vop_timing();
+    pins_to(1);
+    s_path = path;
+    return s_path;
+}
+
+void panel_io_poll(void)
+{
+    if (s_trial_ms && s_trial_frames && time_ms() - s_trial_ms >= TRIAL_MS) {
+        s_trial_ms = 0;
+        if (mark_get() == MARK_TRIAL)
+            mark_set(0);
+        if (bootcrumb_step() == BC_DISPLAY_TRIAL)
+            bootcrumb(BC_LOOP);
+        log_printf("display: the %s path ran %u s (%u bands): trial marker cleared", panel_io_path(),
+                   (unsigned)(TRIAL_MS / 1000u), (unsigned)s_trial_frames);
+    }
+}
+
+uint32_t panel_io_now_us(void)
+{
+    return (uint32_t)time_us();
+}
+
+uint32_t panel_io_now_ms(void)
+{
+    return time_ms();
 }

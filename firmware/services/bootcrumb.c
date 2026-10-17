@@ -45,6 +45,7 @@ enum { CTRL = 0x00, BLKSIZ = 0x1C, BYTCNT = 0x20, CMDARG = 0x28, CMD = 0x2C, RES
 
 static uint32_t s_rec[2][128], s_sec[128];
 static uint32_t s_mode;                    /* 0 off, 1 sector addressed, 2 byte addressed */
+static uint32_t s_prev_step;
 static uint32_t s_g1, s_g6, s_blksiz, s_bytcnt;
 
 /* this build, so a hang counted against an older one never holds a new one back: a hash of the
@@ -257,6 +258,7 @@ void bootcrumb_init(void)
     s_rec[1][3] = prev_build == build_id() ? hangs + (prev_step == BC_CLOCK) : 0u;
     bootcrumb_kv(0x21, s_mode);            /* the addressing found (tools/bootlog.py: mmc_mode) */
     bootcrumb_kv(BCK_PREV_STEP, prev_step);
+    s_prev_step = prev_step;
     bootcrumb_kv(BCK_CLOCK_HANGS, s_rec[1][3]);
     bootcrumb_kv(BCK_PREV_STAGE, prev_stage);   /* where the last boot was inside clock_init */
     for (uint32_t i = 0; i < ncarry; i++)
@@ -297,6 +299,16 @@ void bootcrumb(uint32_t step)
 {
     s_rec[0][3] = step;
     persist();
+}
+
+uint32_t bootcrumb_step(void)
+{
+    return s_rec[0][3];
+}
+
+uint32_t bootcrumb_prev_step(void)
+{
+    return s_prev_step;
 }
 
 uint32_t bootcrumb_clock_hangs(void)

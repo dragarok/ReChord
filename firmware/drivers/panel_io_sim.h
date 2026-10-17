@@ -57,4 +57,8 @@ void panel_io_sim_last_window(int win[4]);
 /* Total milliseconds requested through panel_io_delay_ms since reset. */
 unsigned panel_io_sim_delay_total_ms(void);
 
+/* panel_io_blit() calls since reset, and the fake clock behind panel_io_now_us()/_ms(). */
+unsigned panel_io_sim_blits(void);
+void panel_io_sim_advance_us(uint32_t us);
+
 #endif /* RECHORD_PANEL_IO_SIM_H */

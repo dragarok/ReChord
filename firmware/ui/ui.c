@@ -1,83 +1,134 @@
 /*
  * ui.c — ReChord UI core implementation (see ui.h for the design).
  *
- * Dirty-region model: rows are tracked as a small set of inclusive bands
- * [y0, y1].  Bands are kept sorted, merged when they overlap or touch, and
- * coalesced into a bounding band if the set would overflow — the screen is
- * small (170 rows) so degradation is harmless and the code stays simple.
+ * Dirty-region model: up to 8 inclusive rectangles. Two merge when their bounding box costs no
+ * more pixels than both apart plus one flush window (overlapping, touching, nested or nearly
+ * so); a full set merges its cheapest pair. Each rectangle is flushed on its own, top to bottom,
+ * with a column window (display_flush_rect), so a key-bar slot or a header field pushes only
+ * its own pixels.
  */
 #include <stddef.h>
 #include "ui.h"
 #include "theme.h"
 
-#define UI_DIRTY_MAX_BANDS 8
+#define UI_DIRTY_MAX 8
+/* What one more flush window costs, in pixels pushed: CASET/RASET/RAMWR per band and the band's
+ * render setup. Two rectangles merge when their bounding box costs no more than both apart. */
+#define UI_WINDOW_COST 256
 
-typedef struct dirty_band {
-    int y0;   /* inclusive */
-    int y1;   /* inclusive */
-} dirty_band_t;
+typedef struct dirty_rect {
+    int x0, y0, x1, y1;   /* inclusive */
+} dirty_rect_t;
 
 static const ui_screen_t *s_stack[UI_STACK_MAX];
 static int                s_depth;
 static int                s_running;
-static dirty_band_t       s_dirty[UI_DIRTY_MAX_BANDS];
+static dirty_rect_t       s_dirty[UI_DIRTY_MAX];
 static int                s_dirty_count;
 
-/* ---- dirty band helpers ---------------------------------------------- */
+/* ---- dirty rectangles -------------------------------------------------- */
 
-static void dirty_sort(void)
+static long area(const dirty_rect_t *r)
 {
-    int i, j;
-
-    for (i = 1; i < s_dirty_count; i++) {
-        dirty_band_t b = s_dirty[i];
-        for (j = i - 1; j >= 0 && s_dirty[j].y0 > b.y0; j--)
-            s_dirty[j + 1] = s_dirty[j];
-        s_dirty[j + 1] = b;
-    }
+    return (long)(r->x1 - r->x0 + 1) * (long)(r->y1 - r->y0 + 1);
 }
 
+static dirty_rect_t bound(const dirty_rect_t *a, const dirty_rect_t *b)
+{
+    dirty_rect_t r;
+
+    r.x0 = a->x0 < b->x0 ? a->x0 : b->x0;
+    r.y0 = a->y0 < b->y0 ? a->y0 : b->y0;
+    r.x1 = a->x1 > b->x1 ? a->x1 : b->x1;
+    r.y1 = a->y1 > b->y1 ? a->y1 : b->y1;
+    return r;
+}
+
+/* Pixels a merge would push beyond the two apart, less the window it saves. */
+static long merge_cost(const dirty_rect_t *a, const dirty_rect_t *b)
+{
+    dirty_rect_t u = bound(a, b);
+
+    return area(&u) - area(a) - area(b) - UI_WINDOW_COST;
+}
+
+static void dirty_remove(int i)
+{
+    for (; i + 1 < s_dirty_count; i++)
+        s_dirty[i] = s_dirty[i + 1];
+    s_dirty_count--;
+}
+
+/* Merge every pair that is cheaper merged (overlapping, touching, nested or close), until none. */
 static void dirty_normalize(void)
 {
-    int i, j;
+    int i, j, again = 1;
 
-    dirty_sort();
-    for (i = 0; i + 1 < s_dirty_count; ) {
-        /* merge overlapping OR adjacent bands (touching rows flush together) */
-        if (s_dirty[i].y1 + 1 >= s_dirty[i + 1].y0) {
-            if (s_dirty[i + 1].y1 > s_dirty[i].y1)
-                s_dirty[i].y1 = s_dirty[i + 1].y1;
-            for (j = i + 1; j + 1 < s_dirty_count; j++)
-                s_dirty[j] = s_dirty[j + 1];
-            s_dirty_count--;
-        } else {
-            i++;
-        }
+    while (again) {
+        again = 0;
+        for (i = 0; i < s_dirty_count && !again; i++)
+            for (j = i + 1; j < s_dirty_count && !again; j++)
+                if (merge_cost(&s_dirty[i], &s_dirty[j]) <= 0) {
+                    s_dirty[i] = bound(&s_dirty[i], &s_dirty[j]);
+                    dirty_remove(j);
+                    again = 1;
+                }
+    }
+    /* flush order: top to bottom, then left to right (the eye sees the change start at once) */
+    for (i = 1; i < s_dirty_count; i++) {
+        dirty_rect_t r = s_dirty[i];
+
+        for (j = i - 1; j >= 0 && (s_dirty[j].y0 > r.y0 || (s_dirty[j].y0 == r.y0 && s_dirty[j].x0 > r.x0)); j--)
+            s_dirty[j + 1] = s_dirty[j];
+        s_dirty[j + 1] = r;
     }
 }
 
 void ui_invalidate(int x0, int y0, int x1, int y1)
 {
-    (void)x0;
-    (void)x1;   /* the panel flush is row-granular; x range is implied */
+    dirty_rect_t r;
 
+    if (x0 < 0)
+        x0 = 0;
     if (y0 < 0)
         y0 = 0;
+    if (x1 > DISPLAY_W - 1)
+        x1 = DISPLAY_W - 1;
     if (y1 > DISPLAY_H - 1)
         y1 = DISPLAY_H - 1;
-    if (y0 > y1)
+    if (x0 > x1 || y0 > y1)
         return;
+    r.x0 = x0; r.y0 = y0; r.x1 = x1; r.y1 = y1;
+    if (s_dirty_count == UI_DIRTY_MAX) {
+        /* full: merge the pair that costs least merged (the new one included) */
+        int bi = 0, bj = 1, i, j;
+        long best = 0x7FFFFFFFL;
 
-    if (s_dirty_count == UI_DIRTY_MAX_BANDS) {
-        /* overflow: fold into a bounding band of band 0 and renormalize */
-        if (y0 < s_dirty[0].y0)
-            s_dirty[0].y0 = y0;
-        if (y1 > s_dirty[0].y1)
-            s_dirty[0].y1 = y1;
+        for (i = 0; i < s_dirty_count; i++) {
+            long c = merge_cost(&s_dirty[i], &r);
+
+            if (c < best) {
+                best = c;
+                bi = i;
+                bj = -1;
+            }
+            for (j = i + 1; j < s_dirty_count; j++) {
+                c = merge_cost(&s_dirty[i], &s_dirty[j]);
+                if (c < best) {
+                    best = c;
+                    bi = i;
+                    bj = j;
+                }
+            }
+        }
+        if (bj < 0) {
+            s_dirty[bi] = bound(&s_dirty[bi], &r);
+        } else {
+            s_dirty[bi] = bound(&s_dirty[bi], &s_dirty[bj]);
+            s_dirty[bj] = r;
+        }
     } else {
-        s_dirty[s_dirty_count].y0 = y0;
-        s_dirty[s_dirty_count].y1 = y1;
-        s_dirty_count++;
+        s_dirty[s_dirty_count++] = r;
     }
     dirty_normalize();
 }
@@ -99,10 +150,19 @@ int ui_dirty_band_count(void)
 
 bool ui_dirty_band(int idx, int *y0, int *y1)
 {
+    return ui_dirty_rect(idx, NULL, y0, NULL, y1);
+}
+
+bool ui_dirty_rect(int idx, int *x0, int *y0, int *x1, int *y1)
+{
     if (idx < 0 || idx >= s_dirty_count)
         return false;
+    if (x0)
+        *x0 = s_dirty[idx].x0;
     if (y0)
         *y0 = s_dirty[idx].y0;
+    if (x1)
+        *x1 = s_dirty[idx].x1;
     if (y1)
         *y1 = s_dirty[idx].y1;
     return true;
@@ -173,12 +233,14 @@ void ui_render(void)
 
     if (top == NULL || s_dirty_count == 0)
         return;
+    display_frame_begin();
     if (top->draw)
         top->draw();
 
     for (i = 0; i < s_dirty_count; i++)
-        display_flush_rows(s_dirty[i].y0, s_dirty[i].y1);
+        display_flush_rect(s_dirty[i].x0, s_dirty[i].y0, s_dirty[i].x1, s_dirty[i].y1);
     s_dirty_count = 0;
+    display_frame_end();
 }
 
 /* ---- event loop skeleton ---------------------------------------------- */

@@ -67,8 +67,8 @@ static void test_init(void)
     CHECK(panel_io_sim_cmd_at(n - 2) == 0x2B);
     CHECK(panel_io_sim_cmd_at(n - 1) == 0x2C);
 
-    /* Byte-exact flush window: CASET 0..0x013F, RASET rows +35
-     * (0x23..0xCC for the full screen -- extracted contract). */
+    /* Byte-exact flush window: CASET 0..0x013F, RASET rows +35, one window per 16-row band
+     * (the last band of the full screen: rows 160..169 = 0xC3..0xCC -- extracted contract). */
     CHECK(panel_io_sim_cmd_nargs(n - 3) == 4);
     CHECK(panel_io_sim_cmd_arg(n - 3, 0) == 0x00);
     CHECK(panel_io_sim_cmd_arg(n - 3, 1) == 0x00);
@@ -76,11 +76,14 @@ static void test_init(void)
     CHECK(panel_io_sim_cmd_arg(n - 3, 3) == 0x3F);
     CHECK(panel_io_sim_cmd_nargs(n - 2) == 4);
     CHECK(panel_io_sim_cmd_arg(n - 2, 0) == 0x00);
-    CHECK(panel_io_sim_cmd_arg(n - 2, 1) == 0x23);
+    CHECK(panel_io_sim_cmd_arg(n - 2, 1) == 0xC3);
     CHECK(panel_io_sim_cmd_arg(n - 2, 2) == 0x00);
     CHECK(panel_io_sim_cmd_arg(n - 2, 3) == 0xCC);
 
-    check_window_rows(0, DISPLAY_H - 1);
+    check_window_rows(160, DISPLAY_H - 1);
+    CHECK(panel_io_sim_cmd_at(n - 3 - 3 * 10) == 0x2A);   /* 11 bands: the first window */
+    CHECK(panel_io_sim_cmd_arg(n - 2 - 3 * 10, 1) == 0x23);
+    CHECK(panel_io_sim_cmd_arg(n - 2 - 3 * 10, 3) == 0x32);
     CHECK(panel_io_sim_pixel(0, 0) == BLACK);
     CHECK(panel_io_sim_pixel(DISPLAY_W - 1, DISPLAY_H - 1) == BLACK);
     CHECK(panel_io_sim_overflow() == 0);
@@ -164,7 +167,7 @@ static void test_row_math(void)
 
     /* Flush with huge end: clamped to the last row. */
     display_flush_rows(5, 1000);
-    check_window_rows(5, DISPLAY_H - 1);
+    check_window_rows(165, DISPLAY_H - 1);     /* the last 16-row band of 5..169 */
     CHECK(panel_io_sim_pixel(0, 5) == GREEN);
     CHECK(panel_io_sim_pixel(DISPLAY_W - 1, DISPLAY_H - 1) == GREEN);
     CHECK(panel_io_sim_pixel(0, 4) == BLACK);   /* row 4 not in this flush */

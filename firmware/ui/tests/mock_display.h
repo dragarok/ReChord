@@ -30,6 +30,7 @@ typedef struct mock_text {
 
 typedef struct mock_flush {
     int y0, y1;
+    int x0, x1;          /* display_flush_rect's columns (0..W-1 for display_flush_rows) */
 } mock_flush_t;
 
 void mock_display_reset(void);

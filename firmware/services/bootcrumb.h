@@ -18,6 +18,7 @@ enum {
     BC_DAC_STEP = 40,       /* + drivers/dac_cs43131.c DAC_STEP_*: inside dac_init (a reset there
                              * names the step as the next boot's "previous step") */
     BC_USBDET = 60,         /* + the USB detect test's state under test */
+    BC_DISPLAY_TRIAL = 80,  /* the panel moved to the VOP (drivers/panel_io.h): its first 5 s */
 };
 
 /* event keys (< 0x1000; others are register addresses) */
@@ -42,6 +43,9 @@ void bootcrumb_kv(uint32_t key, uint32_t val);
 /* The key's value replaced (or added), and on the eMMC at once. */
 void bootcrumb_set(uint32_t key, uint32_t val);
 void bootcrumb_fault(uint32_t pc, uint32_t lr, uint32_t exc);
+/* The step this boot is in, and the one the previous boot was in when it ended (0 = unknown). */
+uint32_t bootcrumb_step(void);
+uint32_t bootcrumb_prev_step(void);
 /* Boots of this build that stopped in clock_init (Main then keeps the ROM's clocks). */
 uint32_t bootcrumb_clock_hangs(void);
 /* clock_init_at()'s trace: the stage inside the clock sequence, persisted (sector 1 word 4). */

@@ -525,7 +525,7 @@ def screenshot():
                            os.path.join(ROOT, 'firmware/services/test_screenshot.c'),
                            os.path.join(ROOT, 'firmware/services/screenshot.c'),
                            os.path.join(ROOT, 'firmware/services/fs_target.c')] +
-                          [os.path.join(d, f) for f in ('display.c', 'font.c', 'font8x8.c',
+                          [os.path.join(d, f) for f in ('display.c', 'text_stub.c', 'font.c', 'font8x8.c',
                                                         'panel_init_rknanoc.c', 'panel_io_sim.c')])
     img = os.path.join(T, 'shot.img')
     build(img, fixture(1))

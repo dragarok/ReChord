@@ -53,6 +53,7 @@ static int have_caset, have_raset;
 
 static unsigned overflow_count;
 static unsigned delay_total_ms;
+static unsigned blit_count;
 
 static struct {
     uint8_t cmd;
@@ -75,6 +76,7 @@ void panel_io_sim_reset(void)
     delay_total_ms = 0;
     cmd_log_len = 0;
     cur_entry = -1;
+    blit_count = 0;
 }
 
 void panel_io_init(void)
@@ -253,6 +255,45 @@ void panel_io_send_pixel(uint16_t rgb565)
     panel_io_send_data((uint8_t)(rgb565 & 0xFFu));
 }
 
+/* The flush path: the generic window + pixel stream (display.c), synchronous. */
+void panel_io_blit_generic(int x0, int y0, int x1, int y1, const uint16_t *src, int pitch);
+void panel_io_blit(int x0, int y0, int x1, int y1, const uint16_t *src, int pitch)
+{
+    blit_count++;
+    panel_io_blit_generic(x0, y0, x1, y1, src, pitch);
+}
+
+unsigned panel_io_sim_blits(void)
+{
+    return blit_count;
+}
+
+void panel_io_sync(void)
+{
+}
+
+const char *panel_io_path(void)
+{
+    return "sim";
+}
+
+static uint32_t sim_us;
+
+void panel_io_sim_advance_us(uint32_t us)
+{
+    sim_us += us;
+}
+
+uint32_t panel_io_now_us(void)
+{
+    return sim_us;
+}
+
+uint32_t panel_io_now_ms(void)
+{
+    return sim_us / 1000u;
+}
+
 uint16_t panel_io_sim_pixel(int x, int y)
 {
     if (x < 0 || x >= PANEL_SIM_W || y < 0 || y >= PANEL_SIM_H) {
@@ -297,4 +338,22 @@ int panel_io_sim_write_ppm(const char *path)
         return -1;
     }
     return 0;
+}
+
+/* The pixel path: the simulator has one. */
+int panel_io_select(int path)
+{
+    (void)path;
+    return PANEL_PATH_PIO;
+}
+
+void panel_io_poll(void)
+{
+}
+
+const uint32_t *panel_io_counters(void)
+{
+    static const uint32_t zero[4];
+
+    return zero;
 }
