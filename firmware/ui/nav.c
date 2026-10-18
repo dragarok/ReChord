@@ -436,20 +436,28 @@ static const keydef_t *lookup(const page_t *p, const input_event_t *ev)
 void np_library(void);                    /* screens.c: the playing track's folder */
 void np_band_off(void);                   /* screens.c: the progress band again */
 
-static void toggle_np(void)
+/* Now Playing on top: back to it if it is on the stack, else pushed. 0 when nothing is loaded. */
+static int go_np(void)
 {
     int k = nav_find(&pg_np);
 
+    if (k >= 0)
+        nav_pop_to(k + 1);
+    else if (np_loaded())
+        nav_push(&pg_np, 0);
+    else
+        return 0;
+    return 1;
+}
+
+static void toggle_np(void)
+{
     if (nav_top() == &pg_np) {
         if (nav_below() && nav_below() != &pg_home)
             nav_pop();
         else
             np_library();
-    } else if (k >= 0) {
-        nav_pop_to(k + 1);
-    } else if (np_loaded()) {
-        nav_push(&pg_np, 0);
-    } else {
+    } else if (!go_np()) {
         nav_toast(ICON_NOTE, TOAST_TEXT, "Nothing is playing");
     }
 }
@@ -484,6 +492,12 @@ static void act(int a)
         break;
     case A_NOP:
         break;
+    case A_GO_NP:                         /* a menu's PLAY hold (Home, Settings, Bluetooth) */
+        if (!np_loaded() || !go_np()) {
+            if (p->act)
+                p->act(A_OPEN_HOLD, nav_cursor());   /* (nothing loaded: what the hold did before) */
+        }
+        break;
     default:
         if (p->act)
             p->act(a, nav_cursor());
@@ -510,6 +524,7 @@ void nav_key(const input_event_t *ev)
         return;
     }
     if (ev->gesture == IG_CHORD) {        /* the shortcut layer; the first key's step undone */
+        np_seek_cancel();
         if (ev->t_ms - s_undo.t < 600u && s_undo.p == nav_top()) {
             if (is_list(s_undo.p)) {
                 list_move(s_undo.d, 1);
