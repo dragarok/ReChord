@@ -80,7 +80,7 @@ void b_hifi_fn_track_line(const char *fn, const char *state)
     const b_hifi_fn_stats_t *h = &b_hifi_fn_stats;
 
     b_msg("hifi: track %u: %s hifi=%s, %s, %u jobs, %u checked, %u mismatched, %u redone, %u silenced, "
-          "longest %u us, %u polls", (unsigned)b_trk.seq, fn, k_mode[AS->hifi_mode % 3u], state,
+          "max %u us, %u polls", (unsigned)b_trk.seq, fn, k_mode[AS->hifi_mode % 3u], state,
           (unsigned)h->jobs, (unsigned)h->checked, (unsigned)h->mismatch, (unsigned)h->redone, (unsigned)h->lost,
           (unsigned)b_us(h->wait_max_cyc), (unsigned)h->polls);
 }

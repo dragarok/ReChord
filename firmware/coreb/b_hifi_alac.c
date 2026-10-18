@@ -259,7 +259,7 @@ void alac_rechord_unpc(int32_t *pc1, int32_t *out, int32_t num, int16_t *coefs, 
 void b_hifi_alac_close(void)
 {
     if (b_hifi_fn_stats.jobs || AS->hifi_mode != AS_HIFI_AUTO || AS->hifi_alac)
-        b_hifi_fn_track_line("ALAC", AS->hifi_state == AS_HIFI_DEAD ? "block dead" :
+        b_hifi_fn_track_line("ALAC", AS->hifi_state == AS_HIFI_DEAD ? "dead" :
                              AS->hifi_alac == AS_HIFI_FAILED ? "failed" :
                              AS->hifi_alac == AS_HIFI_OK ? "ok" : "untested");
     s.on = 0;

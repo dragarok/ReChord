@@ -206,8 +206,8 @@ int b_hifi_ape_open(struct ape_ctx_t *ctx)
             return 0;
         }
         AS->hifi_ape |= bit;
-        b_msg("hifi: APE self-test passed (level %u, version %s3980, 20 jobs, %u us on the block): its NN "
-              "filters on HIFI%s", (unsigned)ctx->compressiontype, ctx->fileversion >= 3980 ? ">= " : "< ",
+        b_msg("hifi: APE self-test passed (level %u, version %s3980, 20 jobs, %u us): NN filters on HIFI%s",
+              (unsigned)ctx->compressiontype, ctx->fileversion >= 3980 ? ">= " : "< ",
               (unsigned)t_us, AS->hifi_mode == AS_HIFI_VERIFY ? ", every sample verified" : "");
     }
     s.on = 1;
@@ -280,8 +280,7 @@ int demac_rechord_filters(struct ape_ctx_t *ctx, int ch, int32_t *d, int count)
                     b_msg("hifi: %s APE job %u (level %u, channel %d, frame %u) sample %u: hifi %d, software %d%s",
                           AS->hifi_mode == AS_HIFI_VERIFY ? "verify:" : "check:", (unsigned)(b_hifi_fn_stats.jobs - 1u),
                           (unsigned)ctx->compressiontype, ch, (unsigned)s.frames, (unsigned)i, (int)d[i],
-                          (int)s.chk[i], AS->hifi_mode == AS_HIFI_VERIFY ? " (counting on)" :
-                          ": that level in software from now on");
+                          (int)s.chk[i], AS->hifi_mode == AS_HIFI_VERIFY ? " (counting on)" : ": level in software");
                 b_hifi_fn_stats.mismatch++;
                 b_hifi_fn_stats.redone++;
                 if (m < n)
@@ -311,8 +310,7 @@ void b_hifi_ape_close(void)
     uint32_t k = s.k;
 
     if (b_hifi_fn_stats.jobs || AS->hifi_mode != AS_HIFI_AUTO || AS->hifi_ape)
-        b_hifi_fn_track_line("APE", AS->hifi_state == AS_HIFI_DEAD ? "block dead" :
-                             AS->hifi_ape & 1u << (k + 8u) ? "level failed" :
-                             AS->hifi_ape & 1u << k ? "level ok" : "level untested");
+        b_hifi_fn_track_line("APE", AS->hifi_state == AS_HIFI_DEAD ? "dead" : AS->hifi_ape & 1u << (k + 8u) ?
+                             "failed" : AS->hifi_ape & 1u << k ? "ok" : "untested");
     s.on = 0;
 }
