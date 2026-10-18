@@ -152,6 +152,18 @@ uint32_t time_ms(void)
     return r;
 }
 
+static uint32_t s_last_cyc;
+
+uint32_t time_cycles(void)
+{
+    uint32_t el, t = now_parts(&el), r = t * (s_reload + 1u) + el;
+
+    if ((int32_t)(r - s_last_cyc) < -(int32_t)(s_reload / 2u))
+        r += s_reload + 1u;                   /* the reload race (time_us): count the tick */
+    s_last_cyc = r;
+    return r;
+}
+
 /* Counts SysTick cycles directly, so it also works with interrupts off
  * (as long as nothing else blocks for a whole tick). */
 void delay_us(uint32_t us)

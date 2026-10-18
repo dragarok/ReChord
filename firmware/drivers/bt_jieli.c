@@ -10,6 +10,7 @@
 #include "clock.h"
 #include "services/bt_keys.h"
 #include "services/log.h"
+#include "services/watchdog.h"
 
 #define REG32(a) (*(volatile uint32_t *)(a))
 
@@ -782,4 +783,104 @@ void bt_stats(uint32_t *rx_frames, uint32_t *rx_dropped, uint32_t *tx_fail)
     *rx_frames = s_rx.frames;
     *rx_dropped = s_rx.dropped + s_overrun;
     *tx_fail = s_tx_fail;
+}
+
+/* ---- [ours] listen only: Developer > BT listen (test) (bt_jieli.h) ---------------- *
+ * Nothing goes to the module: THR is never written, no break, GPIO2.16 (our TX, the module's
+ * RX) stays idle-high on the UART while the module is powered, and GPIO2.7 is switched only as
+ * stock switches it (off, pins low, 100 ms, UART open, on: seg84:0307a13e; off: every off site).
+ * QEMU's module (-machine jieli=listen=1) fails a run that breaks any of that. */
+#define GPIO2_EXT  REG32(0x50030050u)   /* EXT_PORTA: the pin levels (board_rknanoc.c reads GPIO2.9 so) */
+#define U_LSR      0x14u                /* bit 1 OE, 2 PE, 3 FE, 4 BI */
+#define LISTEN_OFF_MS 500u              /* off between the two power-ups (stock's rescan: 500 ms) */
+
+/* Off, pins low, 100 ms, the UART open (TX idle-high), then on; uart = 0: RX a GPIO input. */
+static void listen_power_on(int uart)
+{
+    module_off();
+    delay_ms(T_POWER_OFF_MS);
+    uart_open();
+    uart_close();                       /* polled: no interrupt (stamps here, not in the ISR) */
+    if (!uart) {
+        iomux2(PIN_RX, 0);
+        GPIO2_DDR &= ~(1u << PIN_RX);
+    }
+    pin_out(PIN_POWER, 1);              /* listen: powered, nothing sent */
+}
+
+static int listen_over(uint32_t t0, uint32_t ms, uint32_t *fed)
+{
+    uint32_t now = time_ms();
+
+    if (now - *fed >= 100u) {
+        watchdog_feed();
+        *fed = now;
+    }
+    return now - t0 >= ms;
+}
+
+int bt_listen(bt_listen_t *r, uint32_t *buf, unsigned words, uint32_t ms)
+{
+    unsigned nb = words / 4u, ne = words - 2u * nb, n = 0, spin = 0;
+    uint32_t t0, fed, c0, last;
+
+    memset(r, 0, sizeof *r);
+    if (s_state != BT_OFF && s_state != BT_NO_MODULE)
+        bt_power(0);                    /* (sends nothing either) */
+    s_used = 1;
+    r->core_hz = clock_core_hz();
+    r->bytes = buf;
+    r->edges = buf + 2u * nb;
+    log_printf("btlisten: start, %u ms per power-up, nothing sent", (unsigned)ms);
+
+    /* 1: the UART at 115200 8N1, as stock opens it; every byte with its time and line status */
+    listen_power_on(1);
+    t0 = fed = time_ms();
+    c0 = time_cycles();
+    while (!listen_over(t0, ms, &fed)) {
+        while (U(U_USR) & USR_RFNE) {
+            uint32_t lsr = U(U_LSR) & 0x1Eu, b = U(U_RBR) & 0xFFu;
+
+            if (lsr)
+                r->lsr_errs++;
+            if (n < nb) {
+                buf[2u * n] = (time_cycles() - c0) / (r->core_hz / 1000000u);
+                buf[2u * n + 1u] = lsr << 8 | b;
+                n++;
+            } else {
+                r->full |= 1u;
+            }
+        }
+    }
+    r->nbytes = n;
+    module_off();
+    delay_ms(LISTEN_OFF_MS);
+
+    /* 2: GPIO2.17 as an input, every edge in core cycles: any baud rate */
+    listen_power_on(0);
+    t0 = fed = time_ms();
+    c0 = time_cycles();
+    last = GPIO2_EXT & (1u << PIN_RX);
+    r->level0 = last != 0;
+    n = 0;
+    for (;;) {
+        uint32_t v = GPIO2_EXT & (1u << PIN_RX);
+
+        if (v != last) {
+            last = v;
+            if (n < ne)
+                r->edges[n++] = time_cycles() - c0;
+            else
+                r->full |= 2u;
+            continue;
+        }
+        if (!(++spin & 0xFFu) && listen_over(t0, ms, &fed))
+            break;
+    }
+    r->nedges = n;
+    module_off();
+    s_state = BT_OFF;
+    log_printf("btlisten: done: %u bytes (%u line errors), %u edges, the module off",
+               (unsigned)r->nbytes, (unsigned)r->lsr_errs, (unsigned)r->nedges);
+    return 0;
 }
