@@ -75,4 +75,23 @@ The build with the first four fixes in the table above, flashed to both slots:
   rate). It writes `/BTLISTEN.TXT`; decode it with the project repo's
   `tools/bt_listen_decode.py`. QEMU: `tests/cfw/m35_btlisten.sh` (`jieli=listen=1`: any byte
   to the module, a break, GPIO2.16 not idle-high while powered or a GPIO2.7 pulse fails it).
-  Not yet run on the device.
+  Run on the device on 2026-10-18 (below).
+- Which module pin our TX (GPIO2.16) lands on, i.e. whether the module's ROM bootloader key pin
+  is reachable from the SoC: not answerable from code or photos; a continuity check would
+  settle it.
+
+## Listen-only capture on the device (2026-10-18)
+
+Nothing sent to the module; powered twice the stock way, 4 s each (`log/BTLISTEN_20261018.TXT`
+in the project repo):
+
+| After power-on | On the module's TX (GPIO2.17) |
+|---|---|
+| 0 ms | idle high: a UART line, not the module's USB pins |
+| ~220 ms | one isolated ~50 us low pulse (not data) |
+| ~280 ms | one ~3 us low pulse (not data) |
+| ~502 ms | `CV15` at 115200 8N1, no framing errors |
+| to 4 s | nothing else, at any rate |
+
+The module boots in about half a second and prints no boot or debug log on this line; any debug
+output it has is on another pin.
