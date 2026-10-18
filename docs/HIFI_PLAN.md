@@ -59,7 +59,7 @@ branch's build and is bit-exact against the same reference as "before" (`exact=T
 | Vorbis (OGGGAP) | 376, 16.6, 48 | — | mdct_backward 36 %, floor1 8 %, codebook 8 %, window 7 %, ov_read 7 % |
 | Vorbis q10, dense | 445, 19.6, 48 | — | mdct_backward 30 %, codebook 20 %, floor1 7 % |
 | Opus 128k (OPUSGAP) | 651, 31.2, 96 | — | opus_fft_impl 27 %, comb_filter 14 %, clt_mdct_backward 13 %, deemphasis 6 % |
-| Opus 256k, dense | 709, 34.0, 96 | — | the same. **Not bit-exact: core B ends the track at 3.99 s** (section 6) |
+| Opus 256k, dense | 709, 34.0, 96 | — | the same. **Not bit-exact: the arena runs out at 3.99 s and the track ends** (section 6) |
 | WMA v2 128k | 260, 11.5, 24 | — | FFT pass 23 %, decode_block 20 %, imdct_half 16 %, window 13 %, fft16/fft8 7 % |
 | WMA Pro 44.1 | 243, 10.7, 24 | — | decode_frame 27 %, FFT pass 24 %, imdct_half 17 %, fft16/8 8 % |
 | WMA Pro 24/96 | 207, 19.9, 48 | — | decode_frame 27 %, pass 25 %, imdct_half 19 %, fft16/8 9 % |
@@ -369,12 +369,17 @@ are ordered by how common the format is on a DAP, then by the size of the step.
 
 ## 6. Findings on the way
 
-- **Opus 256k (libopus, dense signal) stops at 3.99 s on core B** [measured]. Core B decodes the
-  first 191 488 frames and then ends the track: "end of stream", 0 underruns, B err 0. The host
-  `opusref`, built from the same libopus/opusfile sources, decodes all 576 000 frames. The stop falls
-  at the first large packet (1156 bytes; the file has packets up to 1276). Root cause not found
-  here. Suspects: `op_read_stereo`'s error return being taken as the end (`b_opus.c`, r ≤ 0), or a
-  stack/arena limit with VAR_ARRAYS at large packets.
+- **Opus 256k (libopus, dense signal) stops at 3.99 s on core B: the decoder's arena runs out**
+  [measured]. Core A logs `audio: decoder gave up on track 1 (code a110c)`, which is `b_alloc`'s
+  out-of-heap abort, and the track ends after 191 488 of 576 000 frames. The host `opusref` (the same
+  libopus/opusfile sources, malloc) decodes it all. The opus image's arena is 225 128 B
+  (0x01021098..0x01058000, with a 32 KiB stack of which 17.8 KiB was never touched), and the peak in
+  use at the failing request was 162 920 B. ffmpeg's Ogg muxer writes pages of about a second, which
+  at 256 kbit/s is up to ~64 KiB (255 lacing values). libogg keeps such a page twice (the sync
+  buffer, then the stream's body) and grows each by realloc (allocate new, copy, free old). Growing
+  in place in `b_realloc` was tried here and is not enough: the same abort at the same frame.
+  The fix belongs with the Opus/Ogg glue, not the HIFI work: a smaller stack (0x5000 is enough by the
+  low-water mark), and a bounded `ogg_sync_buffer` chunk or an arena-aware page buffer.
 - **DSD256 underran even in QEMU** before this branch (227 M insn/s at a 250 MIPS virtual core); it
   no longer does (177.6 M). On the device it stays over 96 MHz.
 - WMA Lossless 16/44.1 and APE extra high are over 96 M insn/s at CPI 1: neither plays in real time
