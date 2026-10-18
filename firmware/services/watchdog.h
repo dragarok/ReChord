@@ -11,6 +11,8 @@
 
 void watchdog_start(void);
 void watchdog_feed(void);
+/* pclk changed: the timeout range for the new pclk, and a restart (services/cpuclk.c). */
+void watchdog_retime(void);
 void watchdog_stop(void);
 int watchdog_running(void);   /* 1 = armed (a hang ends in a reset) */
 

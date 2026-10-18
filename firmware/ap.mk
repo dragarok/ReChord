@@ -106,6 +106,7 @@ AP_SERVICE_SRCS := \
   firmware/services/queue.c \
   firmware/services/config.c \
   firmware/services/power.c \
+  firmware/services/cpuclk.c \
   firmware/services/bt_proto.c \
   firmware/services/keyseq.c \
   firmware/services/bt_keys.c \

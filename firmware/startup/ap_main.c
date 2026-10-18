@@ -40,6 +40,11 @@ uint32_t Main(void)
     board_early_init();       /* board pins first, as the stock reset handler */
     adc_init();               /* keys and battery: the ROM leaves the ADC reference off */
     bootcrumb(BC_CLOCK);
+    /* Stock's boot gating (B2h) where it applies, before its PLL: the PLL-fed peripheral clocks to
+     * the crystal (drivers/clock_rknanoc.c). Inside BC_CLOCK: a boot that stops in here counts as a
+     * clock hang, and the next boot of this build skips it as it keeps the ROM's clocks. */
+    if (!bootcrumb_clock_hangs())
+        clock_periph_init();
     /* Stock's 96 MHz UI clock and the SysTick time base. A boot of this build that stopped in here
      * makes the next one keep the ROM's clocks (drivers/clock_rknanoc.c k_points). */
     bootcrumb_kv(BCK_CLOCK_POINT, bootcrumb_clock_hangs());

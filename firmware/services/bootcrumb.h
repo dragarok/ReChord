@@ -50,5 +50,13 @@ uint32_t bootcrumb_prev_step(void);
 uint32_t bootcrumb_clock_hangs(void);
 /* clock_init_at()'s trace: the stage inside the clock sequence, persisted (sector 1 word 4). */
 void bootcrumb_clock_stage(uint32_t stage);
+/* The trail works this boot (its sectors found and written): only then may the CPU's FLAC point be
+ * tried (a boot that dies in its switch must leave a mark for the next one). */
+int bootcrumb_ok(void);
+/* The CPU point record (services/cpuclk.c), sector 1 words 6 and 7, carried across every boot of
+ * this build (a new build starts from 0): w 0 = status, w 1 = the stage armed (0 = none in flight).
+ * _set: both words on the eMMC at once; 0, or -1 (not written). */
+uint32_t bootcrumb_hp(unsigned w);
+int bootcrumb_hp_set(uint32_t status, uint32_t armed);
 
 #endif

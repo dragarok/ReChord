@@ -68,6 +68,8 @@ void panel_io_delay_ms(uint16_t ms);
 void backlight_on(void);
 /* 0 = off, 100 = full on, 1..99 = RECHO's PWM duty (on for 100 - duty %). */
 void backlight_set(int duty);
+/* pclk changed: PWM0 re-timed to the same frequency and duty (drivers/clock.h point switch). */
+void backlight_retime(void);
 
 /* Keys: last ADC ladder reading 0..1023 (call once per main-loop pass: it also
  * moves the ADC scan on) and the power key level (1 = pressed). Feed both to

@@ -121,8 +121,33 @@ static void iomux_gpio(unsigned port, unsigned pin)
  * >= 100: full on (GPIO high, no PWM); else PWM at 10 kHz, or (100 - duty) kHz
  * when that is lower, negative polarity (the light is on for 100 - duty %). */
 #define PWM0 ((volatile uint32_t *)0x400F0000u)
+static int s_bl_duty = -1;           /* the duty on PWM0 (-1: off or full, no PWM) */
+static uint32_t s_bl_pclk;           /* the pclk its period was computed at */
+
+static uint32_t bl_period(int duty)
+{
+    uint32_t khz = 100u - (uint32_t)duty < 10u ? 100u - (uint32_t)duty : 10u;
+
+    return clock_pclk_hz() / (khz * 1000u);
+}
+
+/* pclk changed (a CPU point switch, services/cpuclk.c): the same frequency and duty at the new pclk,
+ * written into the running PWM (no reset, no flicker). */
+void backlight_retime(void)
+{
+    uint32_t period;
+
+    if (s_bl_duty < 0 || s_bl_pclk == clock_pclk_hz())
+        return;
+    period = bl_period(s_bl_duty);
+    PWM0[2] = period * (uint32_t)s_bl_duty / 100u;
+    PWM0[1] = period;
+    s_bl_pclk = clock_pclk_hz();
+}
+
 void backlight_set(int duty)
 {
+    s_bl_duty = -1;
     PWM0[3] = 0;
     iomux_gpio(2, 4);
     if (duty <= 0 || duty >= 100) {
@@ -134,9 +159,10 @@ void backlight_set(int duty)
         return;
     }
     {
-        uint32_t khz = 100u - (uint32_t)duty < 10u ? 100u - (uint32_t)duty : 10u;
-        uint32_t period = clock_pclk_hz() / (khz * 1000u);
+        uint32_t period = bl_period(duty);
 
+        s_bl_duty = duty;
+        s_bl_pclk = clock_pclk_hz();
         *(volatile uint32_t *)0x50010040u = 0x03000100u;   /* GPIO2.4: PWM0 */
         cru_gate(0x90, 1);
         cru_reset(0x17, 1);
@@ -657,24 +683,56 @@ static int vop_idle(void)
  * runs ("96 boot / UI" point there) -- 0x2062 at 144, 0x3083 at 192..224. Below 96 MHz, where stock
  * never draws, RECHO 0.10's (D.2: a write pulse >= 20 ns, a cycle >= 70 ns): 0x1022 at 48 MHz.
  * RECHO's 0x1044 at 96 MHz, what round 1 ran, takes 3 cycles a byte more than stock's. */
-static void vop_timing(void)
+static uint32_t vop_timing_for(uint32_t hz)
 {
-    uint32_t hz = clock_core_hz(), mhz = hz / 1000000u, t = hz / 8000000u, v;
+    uint32_t mhz = hz / 1000000u, t = hz / 8000000u;
 
-    if (hz == s_vop_hz)
-        return;
-    if (mhz >= 96u) {
-        v = (t / 8u) << 12 | (t / 6u) << 5 | t / 8u;
-    } else {
+    if (mhz >= 96u)
+        return (t / 8u) << 12 | (t / 6u) << 5 | t / 8u;
+    {
         uint32_t rwpw = mhz ? (mhz * 20u + 999u) / 1000u : 1u, t70 = (mhz * 70u + 999u) / 1000u;
 
-        v = 0x1000u | rwpw << 5 | (t70 > rwpw + 2u ? t70 - 1u - rwpw : 1u);
+        return 0x1000u | rwpw << 5 | (t70 > rwpw + 2u ? t70 - 1u - rwpw : 1u);
     }
+}
+
+/* drivers/clock.h: a PLL switch, the cores on the crystal and the DMA suspended (stock writes TIMING
+ * at this step, Freq_VopTiming_Update 0x0305449C from SetPllFreq): TIMING for the coming hclk, so no
+ * byte goes out at the new clock with the old (faster) cycle counts. At 24 MHz a slower-clock value
+ * is safe, a faster one only longer. Untouched while the VOP is unused or reset (s_vop_hz 0): its
+ * next window sets it. */
+uint32_t clock_vop_hook(uint32_t hz)
+{
+    uint32_t v;
+
+    if (!s_vop_hz)
+        return 0;
+    v = vop_timing_for(hz);
+    for (unsigned n = 0; n < 2000u && (VOP_R(VOP_STATUS) & 1u); n++)
+        ;                                            /* (its FIFO's last bytes: microseconds) */
+    VOP_R(VOP_TIMING) = v;
+    s_vop_hz = hz;
+    return v;
+}
+
+static void vop_timing(void)
+{
+    uint32_t hz, m;
+
+    if (clock_core_hz() == s_vop_hz)
+        return;
     if (vop_idle())
         return;                                      /* (never while bytes go out) */
     delay_us(1);
-    VOP_R(VOP_TIMING) = v;
-    s_vop_hz = hz;
+    /* the clock read and the write as one: a PLL switch (SysTick, clock_vop_hook) in between would
+     * leave the old clock's value behind it */
+    __asm__ volatile ("mrs %0, primask\n cpsid i" : "=r" (m) :: "memory");
+    hz = clock_core_hz();
+    if (hz != s_vop_hz) {
+        VOP_R(VOP_TIMING) = vop_timing_for(hz);
+        s_vop_hz = hz;
+    }
+    __asm__ volatile ("msr primask, %0" :: "r" (m) : "memory");
 }
 
 static void vop_con(unsigned v)

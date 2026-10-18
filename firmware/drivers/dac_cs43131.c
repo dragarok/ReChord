@@ -286,6 +286,8 @@ static void i2c_stop(void)
 /* One write: FIFO-packed [addr_w|data...], MTXCNT starts the transfer.
  * The CS43131 write frame = [chipaddr+W][MAP hi/mid/lo][ctl=1][data]
  * (MSB-first MAP — datasheet Fig 4-32). */
+static void i2c_speed(void);
+
 static int i2c_write(uint8_t addr_w, const uint8_t *buf, unsigned n)
 {
     unsigned i, w = 0, bi = 1;
@@ -294,6 +296,7 @@ static int i2c_write(uint8_t addr_w, const uint8_t *buf, unsigned n)
 
     if (n + 1u > 32u)
         return DAC_ERR_ARG;
+    i2c_speed();                       /* (pclk may have moved: a CPU point switch) */
 
     /* Generate a START condition and wait for it BEFORE the FIFO/MTXCNT
      * (ref FUN_03055dcc: CON = EN|START|TX, wait STARTIPD, clear START).
@@ -683,15 +686,31 @@ static int dac_probe(uint8_t addr_w)
  * has run, 24 MHz before. */
 #define DAC_PCLK_HZ clock_pclk_hz()
 
+/* Ref/SDK I2CSetSpeed: div = ceil(pclk_kHz / (speed*8)) - 2, then
+ * CLKDIV = (div>>1) | ((div+1)>>1)<<16.  100 kHz @ 24 MHz => 14/14.
+ * (The old hard-coded 59 yielded ~25 kHz and, worse, hid that the
+ * bus was never even clocked.) Set again before a transfer whenever pclk is not
+ * the one it was set for: 48 MHz at the UI point, 56 MHz at the FLAC point
+ * (drivers/clock.h; 100 kHz either way, the old divider would give 117 kHz). */
+static uint32_t s_i2c_pclk;
+
+static void i2c_speed(void)
+{
+    uint32_t pclk = DAC_PCLK_HZ, div;
+
+    if (pclk == s_i2c_pclk)
+        return;
+    div = (pclk / 1000u + 799u) / 800u - 2u;
+    I2C_CLKDIV = (div >> 1) | (((div + 1) >> 1) << 16);
+    s_i2c_pclk = pclk;
+}
+
 static int i2c0_scan(void)
 {
     int c;
-    /* Ref/SDK I2CSetSpeed: div = ceil(pclk_kHz / (speed*8)) - 2, then
-     * CLKDIV = (div>>1) | ((div+1)>>1)<<16.  100 kHz @ 24 MHz => 14/14.
-     * (The old hard-coded 59 yielded ~25 kHz and, worse, hid that the
-     * bus was never even clocked.) */
-    uint32_t div = (DAC_PCLK_HZ / 1000u + 799u) / 800u - 2u;
-    I2C_CLKDIV = (div >> 1) | (((div + 1) >> 1) << 16);
+
+    s_i2c_pclk = 0;                    /* (after the controller's reset: always set) */
+    i2c_speed();
     for (c = 0; c < 3; c++) {
         i2c0_mux(c);
         s_scan[c][0] = (dac_probe(dac_chips[0]) == DAC_OK) ? 1 : 0;
