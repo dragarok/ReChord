@@ -501,7 +501,8 @@ void nav_key(const input_event_t *ev)
     g_ev = ev;
     s_force = 1;
     log_key(ev);
-    power_activity();
+    if (ev->gesture != IG_END)            /* (the multi-press window closing is no key: not activity) */
+        power_activity();
     if (ev->key == KEY_POWER) {           /* tap: the screen off / on (the menu: nav_tick) */
         if (ev->gesture == IG_TAP && ap_power_ok() && !s_menu_shown)
             ap_screen(!on);
@@ -550,8 +551,7 @@ void nav_key(const input_event_t *ev)
         return;
     }
     if (ev->gesture == IG_DOWN) {
-        frame_press(ev->key);
-        display_mark_input(ev->t_ms);     /* key->px: the slot's feedback */
+        frame_press(ev->key);             /* (key->px is marked by what the key does, below: one line a key) */
     } else if (ev->gesture == IG_TAP || ev->gesture == IG_RELEASE) {
         frame_press(KEY_NONE);
     }

@@ -1024,13 +1024,8 @@ static void dac_act(int a, int i)
         np_inval_band();
         break;
     }
-    case A_PLAY:
-        if (ev->taps <= 1)
-            usb_uac_key(USB_UAC_PLAY_PAUSE);
-        break;
-    case A_PLAY_END:
-        if (ev->taps >= 2)
-            usb_uac_key(ev->taps == 2 ? USB_UAC_NEXT : USB_UAC_PREV);
+    case A_PLAY_END:                      /* the host's transport once the taps are counted: one key each */
+        usb_uac_key(ev->taps >= 3 ? USB_UAC_PREV : ev->taps == 2 ? USB_UAC_NEXT : USB_UAC_PLAY_PAUSE);
         break;
     case A_PLAY_HOLD:
         usb_uac_key(USB_UAC_NEXT);
@@ -1610,15 +1605,10 @@ static const char *set_verb(int i, int hold)
     return s->kind == S_OPEN || s->kind == S_DO ? "OPEN" : s->kind == S_INFO ? "" : "CHANGE";
 }
 
-static void set_enter(int first)
-{
-    if (first)
-        log_printf("ui: settings %s", GRP.title);
-}
 
 const page_t pg_set = {
     .name = "settings", .kind = PK_LIST, .icon = ICON_GEAR, .live = 1, .keys = k_list, .title_fn = set_title,
-    .count = set_count, .row = set_row, .act = set_act, .enter = set_enter, .verb = set_verb,
+    .count = set_count, .row = set_row, .act = set_act, .verb = set_verb,
 };
 
 /* The choice list: radio marks, the cursor on the current value; the theme previews as it moves. */
