@@ -313,7 +313,7 @@ static void test_frame_log(void)
     display_flush_rect(0, 100, 99, 109);
     display_frame_end();
     CHECK(s_lines == 2);                                      /* the frame, then key->px */
-    CHECK(strcmp(s_line, "ui: key->px 40 ms") == 0);
+    CHECK(strcmp(s_line, "ui: key->px 40 ms px 8040") == 0);
     CHECK(display_stats()->last_px == 320u * 22u + 100u * 10u);
     CHECK(display_stats()->key_last_ms == 40u);
 
@@ -324,7 +324,7 @@ static void test_frame_log(void)
     CHECK(s_lines == 0);
     panel_io_sim_advance_us(1000);
     display_flush_rows(0, 0);                                 /* a flush outside a frame */
-    CHECK(s_lines == 1 && strcmp(s_line, "ui: key->px 1 ms") == 0);
+    CHECK(s_lines == 1 && strcmp(s_line, "ui: key->px 1 ms px 320") == 0);
     display_set_logger(NULL);
 }
 
