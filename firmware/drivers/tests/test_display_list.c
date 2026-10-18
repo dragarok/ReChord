@@ -325,6 +325,16 @@ static void test_frame_log(void)
     panel_io_sim_advance_us(1000);
     display_flush_rows(0, 0);                                 /* a flush outside a frame */
     CHECK(s_lines == 1 && strcmp(s_line, "ui: key->px 1 ms px 320") == 0);
+
+    s_lines = 0;                     /* the clock steps back 7 ms mid-frame (device 2026-10-18, the boot's
+                                      * splash: "ui: frame 4294960 ms rows 33 px 10560"): no slow frame */
+    display_frame_begin();
+    panel_io_sim_advance_us((uint32_t)-7000);
+    display_flush_rows(0, 32);
+    display_frame_end();
+    CHECK(s_lines == 0);
+    CHECK(display_stats()->last_us == 0u);
+    panel_io_sim_advance_us(7000);
     display_set_logger(NULL);
 }
 

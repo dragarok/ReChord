@@ -125,8 +125,10 @@ uint64_t time_us(void)
     r = s_base_us + (uint64_t)t * TICK_US + (uint32_t)(((uint64_t)el * s_us_frac) >> 32);
     if (r + TICK_US / 2u < s_last_us)
         r += TICK_US;
-    if (r > s_last_us)
-        s_last_us = r;
+    if (r < s_last_us)
+        r = s_last_us;                        /* never backwards, as time_ms(): a frame's duration
+                                               * read 4294960 ms on the device (2026-10-18) */
+    s_last_us = r;
     return r;
 }
 

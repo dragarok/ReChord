@@ -270,6 +270,9 @@ static void frame_done(uint32_t t0)
 {
     uint32_t us = panel_io_now_us() - t0;
 
+    if ((int32_t)us < 0)
+        us = 0;                      /* (a clock that stepped back: no 4294960 ms frames) */
+
     s_st.frames++;
     s_st.last_us = us;
     if (us > s_st.worst_us)
