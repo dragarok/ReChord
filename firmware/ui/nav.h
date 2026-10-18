@@ -103,7 +103,7 @@ extern const input_event_t *g_ev;         /* the event being handled */
 extern int g_locked;
 void nav_toast(int icon, int tone, const char *fmt, ...);
 void nav_header(hdr_t *h);                /* the services' state into the header (screens.c) */
-extern const page_t pg_np, pg_home, pg_opts, pg_dac;
+extern const page_t pg_np, pg_home, pg_opts, pg_dac, pg_vols;
 void np_act(int act, int i);              /* Now Playing's keys (also with the screen off) */
 int np_loaded(void);
 
