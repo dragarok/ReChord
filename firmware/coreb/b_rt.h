@@ -20,6 +20,7 @@ typedef struct {
     uint32_t codec;                              /* AS_CODEC_* */
     int (*open)(void);                           /* 0, or < 0: unplayable */
     uint32_t (*read)(int32_t *dst, uint32_t frames);   /* frames written, 0 = end of track */
+    void (*close)(void);                         /* the track is over (may be NULL) */
 } b_codec_t;
 
 extern const b_codec_t b_codecs[];               /* this image's decoders, codec 0 ends it */
@@ -40,6 +41,7 @@ extern uint32_t b_in_need;
 /* Heap over the decoder arena, emptied when a track opens (8-byte aligned). */
 /* Out of heap: the decoder call is abandoned (b_abort), never handed NULL. */
 void *b_alloc(size_t n);
+void *b_try_alloc(size_t n);                     /* NULL when it does not fit: the track goes on */
 /* Give up on the track from inside a decoder call: back in b_main, the track ends. */
 void b_abort(uint32_t code) __attribute__((noreturn));
 void *b_calloc(size_t n);

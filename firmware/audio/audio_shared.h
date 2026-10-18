@@ -41,7 +41,7 @@
 #define AS_LLI            (AS_PCM_RING - 0x100u)   /* 8 x 28 B, just below the ring (SRAM ends at 0x030A0000) */
 
 #define AS_MAGIC          0x4F445541u   /* "AUDO" */
-#define AS_VERSION        9u
+#define AS_VERSION        10u
 #define AS_QUEUE          4u
 
 enum { AS_CODEC_FLAC = 1, AS_CODEC_WAV = 2, AS_CODEC_MP3 = 3, AS_CODEC_AIFF = 4, AS_CODEC_AAC = 5, AS_CODEC_ALAC = 6,
@@ -123,7 +123,29 @@ typedef struct {
     volatile uint32_t run;           /* A: 1 = decode; 0 = B leaves every counter alone */
     volatile uint32_t b_div_ack;     /* B: the b_div its SysTick now runs at (A: a slower clock's
                                       * memory wait state comes off after this) */
+
+    /* HIFI accelerator (coreb/b_hifi.c, docs/HIFI.md). The state outlives B's image reloads (A
+     * clears the block once a boot), so a block that failed its self-test, timed out or stalled
+     * core B's bus is not tried again until the next power-on. */
+    volatile uint32_t hifi_mode;     /* A: RECHORD.CFG hifi=, AS_HIFI_* */
+    volatile uint32_t hifi_state;    /* B: AS_HIFI_UNTESTED .. AS_HIFI_DEAD */
+    volatile uint32_t hifi_busy;     /* B: 1 while B touches the block (A reloading B with it set:
+                                      * the access stalled core B's bus; B's next boot marks it DEAD) */
+    /* Lines for core A's log, written by B (text, NUL-terminated): B fills b_msg[b_msg_wr % 4] and
+     * bumps b_msg_wr; A logs every line up to it and bumps b_msg_rd. B drops a line when all 4 are
+     * still unread. */
+    volatile uint32_t b_msg_wr;      /* B */
+    volatile uint32_t b_msg_rd;      /* A */
+    char b_msg[4][128];              /* B */
 } audio_shared_t;
+
+/* hifi_mode: auto = HIFI for FLAC LPC once its self-test passed; off = software only; verify = HIFI,
+ * then every sample checked in software (the software result is played; mismatches counted) */
+enum { AS_HIFI_AUTO = 0, AS_HIFI_OFF = 1, AS_HIFI_VERIFY = 2 };
+/* hifi_state */
+enum { AS_HIFI_UNTESTED = 0, AS_HIFI_OK = 1 /* narrow and wide */, AS_HIFI_NARROW = 2 /* wide failed */,
+       AS_HIFI_FAILED = 3 /* self-test or a check failed: software */, AS_HIFI_DEAD = 4 /* timed out or
+       stalled B's bus: never touched again this boot */ };
 
 #define AS ((audio_shared_t *)AS_SHARED)
 

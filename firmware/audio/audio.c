@@ -32,6 +32,7 @@
 #include "services/dirlist.h"
 #include "services/queue.h"
 #include "services/bootcrumb.h"
+#include "services/config.h"
 
 
 #define REG(a)      (*(volatile uint32_t *)(a))
@@ -1360,6 +1361,7 @@ int audio_play(int pos)
         AS->version = AS_VERSION;
         s_as_init = 1;
     }
+    AS->hifi_mode = g_cfg.hifi;              /* (core B reads it at its first FLAC LPC subframe) */
     queue_seek(pos);
     s_rate = 0;
     AS->in_wr = AS->in_rd = 0;
@@ -1573,6 +1575,8 @@ static void supervise(void)
 
 void audio_poll(void)
 {
+    while (s_b_up && AS->b_msg_rd != AS->b_msg_wr)   /* core B's lines (coreb/b_hifi.c) */
+        log_printf("%s", AS->b_msg[AS->b_msg_rd++ % 4u]);
     if (s_dac_phase && (int32_t)(time_ms() - s_dac_due) >= 0) {   /* (also stopped meanwhile) */
         if (dac_step() < 0 || (!s_dac_phase && s_playing && s_rate != s_dac_rate && dac_set_rate(s_rate) != 0)) {
             halt();
