@@ -56,7 +56,7 @@ CFW_ELF := $(CFW_BUILD_DIR)/rechord_ap.elf
 # ---- core B (decoder) images: one per codec family, linked at 0. They live in the
 # firmware slot (make_fw1 --module), core A loads the one a track needs. ----
 COREB_DIR  := build/coreb
-COREB_RT   := b_startup b_main b_libc
+COREB_RT   := b_startup b_main b_libc b_selftest
 COREB_MAD  := $(patsubst %,libmad/%,bit fixed frame huffman layer12 layer3 stream synth timer)
 COREB_ALAC := $(patsubst %,alac/%,ag_dec dp_dec ALACBitUtilities alac_dec)
 COREB_FAAD := $(patsubst firmware/coreb/%.c,%,$(wildcard firmware/coreb/faad/*.c))

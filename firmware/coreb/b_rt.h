@@ -51,4 +51,7 @@ void *b_realloc(void *p, size_t n);
 /* Developer > HIFI probe (b_hifi_probe.c in the main image; elsewhere a stub that says so). */
 void b_probe(void);
 
+/* Core B's half of the clock self-test (b_selftest.c), run while it holds (b_main.c b_hold). */
+void b_selftest(void);
+
 #endif

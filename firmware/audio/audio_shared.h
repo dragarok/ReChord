@@ -41,7 +41,7 @@
 #define AS_LLI            (AS_PCM_RING - 0x100u)   /* 8 x 28 B, just below the ring (SRAM ends at 0x030A0000) */
 
 #define AS_MAGIC          0x4F445541u   /* "AUDO" */
-#define AS_VERSION        12u
+#define AS_VERSION        13u
 #define AS_QUEUE          4u
 
 enum { AS_CODEC_FLAC = 1, AS_CODEC_WAV = 2, AS_CODEC_MP3 = 3, AS_CODEC_AIFF = 4, AS_CODEC_AAC = 5, AS_CODEC_ALAC = 6,
@@ -56,13 +56,19 @@ enum { AS_CODEC_FLAC = 1, AS_CODEC_WAV = 2, AS_CODEC_MP3 = 3, AS_CODEC_AIFF = 4,
  * ENDED = the stream is over; RATE = the next track needs another sample rate:
  * A re-clocks, then sends AS_CMD_RESTART. */
 enum { AS_B_BOOT = 0, AS_B_READY, AS_B_PLAYING, AS_B_ENDED, AS_B_ERROR, AS_B_RATE, AS_B_PARKED,
-       AS_B_FAULT /* B took a fault and stopped: A reloads it */ };
+       AS_B_FAULT /* B took a fault and stopped: A reloads it */,
+       AS_B_HELD /* B holds still for a CPU point switch (b_main.c b_hold): SysTick off, interrupts
+                  * masked, a loop over the shared block; A releases it (rel_seq) */ };
 
 /* A -> B commands (cmd field, B clears it to 0 when done) */
 /* PARK: B stops its SysTick, masks interrupts and idles in thread mode, so core A
  * can hold it in reset with no exception half-handled (before loading another image) */
 /* HIFI_PROBE: Developer > HIFI probe (coreb/b_hifi_probe.c): B runs it with no track open (probe_*) */
-enum { AS_CMD_NONE = 0, AS_CMD_STOP = 1, AS_CMD_RESTART = 2, AS_CMD_PARK = 3, AS_CMD_HIFI_PROBE = 4 };
+/* HOLD: B holds (AS_B_HELD) until A releases it, then goes on where it was (A switches the CPU
+ * point meanwhile: services/cpuclk.c). SELFTEST: sent while B holds; B runs its half of the clock
+ * self-test (coreb/b_selftest.c) and answers in st_b_state. */
+enum { AS_CMD_NONE = 0, AS_CMD_STOP = 1, AS_CMD_RESTART = 2, AS_CMD_PARK = 3, AS_CMD_HIFI_PROBE = 4,
+       AS_CMD_HOLD = 5, AS_CMD_SELFTEST = 6 };
 
 typedef struct {
     uint32_t seq;            /* A: track sequence number (1, 2, ...) */
@@ -74,6 +80,8 @@ typedef struct {
     uint32_t trim;           /* decoded frames to drop at the start (MP3: encoder + decoder delay) */
     uint32_t drop;           /* frames the runtime drops after the decoder's own trim: a seek's way
                               * from the frame (or block, packet) the stream starts at to the target */
+    uint32_t clk;            /* the CPU point the track plays at (drivers/clock.h CLOCK_POINT_*): A's
+                              * choice at queue time (services/cpuclk.c); B asks for it at its open */
 } as_track_t;
 
 typedef struct {
@@ -151,6 +159,33 @@ typedef struct {
     volatile uint32_t probe_step;    /* B: the step it is in (b_hifi_probe.c) */
     volatile uint32_t probe_text;    /* B: system address of its text ("hfp: ..." lines, '\n' each) */
     volatile uint32_t probe_len;     /* B: bytes of it */
+
+    /* CPU point switches (services/cpuclk.c, docs/CPU_CLOCK.md). B, opening a track whose clk is not
+     * clk_cur, sets clk_req and holds (b_hold: hold_seq + 1, state HELD); A (its SysTick) switches if
+     * it may, writes clk_cur, b_hz, b_div, and releases B (rel_seq = hold_seq); B restarts its SysTick
+     * at the new clock and acks (b_ack_seq). A also holds B itself (AS_CMD_HOLD) to go back to the UI
+     * point when playback stops. */
+    volatile uint32_t clk_cur;       /* A: the point in effect */
+    volatile uint32_t clk_req;       /* B: the point the next track wants */
+    volatile uint32_t hold_seq;      /* B: holds entered */
+    volatile uint32_t rel_seq;       /* A: the hold released */
+    volatile uint32_t b_ack_seq;     /* B: running again after that hold */
+    /* the clock self-test (selftest_kernel.h): A sets the inputs, then cmd = AS_CMD_SELFTEST while B
+     * holds; B runs its half (st_b_state 1, then 2) and leaves its results */
+    volatile uint32_t st_code_words; /* A: words of B's image it loaded (at 0x01000000) */
+    volatile uint32_t st_b_state;    /* B: 0, 1 running, 2 done */
+    volatile uint32_t st_b_cyc;      /* B: its SysTick's cycles over st_b_ticks of the 24 MHz timer */
+    volatile uint32_t st_b_ticks;
+    volatile uint32_t st_b_sig;      /* B: st_kernel()'s signature */
+    volatile uint32_t st_b_high;     /* B: st_march2() over its free heap (0 = clean) */
+    volatile uint32_t st_b_high_at, st_b_high_words;
+    volatile uint32_t st_b_low;      /* B: st_march2() over its LOW window */
+    volatile uint32_t st_b_code;     /* B: st_sum() of its image */
+    volatile uint32_t st_b_unlock;   /* B: times it read the PLL lock bit 0 */
+    /* the track B last finished: its decode cycles (B's SysTick: b_hz cycles a second), for core A's
+     * per-track line (audio.c "clock: track") */
+    volatile uint32_t trk_seq, trk_frames, trk_rate, trk_hz, trk_point;
+    volatile uint32_t trk_cyc_lo, trk_cyc_hi;
 } audio_shared_t;
 
 /* hifi_mode: auto = the HIFI block for FLAC LPC, APE's NN filters and ALAC's LPC, each once its
@@ -167,5 +202,20 @@ enum { AS_PROBE_NONE = 0, AS_PROBE_RUNNING = 1, AS_PROBE_DONE = 2, AS_PROBE_NOIM
        core-B image */, AS_PROBE_NOMEM = 4 };
 
 #define AS ((audio_shared_t *)AS_SHARED)
+
+/* Core B's wake-up while it holds (b_main.c b_hold: WFI with its interrupts masked, so a PLL switch
+ * runs with B executing nothing): the mailbox's A2B channel 0 (0x40110000, port 0: +0x00 IntEn, +0x04
+ * status, write 1 to clear, +0x0C data 0, whose write sets status bit 0), core B's NVIC IRQ 9 (SDK
+ * INT_ID25_MAILBOX0). Stock holds and releases core B through the mailbox too (BB_HOLD / BB_HOLD_EXIT,
+ * FreqSetPrevProcess 0x03068678 [code]). Core A pings after writing rel_seq or cmd. */
+#define AS_MBOX_A2B_EN    (*(volatile uint32_t *)0x40110000u)
+#define AS_MBOX_A2B_ST    (*(volatile uint32_t *)0x40110004u)
+#define AS_MBOX_A2B_DATA0 (*(volatile uint32_t *)0x4011000Cu)
+#define AS_MBOX_B_IRQ     9u
+static inline void as_ping_b(void)
+{
+    __asm__ volatile ("dsb" ::: "memory");
+    AS_MBOX_A2B_DATA0 = 1u;
+}
 
 #endif

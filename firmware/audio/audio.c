@@ -16,6 +16,7 @@
 
 #include "audio.h"
 #include "audio_shared.h"
+#include "selftest_kernel.h"
 #include "ape_info.h"
 #include "mp3_info.h"
 #include "mp4.h"
@@ -33,6 +34,7 @@
 #include "services/queue.h"
 #include "services/bootcrumb.h"
 #include "services/config.h"
+#include "services/cpuclk.h"
 
 
 #define REG(a)      (*(volatile uint32_t *)(a))
@@ -71,6 +73,9 @@ static uint32_t s_rate, s_rate_changes;
 static audio_track_t s_tracks[AS_QUEUE];   /* titles/durations by seq, for the UI */
 static uint32_t s_rd_bps;                  /* bytes per second of the track being read (headroom) */
 static uint32_t s_sv_ticks, s_sv_ticks_at, s_sv_pcm, s_sv_pcm_at, s_sv_done, s_sv_fails, s_sv_aborts;
+static uint32_t s_clk_extra;               /* the open track's APE level / DSD rate multiple (cpuclk.h) */
+
+_Static_assert(sizeof(audio_shared_t) <= AS_B_DATA - AS_SHARED, "the shared block outgrew its 4 KiB");
 
 static uint32_t be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
 static uint32_t le32(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
@@ -350,6 +355,7 @@ static int dsd_track(as_track_t *t, uint32_t layout, uint32_t ch, uint32_t dsd_r
 
     if (dsd_rate % 2822400u || (mult != 1 && mult != 2 && mult != 4) || ch < 1 || ch > 2 || !len)
         return -1;
+    s_clk_extra = mult;
     t->codec = AS_CODEC_DSD;
     t->rate = mult == 4u ? 88200u : 176400u;     /* DSD256 at 176.4k is beyond core B */
     t->channels = ch;
@@ -501,6 +507,7 @@ static int open_ape(fs_file_t *f, as_track_t *t)
         return -1;
     }
     t->codec = AS_CODEC_APE;
+    s_clk_extra = ai.level;
     t->rate = ai.rate;
     t->channels = ai.channels;
     t->bits = ai.bits;
@@ -723,6 +730,7 @@ static int open_next(void)
             continue;
         }
         memset(&t, 0, sizeof t);
+        s_clk_extra = 0;
         s_kbps = 0;
         s_mp4 = 0;
         s_show_frames = 0;
@@ -802,15 +810,19 @@ static int open_next(void)
             strncpy(u->name, name, sizeof u->name - 1);
             u->name[sizeof u->name - 1] = 0;
         }
+        /* the CPU point it plays at (services/cpuclk.c); the FLAC point armed on the eMMC first */
+        t.clk = cpuclk_point_for(&t, s_clk_extra, s_usb);
+        if (t.clk != CLOCK_POINT_UI && cpuclk_arm() != 0)
+            t.clk = CLOCK_POINT_UI;
         s_rd_bps = t.frames && t.rate ? (uint32_t)((uint64_t)t.bytes * t.rate / t.frames) : 0u;
         if (!s_rd_bps)
             s_rd_bps = 600000u;              /* unknown: as a hi-res FLAC (the cautious side) */
         AS->q[AS->q_wr % AS_QUEUE] = t;
         __asm__ volatile ("dmb" ::: "memory");   /* the entry before the count that publishes it */
         AS->q_wr++;
-        log_printf("audio: queued %u '%s' codec %u %u Hz %u bit %u ch, %u frames, %u bytes",
+        log_printf("audio: queued %u '%s' codec %u %u Hz %u bit %u ch, %u frames, %u bytes, point %s",
                    (unsigned)t.seq, name, (unsigned)t.codec, (unsigned)t.rate, (unsigned)t.bits,
-                   (unsigned)t.channels, (unsigned)t.frames, (unsigned)t.bytes);
+                   (unsigned)t.channels, (unsigned)t.frames, (unsigned)t.bytes, clock_point_name(t.clk));
         if (!s_rate)
             s_rate = t.rate;
         return 0;
@@ -978,6 +990,10 @@ static void b_clock(unsigned div)
 {
     uint32_t m = irq_off();
 
+    if (clock_point() != CLOCK_POINT_UI) {   /* the FLAC point: B fixed at /3 for the track */
+        irq_restore(m);
+        return;
+    }
     if (div >= 1u && div <= 8u && AS->b_div != div) {
         clock_set_core_b_div(div);
         AS->b_hz = clock_core_b_hz();
@@ -994,14 +1010,109 @@ static void b_full_speed(void)
     AS->b_div_req = 1;
 }
 
+/* ---- CPU point switches (services/cpuclk.c, docs/CPU_CLOCK.md) --------------
+ * Core B, at a track open whose point is not the one in effect, holds (b_main.c b_hold) and asks;
+ * core A's SysTick switches (or not) and releases it. A holds B itself to go back to the UI point
+ * when playback stops. A hold that B does not come back from within 100 ms is a stall: B into
+ * reset, the UI point, and the supervisor's reload. */
+static int s_a_hold;                       /* A's own hold in progress (to_ui): the SysTick keeps out */
+static int s_watch;                        /* a release whose ack is awaited */
+static uint32_t s_watch_seq, s_watch_ms;
+static volatile int s_b_stalled;           /* B did not come back: the main loop reloads it */
+static uint32_t s_trk_logged;
+
+static void b_release(void)
+{
+    AS->b_hz = clock_core_b_hz();
+    AS->b_div = AS->b_div_req = clock_pll_hz() / clock_core_b_hz();
+    AS->clk_cur = clock_point();
+    __asm__ volatile ("dmb" ::: "memory");
+    s_watch_seq = AS->hold_seq;
+    s_watch_ms = time_ms();
+    s_watch = 1;
+    AS->rel_seq = s_watch_seq;
+    as_ping_b();                             /* (B sleeps in its hold: the mailbox wakes it) */
+}
+
+static void b_stall(void)
+{
+    REG(CRU_SOFTRST3) = (CAL_CORE_RST << 16) | CAL_CORE_RST;     /* quiet for good: reset */
+    s_b_up = 0;
+    s_b_image = NULL;
+    if (clock_point() != CLOCK_POINT_UI)
+        cpuclk_switch(CLOCK_POINT_UI, 0);
+    AS->clk_cur = clock_point();
+    cpuclk_fail(ST_B_RESUME);
+    s_b_stalled = 1;
+}
+
+static int in_handler(void)
+{
+    uint32_t ipsr;
+
+    __asm__ volatile ("mrs %0, ipsr" : "=r" (ipsr));
+    return ipsr != 0;
+}
+
 void audio_tick(void)
 {
-    if (!s_b_up || !s_playing)
+    if (!s_b_up)
         return;
+    if (s_watch && AS->b_ack_seq == s_watch_seq) {
+        s_watch = 0;
+    } else if (s_watch && time_ms() - s_watch_ms > 100u && in_handler()) {
+        s_watch = 0;
+        b_stall();
+        return;
+    }
+    if (in_handler() && !s_a_hold && AS->state == AS_B_HELD && AS->hold_seq != AS->rel_seq) {
+        int may = cpuclk_may(AS->clk_req);
+
+        if (may < 0)
+            return;                          /* not yet (the watchdog not armed, the record not written) */
+        if (may > 0)
+            cpuclk_switch(AS->clk_req, 1);   /* (the first FLAC switch of the boot: the self-test) */
+        b_release();
+        return;
+    }
+    if (!s_playing || clock_point() != CLOCK_POINT_UI)
+        return;                              /* (the FLAC point: no governor, as stock) */
     if (AS->b_div_req != AS->b_div)          /* core B asked for another clock */
         b_clock(AS->b_div_req);
     if (AS->b_div_ack == AS->b_div)
         clock_core_b_settled();
+}
+
+/* Back to the UI point (a stop): core B held for it if it is up and answers, else put in reset (a
+ * reload follows at the next play). Main loop. */
+static void to_ui(void)
+{
+    int held = 0;
+
+    if (clock_point() == CLOCK_POINT_UI)
+        return;
+    s_a_hold = 1;
+    if (s_b_up && AS->state != AS_B_FAULT && AS->state != AS_B_PARKED) {
+        uint32_t seq = AS->hold_seq;
+
+        AS->cmd = AS_CMD_HOLD;
+        for (uint32_t t0 = time_ms(); time_ms() - t0 < 100u; delay_us(20))
+            if (AS->state == AS_B_HELD && AS->hold_seq != seq) {
+                held = 1;
+                break;
+            }
+    }
+    if (!held) {
+        AS->cmd = AS_CMD_NONE;
+        REG(CRU_SOFTRST3) = (CAL_CORE_RST << 16) | CAL_CORE_RST;
+        s_b_up = 0;
+        s_b_image = NULL;
+    }
+    cpuclk_switch(CLOCK_POINT_UI, held);
+    AS->clk_cur = clock_point();
+    if (held)
+        b_release();
+    s_a_hold = 0;
 }
 
 /* Load the image into B's code RAM and let B boot; B keeps the stream state
@@ -1029,6 +1140,7 @@ static int b_load(const char *image)
         log_printf("player: core-B image %s: %d", image, n);
         return -1;
     }
+    cpuclk_b_loaded((uint32_t)n);            /* (the self-test's reference for B's code) */
     t_load = time_ms() - t0;
     t0 = time_ms();                          /* B's own boot budget starts now: the first play of a
                                               * boot used to spend the 300 ms on the cold file read
@@ -1331,6 +1443,8 @@ void audio_ext_stop(void)
 
 /* ---- API ---------------------------------------------------------------- */
 
+static int s_replay;                       /* audio_play()'s own halt: the next track's open decides */
+
 static void halt(void)
 {
     if (s_dma_on)
@@ -1349,6 +1463,8 @@ static void halt(void)
     s_playing = 0;
     s_paused = 0;
     s_start_paused = 0;
+    if (!s_replay)
+        to_ui();                             /* playback stopped: stock's 96 MHz UI point */
 }
 
 static void as_init(void)
@@ -1386,7 +1502,9 @@ int audio_play(int pos)
 {
     const char *image;
 
+    s_replay = 1;
     halt();
+    s_replay = 0;
     as_init();
     queue_seek(pos);
     s_rate = 0;
@@ -1566,8 +1684,8 @@ static void supervise(void)
 {
     uint32_t now = time_ms();
 
-    if (!s_b_up || s_paused)
-        return;
+    if (!s_b_up || s_paused || AS->state == AS_B_HELD)
+        return;                              /* (held for a CPU point switch: its heartbeat stops) */
     if (AS->aborts != s_sv_aborts) {         /* a decoder gave up on a track (it ended there) */
         s_sv_aborts = AS->aborts;
         log_printf("audio: decoder gave up on track %u (code %x)", (unsigned)AS->cur_seq,
@@ -1599,10 +1717,36 @@ static void supervise(void)
     }
 }
 
+/* The track core B last finished: its decode cycles a second, at the point it played at. */
+static void track_line(void)
+{
+    uint64_t cyc = (uint64_t)AS->trk_cyc_hi << 32 | AS->trk_cyc_lo;
+    uint32_t f = AS->trk_frames, mhz100 = f ? (uint32_t)(cyc * AS->trk_rate / f / 10000u) : 0u;
+
+    s_trk_logged = AS->trk_seq;
+    log_printf("clock: track %u: point %s, core B at %u MHz, %u.%02u M cycles/s decoding (%u Hz, %u frames)",
+               (unsigned)AS->trk_seq, clock_point_name(AS->trk_point), (unsigned)(AS->trk_hz / 1000000u),
+               (unsigned)(mhz100 / 100u), (unsigned)(mhz100 % 100u), (unsigned)AS->trk_rate, (unsigned)f);
+}
+
 void audio_poll(void)
 {
     while (s_b_up && AS->b_msg_rd != AS->b_msg_wr)   /* core B's lines (coreb/b_hifi.c) */
         log_printf("%s", AS->b_msg[AS->b_msg_rd++ % 4u]);
+    if (AS->trk_seq != s_trk_logged && AS->magic == AS_MAGIC)
+        track_line();
+    cpuclk_poll();
+    if (s_b_stalled) {                       /* B did not come back from a CPU point switch */
+        const as_track_t *n = &AS->q[AS->q_rd % AS_QUEUE];
+        const audio_track_t *t = &s_tracks[n->seq % AS_QUEUE];
+
+        s_b_stalled = 0;
+        log_printf("audio: core B did not come back from a CPU point switch (track %u): reloaded, at %s",
+                   (unsigned)n->seq, clock_point_name(clock_point()));
+        if (!s_playing || t->seq != n->seq || audio_play((int)t->index) != 0)
+            halt();
+        return;
+    }
     if (s_dac_phase && (int32_t)(time_ms() - s_dac_due) >= 0) {   /* (also stopped meanwhile) */
         if (dac_step() < 0 || (!s_dac_phase && s_playing && s_rate != s_dac_rate && dac_set_rate(s_rate) != 0)) {
             halt();

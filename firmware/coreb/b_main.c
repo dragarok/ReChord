@@ -106,6 +106,33 @@ void SysTick_Handler(void)
     }
 }
 
+/* Core-B cycles since its SysTick started (ticks x reload + the cycles into this tick), for the
+ * per-track decode cycles core A logs (audio.c "clock: track"). */
+static uint32_t rt_cycles(void)
+{
+    uint32_t t, v, pend, el;
+
+    do {
+        t = AS->ticks;
+        v = SYST_CVR;
+        pend = *(volatile uint32_t *)0xE000ED04u & (1u << 26);   /* ICSR PENDSTSET */
+    } while (t != AS->ticks);
+    el = s_reload - v;
+    if (pend && el < s_reload / 2u)       /* wrapped, its interrupt not taken yet */
+        t++;
+    return t * (s_reload + 1u) + el;
+}
+
+/* cycles from c0 to now (a negative span, a race the above missed, counts 0) */
+static uint32_t rt_since(uint32_t c0)
+{
+    uint32_t d = rt_cycles() - c0;
+
+    return d < 0x80000000u ? d : 0u;
+}
+
+static uint64_t s_trk_cyc;               /* decode cycles of the track open (b_trk) */
+
 static void cpu_idle(void)
 {
     uint32_t v0, v1, t0, t1;
@@ -337,11 +364,16 @@ static int guarded_open(void)
 
 static int guarded_read(int32_t *dst, uint32_t want, uint32_t *got)
 {
-    if (b_setjmp(s_jmp))
+    uint32_t c0 = rt_cycles();
+
+    if (b_setjmp(s_jmp)) {
+        s_trk_cyc += rt_since(c0);
         return -1;
+    }
     s_jmp_armed = 1;
     *got = s_dec->read(dst, want);
     s_jmp_armed = 0;
+    s_trk_cyc += rt_since(c0);
     return 0;
 }
 
@@ -354,6 +386,7 @@ static int track_open(void)
     AS->cur_seq = b_trk.seq;
     AS->cur_frames = 0;
     s_drop = b_trk.drop;
+    s_trk_cyc = 0;
     heap_reset();
     s_dec = codec_find(b_trk.codec);
     b_in_need = 0x8000u;
@@ -401,10 +434,71 @@ static void track_close(void)
 {
     if (s_dec->close)
         s_dec->close();
+    AS->trk_frames = AS->cur_frames;          /* this track's line for core A (audio.c) */
+    AS->trk_rate = b_trk.rate;
+    AS->trk_hz = AS->b_hz;
+    AS->trk_point = AS->clk_cur;
+    AS->trk_cyc_lo = (uint32_t)s_trk_cyc;
+    AS->trk_cyc_hi = (uint32_t)(s_trk_cyc >> 32);
+    __asm__ volatile ("dmb" ::: "memory");
+    AS->trk_seq = b_trk.seq;
     s_dec = NULL;
     discard_rest();
     AS->done_seq = b_trk.seq;
     AS->q_rd++;
+}
+
+/* ---- holding still for a CPU point switch (services/cpuclk.c on core A) --- */
+
+static unsigned s_div_seen;              /* the b_div B's SysTick runs at */
+static uint32_t s_clk_asked;             /* the track whose point B last asked for */
+
+/* B holds while core A moves the PLL: its SysTick off, interrupts masked, nothing touched but the
+ * shared block (and, on A's word, its half of the self-test). Then its SysTick at the clock A set,
+ * and the ack. The DMA plays on from the PCM ring meanwhile; blocks it finished are recycled at
+ * the next tick. */
+#define B_NVIC_ISER0 (*(volatile uint32_t *)0xE000E100u)
+#define B_NVIC_ICER0 (*(volatile uint32_t *)0xE000E180u)
+#define B_NVIC_ICPR0 (*(volatile uint32_t *)0xE000E280u)
+
+static void b_hold(void)
+{
+    uint32_t prev = AS->state, seq;
+
+    SYST_CSR = 0;
+    __asm__ volatile ("cpsid i" ::: "memory");
+    /* asleep between core A's pings (the mailbox, audio_shared.h): never taken, PRIMASK is set; it
+     * only ends the WFI. Cleared before every look at the shared block, so no ping is lost. */
+    AS_MBOX_A2B_ST = 1u;
+    B_NVIC_ICPR0 = 1u << AS_MBOX_B_IRQ;
+    AS_MBOX_A2B_EN |= 1u;
+    B_NVIC_ISER0 = 1u << AS_MBOX_B_IRQ;
+    seq = AS->hold_seq + 1u;
+    AS->state = AS_B_HELD;
+    __asm__ volatile ("dmb" ::: "memory");
+    AS->hold_seq = seq;
+    while (AS->rel_seq != seq) {
+        if (AS->cmd == AS_CMD_SELFTEST) {
+            b_selftest();
+            AS->cmd = AS_CMD_NONE;
+            continue;
+        }
+        __asm__ volatile ("dsb\n wfi" ::: "memory");
+        AS_MBOX_A2B_ST = 1u;
+        B_NVIC_ICPR0 = 1u << AS_MBOX_B_IRQ;
+        __asm__ volatile ("dmb" ::: "memory");
+    }
+    B_NVIC_ICER0 = 1u << AS_MBOX_B_IRQ;
+    AS_MBOX_A2B_EN &= ~1u;
+    AS_MBOX_A2B_ST = 1u;
+    B_NVIC_ICPR0 = 1u << AS_MBOX_B_IRQ;
+    __asm__ volatile ("dmb" ::: "memory");
+    AS->state = prev;
+    s_div_seen = AS->b_div;
+    systick_start();                     /* (b_hz: A wrote it before the release) */
+    AS->b_div_ack = s_div_seen;
+    AS->b_ack_seq = seq;
+    __asm__ volatile ("cpsie i" ::: "memory");
 }
 
 /* ---- PCM ring ----------------------------------------------------------- */
@@ -505,6 +599,12 @@ static int produce(void)
             }
             if (AS->in_wr - AS->in_rd < 64u && n->bytes > 64u)
                 return 0;                            /* header not there yet */
+            if (n->clk != AS->clk_cur && s_clk_asked != n->seq) {
+                s_clk_asked = n->seq;                /* (once a track: A may say no) */
+                AS->clk_req = n->clk;
+                b_hold();                            /* A switches the CPU point, at this open */
+                return 1;
+            }
             if (track_open() != 0) {                 /* unplayable: skip it, keep the stream */
                 AS->q_rd++;
                 discard_rest();
@@ -584,11 +684,10 @@ static void stop_all(void)
 
 int b_main(void)
 {
-    unsigned div_seen = AS->b_div;
-
+    s_div_seen = AS->b_div;
     heap_reset();
     systick_start();
-    AS->b_div_ack = div_seen;
+    AS->b_div_ack = s_div_seen;
     AS->state = AS_B_READY;
     for (;;) {
         if (AS->cmd == AS_CMD_STOP) {
@@ -605,16 +704,19 @@ int b_main(void)
             if (!s_dec)
                 b_probe();
             AS->cmd = AS_CMD_NONE;
+        } else if (AS->cmd == AS_CMD_HOLD) {           /* A goes back to the UI point (a stop) */
+            AS->cmd = AS_CMD_NONE;
+            b_hold();
         } else if (AS->cmd == AS_CMD_RESTART) {        /* A re-clocked / swapped images, DMA re-armed */
             AS->pcm_wr = AS->pcm_played = AS->pcm_end = 0;
             s_fill = s_resync = 0;
             AS->state = AS_B_PLAYING;
             AS->cmd = AS_CMD_NONE;
         }
-        if (AS->b_div != div_seen) {                 /* core A changed our clock */
-            div_seen = AS->b_div;
+        if (AS->b_div != s_div_seen) {               /* core A changed our clock */
+            s_div_seen = AS->b_div;
             systick_start();
-            AS->b_div_ack = div_seen;                /* (A may now drop a faster clock's wait state) */
+            AS->b_div_ack = s_div_seen;              /* (A may now drop a faster clock's wait state) */
         }
         if (!produce())
             cpu_idle();

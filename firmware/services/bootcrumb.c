@@ -13,7 +13,8 @@
  *   - sector 0: "EBLG" "RCB1", boot count, last step started, faults, values, fault pc, lr;
  *     60 key/value pairs per sector from word 8. Sector 1: "EBLG" "RCB2", build id, boots of
  *     this build that stopped in clock_init, the last stage clock_init_at() started, the last
- *     fault's exception number (24 = the watchdog: a hang), then pairs. A boot carries the last
+ *     fault's exception number (24 = the watchdog: a hang), the CPU point record (words 6, 7:
+ *     services/cpuclk.c, kept across the boots of one build), then pairs. A boot carries the last
  *     boot's fault (pc, lr, exception) into its own record, since a fault or watchdog reset is
  *     followed by a new boot that rewrites the record.
  * Anything unexpected turns it off for the rest of the boot; it never stops the boot.
@@ -214,7 +215,7 @@ static void persist(void)
 
 void bootcrumb_init(void)
 {
-    uint32_t boots = 0, prev_step = 0, prev_build = 0, hangs = 0, prev_stage = 0;
+    uint32_t boots = 0, prev_step = 0, prev_build = 0, hangs = 0, prev_stage = 0, prev_hp[2] = { 0, 0 };
     uint32_t prev_faults = 0, prev_pc = 0, prev_lr = 0, prev_exc = 0;
     uint32_t carry_k[16], carry_v[16], ncarry = 0;
 
@@ -248,6 +249,8 @@ void bootcrumb_init(void)
                 hangs = s_sec[3];
                 prev_stage = s_sec[4];
                 prev_exc = s_sec[5];
+                prev_hp[0] = s_sec[6];
+                prev_hp[1] = s_sec[7];
             }
         } else if (!sector_zero(s_sec))
             s_mode = 0;
@@ -262,6 +265,8 @@ void bootcrumb_init(void)
     s_rec[0][2] = boots + 1u;
     s_rec[1][2] = build_id();
     s_rec[1][3] = prev_build == build_id() ? hangs + (prev_step == BC_CLOCK) : 0u;
+    s_rec[1][6] = prev_build == build_id() ? prev_hp[0] : 0u;   /* the CPU point record: this build's */
+    s_rec[1][7] = prev_build == build_id() ? prev_hp[1] : 0u;
     bootcrumb_kv(0x21, s_mode);            /* the addressing found (tools/bootlog.py: mmc_mode) */
     bootcrumb_kv(BCK_PREV_STEP, prev_step);
     s_prev_step = prev_step;
@@ -339,4 +344,24 @@ void bootcrumb_fault(uint32_t pc, uint32_t lr, uint32_t exc)
     bootcrumb_kv(0x34, REG(0xE000ED2Cu));  /* HFSR */
     bootcrumb_kv(0x35, REG(0xE000ED38u));  /* BFAR */
     persist();
+}
+
+int bootcrumb_ok(void)
+{
+    return s_mode != 0u;
+}
+
+uint32_t bootcrumb_hp(unsigned w)
+{
+    return w < 2u ? s_rec[1][6u + w] : 0u;
+}
+
+int bootcrumb_hp_set(uint32_t status, uint32_t armed)
+{
+    if (!s_mode)
+        return -1;
+    s_rec[1][6] = status;
+    s_rec[1][7] = armed;
+    persist();
+    return s_mode ? 0 : -1;                /* (persist() turns the trail off when a write fails) */
 }

@@ -30,6 +30,27 @@
 
 static int s_on;
 
+/* The timeout range for pclk: the smallest TORR whose 2^(16 + TORR) pclk cycles last at least 4.5 s
+ * (12 at the UI point's 48 MHz: 5.6 s, and at the FLAC point's 56 MHz: 4.8 s; stock 13 at 48). */
+static uint32_t torr_for(uint32_t pclk)
+{
+    uint32_t t = 0;
+
+    while (t < 15u && (uint64_t)(1u << (16u + t)) * 2u < (uint64_t)pclk * 9u)
+        t++;
+    return t;
+}
+
+/* pclk changed (services/cpuclk.c, after a CPU point switch): the range for the new pclk (DW WDT:
+ * it applies from the next restart), then a restart. */
+void watchdog_retime(void)
+{
+    if (!s_on)
+        return;
+    WDT(WDT_TORR) = torr_for(clock_pclk_hz());
+    WDT(WDT_CRR) = WDT_KICK;
+}
+
 void watchdog_start(void)
 {
     cru_gate(0x8Fu, 1);                      /* PCLK_WDT */

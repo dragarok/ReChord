@@ -43,7 +43,10 @@ typedef struct {
     uint8_t theme;               /* theme/theme.h built-in index (theme=<name>, Classic by default) */
     uint8_t hifi;                /* hifi=auto|off|verify: core B's FLAC LPC on the HIFI accelerator
                                   * (audio_shared.h AS_HIFI_*, docs/HIFI.md); written when not auto */
+    uint8_t cpu_b;               /* cpu_b=96|auto|stock: core B's clock while playing (services/cpuclk.h,
+                                  * docs/CPU_CLOCK.md); written when not 96 */
 } config_t;
+enum { CFG_CPU_B_96 = 0, CFG_CPU_B_AUTO = 1, CFG_CPU_B_STOCK = 2 };
 #define CFG_DISPLAY_AUTO 4       /* = PANEL_PATH_AUTO (drivers/panel_io.h): the build's default path */
 #define CFG_BT_VOLUME_UNSET 127
 
