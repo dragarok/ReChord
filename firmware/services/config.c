@@ -27,6 +27,7 @@ static const char *const k_cpu[] = { "auto", "max" };
 /* the panel's pixel path, drivers/panel_io.h PANEL_PATH_* (written only when not auto; auto = dma):
  * "gpio" (the slot of the old measurement option pio2) is the same as "pio", the GPIO bus */
 static const char *const k_display[] = { "pio", "vop", "dma", "gpio", "auto" };
+static const char *const k_hifi[] = { "auto", "off", "verify" };      /* AS_HIFI_* */
 
 static uint32_t s_hash, s_save_at;
 static int s_idle_only;              /* the save waiting is the volume's alone: not while playing */
@@ -52,6 +53,7 @@ void config_defaults(void)
     g_cfg.bt = 0;
     g_cfg.bt_volume = CFG_BT_VOLUME_UNSET;
     g_cfg.display = CFG_DISPLAY_AUTO;
+    g_cfg.hifi = 0;                          /* auto */
     g_cfg.theme = 0;                         /* Classic */
 }
 
@@ -113,6 +115,8 @@ static void set(const char *k, const char *v)
         g_cfg.theme = (uint8_t)i;
     else if (!strcmp(k, "display") && (i = pick(v, k_display, 5)) >= 0)
         g_cfg.display = (uint8_t)i;
+    else if (!strcmp(k, "hifi") && (i = pick(v, k_hifi, 3)) >= 0)
+        g_cfg.hifi = (uint8_t)i;
     else if (!strcmp(k, "usb_out") && (i = pick(v, k_off_on, 2)) >= 0)
         g_cfg.usb_out = (uint8_t)i;
     else if (!strcmp(k, "usb_out_ma") && (i = atoi(v)) >= 100 && i <= 500)
@@ -237,6 +241,13 @@ static int text_of(char *t, unsigned long cap)
         return n;
     if (g_cfg.display != CFG_DISPLAY_AUTO && g_cfg.display < 5u) {
         int d = snprintf(t + n, cap - (unsigned long)n, "display=%s\n", k_display[g_cfg.display]);
+
+        if (d < 0 || (unsigned long)(n + d) >= cap)
+            return n + d;
+        n += d;
+    }
+    if (g_cfg.hifi && g_cfg.hifi < 3u) {            /* (written only when not auto) */
+        int d = snprintf(t + n, cap - (unsigned long)n, "hifi=%s\n", k_hifi[g_cfg.hifi]);
 
         if (d < 0 || (unsigned long)(n + d) >= cap)
             return n + d;

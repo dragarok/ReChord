@@ -4763,8 +4763,25 @@ static drflac_bool32 drflac__decode_samples_with_residual__rice__neon(drflac_bs*
 }
 #endif
 
+#ifdef DRFLAC_RECHORD_LPC
+/*
+ReChord (firmware/coreb/b_flac.c): an LPC subframe's prediction done by the HIFI accelerator. lpc_buf
+returns a buffer for the subframe's warm-up samples and residuals, or NULL for dr_flac's own path;
+with a buffer, the residuals are decoded without the prediction (residual_only) and lpc_restore turns
+them into the samples.
+*/
+static drflac_int32* drflac_rechord_lpc_buf(drflac_uint32 blockSize, drflac_uint32 bitsPerSample, drflac_uint32 lpcOrder, drflac_uint32 lpcPrecision);
+static void drflac_rechord_lpc_restore(const drflac_int32* pResiduals, drflac_int32* pDecodedSamples, drflac_uint32 blockSize, drflac_uint32 bitsPerSample, drflac_uint32 lpcOrder, drflac_int32 lpcShift, drflac_uint32 lpcPrecision, const drflac_int32* coefficients);
+static drflac_bool32 drflac__rechord_residual_only;
+#endif
+
 static drflac_bool32 drflac__decode_samples_with_residual__rice(drflac_bs* bs, drflac_uint32 bitsPerSample, drflac_uint32 count, drflac_uint8 riceParam, drflac_uint32 lpcOrder, drflac_int32 lpcShift, drflac_uint32 lpcPrecision, const drflac_int32* coefficients, drflac_int32* pSamplesOut)
 {
+#ifdef DRFLAC_RECHORD_LPC
+    if (drflac__rechord_residual_only) {    /* ReChord: the residuals alone */
+        return drflac__decode_samples_with_residual__rice__scalar_zeroorder(bs, bitsPerSample, count, riceParam, lpcOrder, lpcShift, coefficients, pSamplesOut);
+    }
+#endif
 #if defined(DRFLAC_SUPPORT_SSE41)
     if (drflac__gIsSSE41Supported) {
         return drflac__decode_samples_with_residual__rice__sse41(bs, bitsPerSample, count, riceParam, lpcOrder, lpcShift, lpcPrecision, coefficients, pSamplesOut);
@@ -4820,6 +4837,11 @@ static drflac_bool32 drflac__decode_samples_with_residual__unencoded(drflac_bs* 
             pSamplesOut[i] = 0;
         }
 
+#ifdef DRFLAC_RECHORD_LPC
+        if (drflac__rechord_residual_only) {    /* ReChord: the residual alone */
+            continue;
+        }
+#endif
         if (drflac__use_64_bit_prediction(bitsPerSample, lpcOrder, lpcPrecision)) {
             pSamplesOut[i] += drflac__calculate_prediction_64(lpcOrder, lpcShift, coefficients, pSamplesOut + i);
         } else {
@@ -5129,6 +5151,24 @@ static drflac_bool32 drflac__decode_samples__lpc(drflac_bs* bs, drflac_uint32 bl
         }
     }
 
+#ifdef DRFLAC_RECHORD_LPC
+    {   /* ReChord: residuals into the hook's buffer, the samples from lpc_restore */
+        drflac_int32* pResiduals = drflac_rechord_lpc_buf(blockSize, bitsPerSample, lpcOrder, lpcPrecision);
+        drflac_bool32 ok;
+
+        if (pResiduals != NULL) {
+            DRFLAC_COPY_MEMORY(pResiduals, pDecodedSamples, lpcOrder * sizeof(drflac_int32));
+            drflac__rechord_residual_only = DRFLAC_TRUE;
+            ok = drflac__decode_samples_with_residual(bs, bitsPerSample, blockSize, lpcOrder, lpcShift, lpcPrecision, coefficients, pResiduals);
+            drflac__rechord_residual_only = DRFLAC_FALSE;
+            if (!ok) {
+                return DRFLAC_FALSE;
+            }
+            drflac_rechord_lpc_restore(pResiduals, pDecodedSamples, blockSize, bitsPerSample, lpcOrder, lpcShift, lpcPrecision, coefficients);
+            return DRFLAC_TRUE;
+        }
+    }
+#endif
     if (!drflac__decode_samples_with_residual(bs, bitsPerSample, blockSize, lpcOrder, lpcShift, lpcPrecision, coefficients, pDecodedSamples)) {
         return DRFLAC_FALSE;
     }

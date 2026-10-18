@@ -229,6 +229,15 @@ void b_abort(uint32_t code)
 
 void *b_alloc(size_t n)
 {
+    void *p = b_try_alloc(n);
+
+    if (!p)
+        b_abort(0xA110Cu);                       /* out of heap: never hand a decoder NULL */
+    return p;
+}
+
+void *b_try_alloc(size_t n)
+{
     uint8_t *p = _b_heap, *end = _b_heap + ((uint32_t)(_b_stack_limit - _b_heap) & ~7u);
     uint32_t need = ((uint32_t)n + 8u + 7u) & ~7u;
 
@@ -253,7 +262,7 @@ void *b_alloc(size_t n)
         }
         p += sz;
     }
-    b_abort(0xA110Cu);                           /* out of heap: never hand a decoder NULL */
+    return NULL;
 }
 
 void b_free(void *q)
@@ -390,6 +399,8 @@ static int discarding(void)
 
 static void track_close(void)
 {
+    if (s_dec->close)
+        s_dec->close();
     s_dec = NULL;
     discard_rest();
     AS->done_seq = b_trk.seq;

@@ -41,6 +41,8 @@ typedef struct {
     char bt_name[33];
     uint8_t display;             /* the panel's pixel path: CFG_DISPLAY_AUTO or a PANEL_PATH_* */
     uint8_t theme;               /* theme/theme.h built-in index (theme=<name>, Classic by default) */
+    uint8_t hifi;                /* hifi=auto|off|verify: core B's FLAC LPC on the HIFI accelerator
+                                  * (audio_shared.h AS_HIFI_*, docs/HIFI.md); written when not auto */
 } config_t;
 #define CFG_DISPLAY_AUTO 4       /* = PANEL_PATH_AUTO (drivers/panel_io.h): the build's default path */
 #define CFG_BT_VOLUME_UNSET 127
