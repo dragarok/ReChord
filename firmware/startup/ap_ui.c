@@ -138,6 +138,19 @@ static void update_progress(const char *what, uint32_t done, uint32_t total)
     display_flush_rows(8 + 2 * 14, 8 + 2 * 14 + 7);
 }
 
+/* The boot's slot check is silent; only a slot that needs rebuilding (an update cut short)
+ * gets a screen, at its first progress step. */
+static void repair_progress(const char *what, uint32_t done, uint32_t total)
+{
+    static int shown;
+
+    if (!shown) {
+        shown = 1;
+        screen("Repairing the firmware slots");
+    }
+    update_progress(what, done, total);
+}
+
 /* A screen that runs its own loop keeps what the main loop serves going: the music, the storage
  * queue and log, the BT module (audit bug 3: the cable question starved the input ring). */
 static int s_bt_ready;                    /* bt_app_init() ran (ask() runs at boot too) */
@@ -1029,11 +1042,15 @@ static void boot_key_sample(void)
     uint32_t t0 = time_ms(), up = 0, down = 0;
     int lo = 1023, hi = 0;
 
-    while (time_ms() - t0 < 400u) {              /* (the ADC's first readings, then 300 ms of one key) */
+    for (uint32_t idle = 0; time_ms() - t0 < 400u;) {   /* (the ADC's first readings, then 300 ms of one key) */
         int a = keys_adc();
 
         lo = a < lo ? a : lo;
         hi = a > hi ? a : hi;
+        /* nothing held: a finger on VOL+/VOL- at power-on reads low from the first sample, so
+         * 50 ms of an idle ladder ends the window (it held the first frame 400 ms on every boot) */
+        if (a > 600 && ++idle >= 5u && !up && !down)
+            break;
         up = a >= 70 && a <= 183 ? up + 1u : 0u;
         down = a >= 0 && a <= 69 ? down + 1u : 0u;
         if (up >= 30u || down >= 30u) {
@@ -1239,8 +1256,7 @@ void ap_ui_loop(void)
     if (s_user) {         /* a slot left invalid (an update cut short): copied from the good one */
         int r;
 
-        screen("Checking the firmware slots");
-        r = fw_update_repair(update_progress);
+        r = fw_update_repair(repair_progress);   /* silent unless a slot needs it (rare) */
         if (r)
             log_printf("fw: slot repair %d (%s)", r, r == 1 ? "slot 1 rebuilt from slot 2" :
                        r == 2 ? "slot 2 rebuilt from slot 1" : "failed");
@@ -1250,8 +1266,9 @@ void ap_ui_loop(void)
     bootcrumb(BC_RECOVERY);
     recovery_menu();      /* a fault last time, or VOL+ held: before anything else */
     bootcrumb(BC_UPDATE);
-    if (s_user)
-        update_prompt();  /* at boot too, as stock and RECHO check */
+    /* No update check at boot (the user, 2026-10-18: boot straight to where you were): an image
+     * on the disk is offered when a USB disk session ends, and in Settings > System > Firmware
+     * update. Recovery (VOL+ at power-on) still installs one. */
     bootcrumb(BC_PLAYER);
     player_init();       /* register wav/mp3/flac codecs (registry) */
     bootcrumb(BC_CONFIG);
@@ -1276,6 +1293,9 @@ void ap_ui_loop(void)
         player_resume(g_cfg.track) == 0 && player_play() == PLAYER_OK) {
         nav_push(&pg_np, 0);
         log_printf("ui: resumed %s", g_cfg.track);
+    } else if (s_user && g_cfg.resume == CFG_RESUME_FOLDER && g_cfg.browse[0] == '/' && g_cfg.browse[1]) {
+        nav_push(&pg_vols, 0);           /* straight into the folder you were in (it reopens there) */
+        log_printf("ui: resumed in %s", g_cfg.browse);
     }
     {   /* the USB block as the ROM left it, before the park (USB DAC audit D6, SoC report 6.1) */
         uint32_t r[10];

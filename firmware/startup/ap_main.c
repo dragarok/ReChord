@@ -33,10 +33,6 @@ static unsigned long log_clock(void) { return time_ms(); }
 
 uint32_t Main(void)
 {
-    uint16_t bg = THEME_COLOR_BG;
-    uint16_t fg = THEME_COLOR_FG;
-    const theme_t *th = theme_get();
-
     int rc;
 
     bootcrumb_init();         /* the boot trail on the eMMC, before anything that could stop us */
@@ -57,21 +53,8 @@ uint32_t Main(void)
     display_set_logger(log_printf);   /* "ui: frame ..." when slow, "ui: key->px ..." */
     display_init();
     bootcrumb(BC_SPLASH);
-
-    /* Fill the whole screen (inclusive coordinates per display.h). */
-    display_fill_rect(0, 0, DISPLAY_W - 1, DISPLAY_H - 1, bg);
-
-    /* Accent band across the top, then the boot text line on it. */
-    display_fill_rect(0, 0, DISPLAY_W - 1, THEME_TITLE_H - 1, THEME_COLOR_ACCENT);
-    display_draw_text(THEME_PAD, THEME_TITLE_TEXT_Y,
-                      "ReChord AP alive", bg, THEME_COLOR_ACCENT);
-
-    /* Second line: active theme name (proves the theme module is live). */
-    display_draw_text(THEME_PAD, THEME_TITLE_H + THEME_PAD + THEME_TEXT_YOFF,
-                      th->name, fg, bg);
-
-    /* Make both lines visible on the panel. */
-    display_flush_rows(0, THEME_TITLE_H + THEME_PAD + THEME_LINE_H);
+    /* No splash: the panel stays as display_init() cleared it until the first real screen
+     * (the user, 2026-10-18: no boot animation, straight to where you were). */
     bootcrumb(BC_UI);
 
 #ifdef AP_TRIAL
