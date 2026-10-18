@@ -29,7 +29,7 @@
 void ap_later(void (*fn)(void));
 int ap_cable(void);
 void ap_usb_disk(void), ap_usb_dac(void), ap_dac_test(void), ap_usb_console(void), ap_usb_probe(void);
-void ap_usb_detect(void), ap_bt_listen(void), ap_update(void), ap_power_off(void), ap_screen(int on);
+void ap_usb_detect(void), ap_bt_listen(void), ap_te_probe(void), ap_update(void), ap_power_off(void), ap_screen(int on);
 void ap_cable_choice(int c);
 const char *ap_keys_text(void);
 int ap_diag_count(void);
@@ -423,7 +423,7 @@ static void vols_enter(int first)
 
 /* PLAY on a track or a folder: Now Playing at once, named from the row (DESIGN 4.1: within 100 ms);
  * the queue and the decoder start after that frame (nav_after()), as tags and format fill in. */
-static struct { uint8_t kind; uint32_t old_seq; char path[300]; } s_pend;
+static struct { uint8_t kind, later; uint32_t old_seq; char path[300]; } s_pend;
 enum { PEND_FILE = 1, PEND_TREE };
 
 static void np_pending(const char *name);
@@ -435,6 +435,7 @@ static void play_later(int kind, const char *path, const char *name)
     audio_status(&st);
     snprintf(s_pend.path, sizeof s_pend.path, "%s", path);
     s_pend.kind = (uint8_t)kind;
+    s_pend.later = 0;
     s_pend.old_seq = st.seq;
     if (nav_find(&pg_np) < 0)
         nav_push(&pg_np, 0);
@@ -457,6 +458,13 @@ void nav_after(void)
 
     if (!k)
         return;
+    if (!s_pend.later) {                      /* the pass that put Now Playing on the panel ends there; the
+                                               * track starts in the next: frame and start in one pass were
+                                               * 13 + 90 ms on the device ("worst pass 103 ms on player: draw
+                                               * 13, start 90", round 1), 8 + 47 in QEMU on the DMA path */
+        s_pend.later = 1;
+        return;
+    }
     s_pend.kind = 0;
     rc = k == PEND_FILE ? player_open(s_pend.path) : player_open_tree(s_pend.path);
     if (rc == PLAYER_OK)
@@ -1656,11 +1664,12 @@ static const set_t g_dev[] = {
     { ICON_BT, S_DO, 0, 0, "BT listen (test)", 0, 0, ap_bt_listen },
     { ICON_CHIP, S_INFO, 0, 0, "Keys" },
     { ICON_INFO, S_CYCLE, 2, 0, "Debug strip", &g_cfg.strip, n_offon },
+    { ICON_SUN, S_DO, 0, 0, "Panel TE (test)", 0, 0, ap_te_probe },
 };
 static const struct { const char *title; uint8_t icon, n; const set_t *rows; } k_groups[] = {
     { "Settings", ICON_GEAR, 6, g_root }, { "Playback", ICON_PLAY, 3, g_playback },
     { "Display", ICON_SUN, 3, g_display }, { "Power", ICON_POWER, 3, g_power },
-    { "USB", ICON_USB, 6, g_usb }, { "System", ICON_INFO, 4, g_system }, { "Developer", ICON_BUG, 8, g_dev },
+    { "USB", ICON_USB, 6, g_usb }, { "System", ICON_INFO, 4, g_system }, { "Developer", ICON_BUG, 9, g_dev },
 };
 #define GRP (k_groups[nav_arg() < 7 ? nav_arg() : 0])
 

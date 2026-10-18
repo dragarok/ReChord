@@ -64,7 +64,11 @@ typedef struct {
     uint8_t steps;      /* REPEAT: rows or dB to move now (>= 1) */
     uint16_t repeat;    /* REPEAT: steps since the press, these included */
     uint16_t held_ms;   /* how long the key had been down (65535 at most) */
-    uint32_t t_ms;      /* when it happened: the 10 ms sample that showed it */
+    uint16_t in_ms;     /* the finger's edge to this event: the press to a DOWN (stability, sweep), the
+                         * release (t_ms) to a TAP or a RELEASE (the ladder back at idle, then stable);
+                         * 0 when nothing waited (key->px's "in", drivers/display.h) */
+    uint32_t t_ms;      /* when it happened: the 10 ms sample that showed it; a TAP or a RELEASE: the
+                         * release edge */
 } input_event_t;
 
 /* ---- the gesture API (the new UI) ---- */

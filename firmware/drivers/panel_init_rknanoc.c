@@ -63,6 +63,15 @@ typedef struct {
 /* Terminator row: cmd 0x00 is DCS NOP, a safe no-op if it ever leaked. */
 #define PANEL_INIT_END 0x00
 
+/* The image carries only the variant it sends (420 bytes of table less: core A's code space is
+ * full); the host tests keep both. */
+#if PANEL_INIT_VARIANT == 0 || !defined(RECHORD_AP_BUILD)
+#define PANEL_INIT_HAS_A 1
+#else
+#define PANEL_INIT_HAS_A 0
+#endif
+
+#if PANEL_INIT_HAS_A
 /*
  * Variant A -- sent by the reference when the probed ID byte (bits
  * 16..23 of the assembled 4-byte ID) is 0xE8.
@@ -110,6 +119,7 @@ static const panel_init_step_t panel_init_variant_a[] = {
     { 0x2C, 0, { 0 },                                        0 }, /* RAMWR (empty) */
     { PANEL_INIT_END, 0, { 0 }, 0 }
 };
+#endif
 
 /*
  * Variant B -- the reference's fallback for every other panel ID.
@@ -181,10 +191,12 @@ static void panel_init_run_table(const panel_init_step_t *table)
 
 int panel_init_run_variant(int variant)
 {
+#if PANEL_INIT_HAS_A
     if (variant == 0) {
         panel_init_run_table(panel_init_variant_a);
         return 0;
     }
+#endif
     if (variant == 1) {
         panel_init_run_table(panel_init_variant_b);
         return 0;

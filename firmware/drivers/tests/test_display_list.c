@@ -306,25 +306,26 @@ static void test_frame_log(void)
     CHECK(s_lines == 0);                                      /* 5 ms: not slow */
     CHECK(display_stats()->last_px == 64u * 20u && display_stats()->last_rows == 20u);
 
-    display_mark_input(panel_io_now_ms());
+    display_mark_input(panel_io_now_ms() - 50u, 30u);       /* released 50 ms ago, the TAP 30 ms later */
+    panel_io_sim_advance_us(6000);                            /* the rest of the pass */
     display_frame_begin();
     panel_io_sim_advance_us(40000);
     display_flush_rows(0, 21);
     display_flush_rect(0, 100, 99, 109);
     display_frame_end();
-    CHECK(s_lines == 2);                                      /* the frame, then key->px */
-    CHECK(strcmp(s_line, "ui: key->px 40 ms px 8040") == 0);
+    CHECK(s_lines == 2);                                      /* the frame, then key->px with its parts */
+    CHECK(strcmp(s_line, "ui: key->px 96 ms px 8040: in 30, loop 20, wait 6, render 0 us, push 0 us") == 0);
     CHECK(display_stats()->last_px == 320u * 22u + 100u * 10u);
-    CHECK(display_stats()->key_last_ms == 40u);
+    CHECK(display_stats()->key_last_ms == 96u);
 
     s_lines = 0;                                              /* a frame that pushed nothing */
-    display_mark_input(panel_io_now_ms());
+    display_mark_input(panel_io_now_ms(), 0);
     display_frame_begin();
     display_frame_end();
     CHECK(s_lines == 0);
     panel_io_sim_advance_us(1000);
     display_flush_rows(0, 0);                                 /* a flush outside a frame */
-    CHECK(s_lines == 1 && strcmp(s_line, "ui: key->px 1 ms px 320") == 0);
+    CHECK(s_lines == 1 && strcmp(s_line, "ui: key->px 1 ms px 320: in 0, loop 0, wait 1, render 0 us, push 0 us") == 0);
 
     s_lines = 0;                     /* the clock steps back 7 ms mid-frame (device 2026-10-18, the boot's
                                       * splash: "ui: frame 4294960 ms rows 33 px 10560"): no slow frame */

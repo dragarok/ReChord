@@ -125,6 +125,7 @@ SECTIONS
             *(.ovl.dev.*)
             *usb_cdc_rknanoc.o(.text* .rodata*)
             *bt_jieli.o(.text.bt_listen .rodata.bt_listen.*)
+            *panel_io_rknanoc.o(.text.panel_te_probe .text.te_watch .rodata.panel_te_probe.*)
             /* (.rodata.usb_console_run.str1.1 and .rodata.usb_probe_menu.str1.1 stay resident:
                strings the compiler shares with resident tables in ap_ui.c) */
             *ap_ui.o(.text.dac_test_run* .rodata.dac_test_run.* .text.tone_burst* .rodata.sine64*
@@ -132,7 +133,8 @@ SECTIONS
                      .text.usb_probe_menu* .text.usb_probe_screen*
                      .rodata.usb_probe_screen.* .text.usb_detect_test* .rodata.usb_detect_test.*
                      .text.detect_wait* .rodata.detect_wait.* .text.bt_listen_test*
-                     .rodata.bt_listen_test.* .text.listen_save* .rodata.listen_save.*)
+                     .rodata.bt_listen_test.* .text.listen_save* .rodata.listen_save.*
+                     .text.te_probe_test*)
             . = ALIGN(4);
         }
     }

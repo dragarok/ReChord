@@ -37,8 +37,8 @@ published yet.
 | USB-C earphones: the player as USB host to a UAC1/UAC2 device | done | QEMU |
 | Bluetooth (JieLi module, off by default): scan, connect, reconnect, audio routing, earphone keys, settings from earphone key sequences, USB DAC to Bluetooth earphones | done | device (2026-10-17), QEMU; see [BT_DEVICE_NOTES.md](BT_DEVICE_NOTES.md) |
 | Updater: power-cut-safe, both slots, slot repair, ROM USB loader fallback | done | QEMU, maskrom flashing on the device |
-| UI: no key bar, a status header (play state, volume, Bluetooth icon, battery), 7-row lists, Now Playing on the full height, options, queue, track info, settings, themes, questions that keep the music going, toasts, a hold line; Noto Sans in five sizes with Devanagari; key gestures in milliseconds (tap, hold, 2x, 3x, holds after taps) | device (2026-10-18): key to screen 8 ms median, a screen change ~95 ms on the GPIO bus |
-| Display: display list in 16-row bands, dirty rectangles with column windows, GPIO writer; VOP + DMA path behind a trial guard (display=dma) | GPIO on the device; DMA in QEMU only |
+| UI: no key bar, a status header (play state, volume, Bluetooth icon, battery), 7-row lists, Now Playing on the full height, options, queue, track info, settings, themes, questions that keep the music going, toasts, a hold line; Noto Sans in five sizes with Devanagari; key gestures in milliseconds (tap, hold, 2x, 3x, holds after taps) | device (2026-10-18): a full screen 13 ms after its key is handled on DMA (19-21 on GPIO); a tap's release takes ~50 ms to confirm |
+| Display: display list in 16-row bands, dirty rectangles with column windows; VOP + DMA path by default behind a trial guard (stock's bus timing), GPIO writer as the fallback (display=gpio) | device (DMA trial passed every boot, 2026-10-18), QEMU |
 | No stalls: storage writes queued behind the audio, settings saved at pause, core B at full speed on resume | device |
 
 ## The recovery path comes first
@@ -60,9 +60,13 @@ Nothing in ReChord may change what the ROM sees on that path:
 ## Next
 
 ### 1. Display speed and seek
-- **The DMA panel path on the device** (display=dma, behind its trial guard): a full screen in ~8 ms
-  instead of ~90 ms on the GPIO bus, and no more brief tearing during screen changes.
-- **The first Now Playing draw** at a track start took 401 ms on the device: find and remove it.
+- **Tearing:** a screen change shows for one refresh as part old, part new, split on a slant: the
+  writes cross the panel's scan (MADCTL 0x60) and nothing syncs them to it. The bus now runs at
+  stock's timing (a shorter slant); a tear-free change needs the panel's TE line (Developer >
+  Panel TE (test) asks the device whether it is wired) and writes in the scan's order.
+- **Tap latency:** a release is confirmed ~50 ms after the finger lets go (the voltage's rise,
+  then 20 ms of stability and two samples); stock takes it at the first idle reading. The gesture
+  lines' rise= and blips= say on the device whether that is safe.
 - **Seek:** VOL+ or VOL- twice, then held, seeks forward or back in the track (codec-side seek on
   core B for each format).
 

@@ -201,7 +201,18 @@ static uint64_t s_key_cand_t;
  * until idle, the release's rising voltage cannot pass through a higher band). Which key it is
  * stays the stable band's business above. 0 = none. */
 #define KEY_RISE 64
-static uint32_t s_press_ms, s_release_ms;
+static uint32_t s_press_ms, s_release_ms, s_idle_ms;
+/* For the next device log (keys_release_stats, the gesture lines' rise= and blips=): how long the
+ * voltage takes from the release edge to the first idle reading, and how often a press read idle
+ * and went back down within 30 ms -- the two things that decide whether a release could be taken
+ * at its first idle reading, as stock's KeyScan does (05_keys_adc.md 1.3: SHORT_UP on the first
+ * scan that decodes no key), instead of after the 20 ms of stability below and input.c's 2 samples. */
+static uint16_t s_rise_ms, s_blips;
+
+uint32_t keys_release_stats(void)
+{
+    return s_rise_ms | (uint32_t)s_blips << 16;
+}
 
 static void key_edges(int v)
 {
@@ -211,8 +222,14 @@ static void key_edges(int v)
     if (v > 1000) {
         if (s_press_ms && !s_release_ms)
             s_release_ms = now;
+        if (s_press_ms) {
+            s_rise_ms = (uint16_t)(now - s_release_ms);
+            s_idle_ms = now;
+        }
         s_press_ms = 0;
     } else if (!s_press_ms) {
+        if (s_idle_ms && now - s_idle_ms <= 30u)
+            s_blips++;                          /* (idle for a sample or two: no release after all) */
         s_press_ms = now;
         s_release_ms = 0;
     } else if (s_key_min <= 1000 && v > s_key_min + KEY_RISE) {
@@ -453,10 +470,8 @@ void panel_io_delay_ms(uint16_t ms)
  * GPIO (bit-bang) pixel writer: every byte is the extracted pattern -- the whole GPIO0 DR from the
  * shadow with the byte in 16..23, D/C high, WR low, written twice, then once more with WR high
  * (the panel latches on the rising edge) -- but with the shadow word, the DR address and the
- * WR bit in registers, 4 pixels per loop, no call per byte. s_wr_stores = 2 drops the repeated
- * WR-low store (2 stores a byte: ~42 ns low, ~42 ns high at pclk 48 MHz, inside the ST7789's 15 /
- * 15 / 66 ns on paper) -- a measurement option (display=pio2), never the default: the repeated
- * store is what the reference does on this board. */
+ * WR bit in registers, 4 pixels per loop, no call per byte. (pio2, a 2-store variant, was a
+ * measurement option that never ran on the device: gone; its slot is display=gpio, the same as pio.) */
 
 #if defined(__GNUC__) && !defined(__clang__)
 #define HOT __attribute__((optimize("O2")))
@@ -464,18 +479,18 @@ void panel_io_delay_ms(uint16_t ms)
 #define HOT
 #endif
 
-static int s_wr_stores = 3;
-
-/* The path display=auto takes: the GPIO bus, as stock drives it, until the VOP + DMA path has run
- * on the 512 MB unit (it is proven in QEMU only; a wrong VOP timing would show a garbled screen,
- * which no trial marker catches). display=dma opts in, behind the trial guard. */
+/* The path display=auto takes: the VOP + DMA, behind the trial guard (panel_io_select). It ran on the
+ * 512 MB unit on every boot of round 1 (log/ECHOLOG_20261018_round1.txt: "0.124 display: dma trial
+ * (marker set ...)" then "5.129 display: the dma path ran 5 s (27 bands): trial marker cleared", three
+ * boots, no fallback line, the screens right) and a full screen took 13-14 ms there against 19-22 on
+ * the GPIO bus ("key->px 14 ms px 54400" after a hold, 19-22 on GPIO: docs/MERGE_NOTES_display.md).
+ * display=gpio (or pio) stays the escape. */
 #ifndef PANEL_PATH_DEFAULT
-#define PANEL_PATH_DEFAULT PANEL_PATH_PIO
+#define PANEL_PATH_DEFAULT PANEL_PATH_DMA
 #endif
 #define PANEL_ROW_OFFSET_PHYS PANEL_ROW_OFFSET
 
 #define BYTE3(dr, lo, b) do { uint32_t w_ = (lo) | (b); *(dr) = w_; *(dr) = w_; *(dr) = w_ | PIN_WR; } while (0)
-#define BYTE2(dr, lo, b) do { uint32_t w_ = (lo) | (b); *(dr) = w_; *(dr) = w_ | PIN_WR; } while (0)
 /* a pixel's bytes in place for the DR: high byte (bits 15..8 -> 23..16), then low (7..0 -> 23..16) */
 #define HI(p) (((uint32_t)(p) & 0xFF00u) << 8)
 #define LO(p) (((uint32_t)(p) & 0x00FFu) << 16)
@@ -496,25 +511,6 @@ static HOT void gpio_pixels3(const uint16_t *src, int n)
     for (; n > 0; n--, src++) {
         BYTE3(dr, lo, HI(*src));
         BYTE3(dr, lo, LO(*src));
-    }
-}
-
-static HOT void gpio_pixels2(const uint16_t *src, int n)
-{
-    volatile uint32_t *dr = &GPIO0->dr;
-    uint32_t lo = (bus_ctl | PIN_DC) & ~PIN_WR;
-
-    for (; n >= 4; n -= 4, src += 4) {
-        uint32_t a = ((const uint32_t *)(const void *)src)[0], b = ((const uint32_t *)(const void *)src)[1];
-
-        BYTE2(dr, lo, HI(a)); BYTE2(dr, lo, LO(a));
-        BYTE2(dr, lo, HI(a >> 16)); BYTE2(dr, lo, LO(a >> 16));
-        BYTE2(dr, lo, HI(b)); BYTE2(dr, lo, LO(b));
-        BYTE2(dr, lo, HI(b >> 16)); BYTE2(dr, lo, LO(b >> 16));
-    }
-    for (; n > 0; n--, src++) {
-        BYTE2(dr, lo, HI(*src));
-        BYTE2(dr, lo, LO(*src));
     }
 }
 
@@ -540,23 +536,13 @@ static void gpio_blit(int x0, int y0, int x1, int y1, const uint16_t *src, int p
 
     gpio_window(x0, y0, x1, y1);
     for (int y = y0; y <= y1; y++, src += pitch) {
-        if ((uintptr_t)src & 2u) {               /* (the word loads want a word-aligned row) */
-            if (s_wr_stores == 2) {
-                BYTE2(&GPIO0->dr, (bus_ctl | PIN_DC) & ~PIN_WR, HI(*src));
-                BYTE2(&GPIO0->dr, (bus_ctl | PIN_DC) & ~PIN_WR, LO(*src));
-            } else {
-                BYTE3(&GPIO0->dr, (bus_ctl | PIN_DC) & ~PIN_WR, HI(*src));
-                BYTE3(&GPIO0->dr, (bus_ctl | PIN_DC) & ~PIN_WR, LO(*src));
-            }
-            if (s_wr_stores == 2)
-                gpio_pixels2(src + 1, w - 1);
-            else
-                gpio_pixels3(src + 1, w - 1);
-        } else if (s_wr_stores == 2) {
-            gpio_pixels2(src, w);
-        } else {
-            gpio_pixels3(src, w);
+        int a = ((uintptr_t)src & 2u) != 0;      /* (the word loads want a word-aligned row) */
+
+        if (a) {
+            BYTE3(&GPIO0->dr, (bus_ctl | PIN_DC) & ~PIN_WR, HI(*src));
+            BYTE3(&GPIO0->dr, (bus_ctl | PIN_DC) & ~PIN_WR, LO(*src));
         }
+        gpio_pixels3(src + a, w - a);
     }
 }
 
@@ -621,7 +607,7 @@ static int s_dma_y0, s_dma_y1, s_dma_x0, s_dma_x1;
 static const uint16_t *s_dma_src;
 static uint32_t s_trial_ms, s_trial_frames;
 static int s_vop_stuck;                   /* a wait for STATUS idle timed out (cleared by to_gpio) */
-static uint32_t s_cnt[4];
+static uint32_t s_cnt[4], s_band_b;      /* s_cnt[3]: the biggest band waited for to its end, us; its bytes */
 
 static uint32_t mark_get(void)
 {
@@ -665,21 +651,29 @@ static int vop_idle(void)
     return -1;
 }
 
-/* The bus timing for the core clock (RECHO 0.10, D.2): a write pulse >= 20 ns, a cycle >= 70 ns
- * (ST7789: 15 ns, 66 ns): 0x1044 at 96 MHz, 0x1022 at 48 MHz. */
+/* The bus timing for the core clock. From 96 MHz up, stock's own (Freq_VopTiming_Update 0x0305449C,
+ * work/stock_boot/06_clock_stability.md 1.1 step 10: t = hclk / 8 MHz, csrw = t/8, rwpw = t/6,
+ * rwcs = t/8): 0x1041 at 96 MHz -- the value stock drives this very panel with for as long as its UI
+ * runs ("96 boot / UI" point there) -- 0x2062 at 144, 0x3083 at 192..224. Below 96 MHz, where stock
+ * never draws, RECHO 0.10's (D.2: a write pulse >= 20 ns, a cycle >= 70 ns): 0x1022 at 48 MHz.
+ * RECHO's 0x1044 at 96 MHz, what round 1 ran, takes 3 cycles a byte more than stock's. */
 static void vop_timing(void)
 {
-    uint32_t hz = clock_core_hz(), mhz = hz / 1000000u, rwpw, t70, rwcs;
+    uint32_t hz = clock_core_hz(), mhz = hz / 1000000u, t = hz / 8000000u, v;
 
     if (hz == s_vop_hz)
         return;
-    rwpw = mhz ? (mhz * 20u + 999u) / 1000u : 1u;
-    t70 = (mhz * 70u + 999u) / 1000u;
-    rwcs = t70 > rwpw + 2u ? t70 - 1u - rwpw : 1u;
+    if (mhz >= 96u) {
+        v = (t / 8u) << 12 | (t / 6u) << 5 | t / 8u;
+    } else {
+        uint32_t rwpw = mhz ? (mhz * 20u + 999u) / 1000u : 1u, t70 = (mhz * 70u + 999u) / 1000u;
+
+        v = 0x1000u | rwpw << 5 | (t70 > rwpw + 2u ? t70 - 1u - rwpw : 1u);
+    }
     if (vop_idle())
         return;                                      /* (never while bytes go out) */
     delay_us(1);
-    VOP_R(VOP_TIMING) = 0x1000u | rwpw << 5 | rwcs;
+    VOP_R(VOP_TIMING) = v;
     s_vop_hz = hz;
 }
 
@@ -831,11 +825,12 @@ static void dma_abort(void)
  * finish moves the path to the CPU-fed VOP, as RECHO does). */
 static void dma_wait(void)
 {
-    uint32_t us;
+    uint32_t us, spun = 0, b;
 
     if (!s_dma_busy)
         return;
     while (!(DMAC_R(DMA_RAW_TFR) & (1u << DMA_CH))) {
+        spun = 1;
         if ((uint32_t)time_us() - s_dma_t0 > DMA_TIMEOUT_US) {
             dma_abort();
             s_cnt[1]++;
@@ -854,8 +849,11 @@ static void dma_wait(void)
     s_dma_busy = 0;
     s_dma_done_us = us ? us : 1u;
     s_cnt[0]++;
-    if (us - s_dma_t0 > s_cnt[3])
+    b = (uint32_t)(s_dma_x1 - s_dma_x0 + 1) * (uint32_t)(s_dma_y1 - s_dma_y0 + 1) * 2u;
+    if (spun && b >= s_band_b) {                     /* (waited to its end: the bus's own time) */
+        s_band_b = b;
         s_cnt[3] = us - s_dma_t0;
+    }
 }
 
 /* Back to the GPIO bus, for the rest of this power cycle (a fault: the VOP misbehaved). */
@@ -915,7 +913,7 @@ void panel_io_sync(void)
 
 const char *panel_io_path(void)
 {
-    return s_path == PANEL_PATH_DMA ? "dma" : s_path == PANEL_PATH_VOP ? "vop" : s_wr_stores == 2 ? "pio2" : "pio";
+    return s_path == PANEL_PATH_DMA ? "dma" : s_path == PANEL_PATH_VOP ? "vop" : "pio";
 }
 
 const uint32_t *panel_io_counters(void)
@@ -933,7 +931,6 @@ int panel_io_select(int path)
     if (path == PANEL_PATH_PIO || path == PANEL_PATH_PIO2) {
         if (s_path != PANEL_PATH_PIO)
             to_gpio("is not wanted", 0);            /* (latches: a switch back needs a power cycle) */
-        s_wr_stores = path == PANEL_PATH_PIO2 ? 2 : 3;
         return s_path;
     }
     if (s_path != PANEL_PATH_PIO) {                  /* VOP <-> DMA: no new trial */
@@ -976,9 +973,58 @@ void panel_io_poll(void)
             mark_set(0);
         if (bootcrumb_step() == BC_DISPLAY_TRIAL)
             bootcrumb(BC_LOOP);
-        log_printf("display: the %s path ran %u s (%u bands): trial marker cleared", panel_io_path(),
-                   (unsigned)(TRIAL_MS / 1000u), (unsigned)s_trial_frames);
+        log_printf("display: the %s path ran %u s (%u bands; %u B in %u us, TIMING %x at %u MHz): trial marker "
+                   "cleared", panel_io_path(), (unsigned)(TRIAL_MS / 1000u), (unsigned)s_trial_frames,
+                   (unsigned)s_band_b, (unsigned)s_cnt[3], (unsigned)VOP_R(VOP_TIMING), (unsigned)(s_vop_hz / 1000000u));
     }
+}
+
+/* ---- [ours] Developer > Panel TE (test) -----------------------------------------------------------
+ * Is the panel's tearing-effect output wired to a SoC pin? Nothing says so: stock never turns it on
+ * (no TEON 0x35 among the LCD overlay's commands, seg04 0x03079444..0x0307A004, both init variants
+ * included; its display code reads no pin but the ID probe's data lanes, GPIO0.12 and the GPIO2.9
+ * strap: work/stock_boot/02_display.md 2-4), the VOP MCU has no TE input (SDK vop.h: interrupts
+ * FRAME_DONE, FIFO_EMPTY, FIFO_FULL) and the SDK board's LCD pins are D0-7, WRN, RS, CSN only
+ * (app_main.c). So, for the next device log: every GPIO input (DDR 0) of the three ports watched
+ * TE_MS with the panel's TE off, as it always is, then TE_MS with TEON (0x35, mode 0: V-blank),
+ * then TEOFF (0x34). A pin that changes only with TE on, about twice a frame (the panel's ~60 Hz,
+ * FRCTRL2 0x0F), is TE. Pins are only read; the panel's TE pin drives its line on or off. */
+#define TE_MS 100u
+#define GPIO1 ((gpio_regs_t *)0x40170000u)     /* (SDK hw_memap.h) */
+
+static uint32_t te_watch(uint32_t *chg)
+{
+    gpio_regs_t *const port[3] = { GPIO0, GPIO1, GPIO2 };
+    uint32_t last[3], n = 0, t0 = time_ms();
+
+    watchdog_feed();
+    for (unsigned k = 0; k < 3u; k++)
+        last[k] = port[k]->ext_porta;
+    while (time_ms() - t0 < TE_MS)
+        for (unsigned k = 0; k < 3u; k++) {
+            uint32_t v = port[k]->ext_porta, d = (v ^ last[k]) & ~port[k]->ddr;
+
+            if (d) {
+                chg[k] |= d;
+                n++;
+            }
+            last[k] = v;
+        }
+    return n;
+}
+
+void panel_te_probe(void)
+{
+    uint32_t c[6] = { 0 }, n0, n1;
+
+    n0 = te_watch(c);
+    panel_io_send_cmd(0x35);
+    panel_io_send_data(0x00);
+    n1 = te_watch(c + 3);
+    panel_io_send_cmd(0x34);
+    log_printf("display: TE probe: inputs changing with TE off %08x %08x %08x (%u changes), on %08x %08x %08x (%u)",
+               (unsigned)c[0], (unsigned)c[1], (unsigned)c[2], (unsigned)n0, (unsigned)c[3], (unsigned)c[4],
+               (unsigned)c[5], (unsigned)n1);
 }
 
 uint32_t panel_io_now_us(void)

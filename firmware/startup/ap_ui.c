@@ -183,7 +183,7 @@ static int ask(int any_key)
         while (input_poll(&ev) > 0) {
             static const char *const k_names[] = { "none", "up", "down", "select", "back", "power", "menu", "chord" };
 
-            display_mark_input(time_ms());   /* key->px: logged when the answer is on the panel */
+            display_mark_input(time_ms(), 0);   /* key->px: logged when the answer is on the panel */
             log_printf("ui: key %s%s on %s", ev.type >= 0 && ev.type < 8 ? k_names[ev.type] : "?",
                        ev.adc_value == INPUT_ADC_LONG ? " (hold)" : ev.adc_value == INPUT_ADC_REPEAT ? " (repeat)" : "",
                        nav_top() ? nav_top()->name : "-");
@@ -1242,8 +1242,9 @@ void ap_later(void (*fn)(void)) { s_later = fn; }
 int ap_cable(void) { return usb_cable() && !usb_out_active(); }
 int ap_power_ok(void) { return s_power_press_ok; }
 void ap_usb_disk(void) { usb_storage_run(); }
-/* ap_usb_dac, ap_dac_test, ap_usb_console, ap_usb_probe, ap_usb_detect, ap_bt_listen: the gates of
- * the overlays that hold them (startup/ap_ovl.c) */
+/* ap_usb_dac, ap_dac_test, ap_usb_console, ap_usb_probe, ap_usb_detect, ap_bt_listen, ap_te_probe:
+ * the gates of the overlays that hold them (startup/ap_ovl.c) */
+void te_probe_test(void) { panel_te_probe(); log_flush("te"); }   /* Developer > Panel TE (test): the log */
 void ap_power_off(void) { power_off(NULL); }
 
 void ap_update(void)

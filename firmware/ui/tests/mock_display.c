@@ -125,7 +125,7 @@ void display_flush_rows(int y0, int y1)
 
 void display_frame_begin(void) {}
 void display_frame_end(void) {}
-void display_mark_input(uint32_t t_ms) { (void)t_ms; }
+void display_mark_input(uint32_t t_ms, uint32_t in_ms) { (void)t_ms; (void)in_ms; }
 
 void display_clear(uint16_t rgb565)
 {

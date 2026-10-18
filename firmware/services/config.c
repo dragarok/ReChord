@@ -24,8 +24,9 @@ static const char *const k_off_on[] = { "off", "on" };
 static const char *const k_dac_charge[] = { "off", "on", "power" };   /* CFG_DAC_* */
 static const char *const k_usb_vbus[] = { "port", "gpio2.1" };       /* USB_OUT_SUPPLY_* */
 static const char *const k_cpu[] = { "auto", "max" };
-/* the panel's pixel path, drivers/panel_io.h PANEL_PATH_* (written only when not auto) */
-static const char *const k_display[] = { "pio", "vop", "dma", "pio2", "auto" };
+/* the panel's pixel path, drivers/panel_io.h PANEL_PATH_* (written only when not auto; auto = dma):
+ * "gpio" (the slot of the old measurement option pio2) is the same as "pio", the GPIO bus */
+static const char *const k_display[] = { "pio", "vop", "dma", "gpio", "auto" };
 
 static uint32_t s_hash, s_save_at;
 static int s_idle_only;              /* the save waiting is the volume's alone: not while playing */

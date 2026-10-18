@@ -87,7 +87,9 @@ firmware of both. They're documented in [docs/BOARD_DIFF_512M.md](docs/BOARD_DIF
 selected at build time (`BOARD=512m | 8g`). The 8 GB build has not been tested on hardware.
 
 **Next:**
-- make the DMA display path the default and find why a full screen still takes ~75 ms on the device
+- a key's way to the screen, measured in parts on the device (key->px: in, loop, wait, render,
+  push): a full screen is 13 ms on DMA; most of the ~70 ms after a tap is the release's
+  confirmation (~50 ms), not the display
 - boot: the first folder listing (~0.5 s) and the USB wake (~0.9 s)
 - a library index
 - EQ and ReplayGain on core B
@@ -139,7 +141,8 @@ On a filesystem with coarse timestamps (exFAT), build from clean: `rm -rf build/
 - **The display:**
   - a display list rendered in 16-row bands;
   - dirty rectangles pushed through column windows;
-  - a GPIO bus writer by default, and a VOP + DMA path behind a trial guard.
+  - the VOP + DMA path by default, behind a trial guard, with stock's bus timing; the GPIO bus
+    writer as the fallback and the `display=gpio` escape.
 - **The mask ROM** is the fixed boot ROM. It isn't replaced, and nothing writes what it reads at
   reset.
 
