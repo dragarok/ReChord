@@ -113,6 +113,7 @@ int player_play(void)
 }
 
 int player_mode(void) { return queue_mode(); }
+const char *player_source(void) { return s_src; }
 
 /* Next play mode; the tracks already handed to core B still play first. */
 int player_cycle_mode(void)
@@ -230,6 +231,7 @@ int player_get_track(track_info_t *out)
     if (st.seq && g_cfg.tags && s_tags.title[0]) {
         strncpy(out->title, s_tags.title, sizeof out->title - 1);
         strncpy(out->artist, s_tags.artist, sizeof out->artist - 1);
+        strncpy(out->album, s_tags.album, sizeof out->album - 1);
         out->track_no = s_tags.track;
     } else {
         strncpy(out->title, st.seq ? st.track.name : s_name, sizeof out->title - 1);

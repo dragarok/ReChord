@@ -12,12 +12,6 @@
  * ((r >> 3) << 11 | (g >> 2) << 5 | b >> 3). tests/ui_tokens_check.py there
  * checks every one against the mockups.
  *
- * One deliberate difference: Classic's `surface` stays 262832, the colour the
- * current UI paints its selected row and title bar with (ui/theme.h), so the
- * existing screens and their goldens (tests/cfw/ref/m0_internal.sha256) are
- * unchanged. The spec's 1E2029 (0x1905) replaces it with the new list template,
- * which selects rows with sel_bg.
- *
  *   Classic  — dark slate, the default.
  *   Paper    — warm light/sepia for daylight (no pure white/black pair).
  *   Night    — very dim, for bedside use.
@@ -31,7 +25,7 @@ static const theme_t builtin_themes[] =
     {
         .name = "Classic",
         .background = 0x1083,   /* 121218 */
-        .surface    = 0x2146,   /* 262832: the current UI's selected row (DESIGN.md 5.1: 1E2029 = 0x1905, see below) */
+        .surface    = 0x1905,   /* 1E2029 */
         .text       = 0xEF7E,   /* ECEEF2 */
         .text_dim   = 0x94B4,   /* 9296A0 */
         .accent     = 0x44FF,   /* 409CFF */

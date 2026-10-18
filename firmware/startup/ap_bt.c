@@ -4,13 +4,13 @@
  * BT volume, CY0 on play/pause) and the settings (on at boot, the remembered
  * device). Stock's behaviour it follows: work/stock_boot/08_bluetooth.md §1.3, §3.
  *
- * Screen rows:
- *   Bluetooth   off / starting / on / scanning / connecting / connected / no module
+ * Screen rows (the list template, ui/nav.c):
+ *   Bluetooth   Off / Starting / On / Scanning / Connecting / Connected / No module
  *               (PLAY toggles the module; on: the remembered device is connected
  *               (stock seg84:0307a13e: CL06) or, with none, a scan starts (CS00))
- *   <remembered device>   connected / connecting / remembered (PLAY: connect)
- *   Scan        found N (PLAY: CS00, 3 s)
+ *   <remembered device>   Connected / Connecting / Paired (PLAY: connect, or disconnect)
  *   <found devices>       up to 6 (PLAY: connect: CL06 + MAC)
+ *   Scan for devices      found N (PLAY: CS00, 3 s)
  *   Disconnect  (connected: CT00)
  *   Forget      (a remembered device: our settings only -- stock sends the module
  *               nothing to forget, seg84:0307ae40)
@@ -30,27 +30,23 @@
 #include "audio/audio.h"
 #include "player.h"
 #include "ui/ui.h"
-#include "ui/theme.h"
-#include "ui/screens/screens.h"
+#include "ui/nav.h"
 
 enum { ROW_POWER, ROW_PAIRED, ROW_SCAN, ROW_DEV, ROW_DISCONNECT, ROW_FORGET };
 
 typedef struct {
     uint8_t kind, idx;
-    char label[40];
-    char value[16];
 } bt_row_t;
 
 #define ROWS (4 + BT_SCAN_MAX)
 static bt_row_t s_rows[ROWS];
 static int s_nrows;
-static menu_view_t s_view;
 static uint32_t s_shown_seq;
 static int s_after_on;                  /* the screen turned it on: connect or scan once it is up */
 static int s_routed;                    /* the volume is the BT volume now */
 static int s_jack_db, s_bt_db;
 
-extern const ui_screen_t bt_screen;
+extern const page_t pg_bt;
 
 static int same_mac(const uint8_t *a, const uint8_t *b) { return !memcmp(a, b, BT_MAC_LEN); }
 
@@ -62,106 +58,132 @@ static void dev_label(char *out, int cap, const uint8_t *mac, const char *name)
     snprintf(out, (unsigned)cap, "%s", name && name[0] ? name : m);
 }
 
-static void build(void)
+static int here(const uint8_t *mac)
 {
     bt_state_t st = bt_state();
-    const bt_dev_t *peer = bt_peer();
-    bt_row_t *r;
+
+    return (st == BT_CONNECTED || st == BT_CONNECTING) && same_mac(bt_peer()->mac, mac);
+}
+
+/* The rows (DESIGN 1.2): Bluetooth, the remembered device, the devices found, Scan for devices,
+ * Disconnect, Forget. Each has an id (kind, index), so the cursor stays on its row as they come. */
+static int build(void)
+{
+    bt_state_t st = bt_state();
 
     s_nrows = 0;
-    r = &s_rows[s_nrows++];
-    r->kind = ROW_POWER;
-    snprintf(r->label, sizeof r->label, "Bluetooth");
-    snprintf(r->value, sizeof r->value, "%s", bt_state_name(st));
-    if (g_cfg.bt_paired) {
-        int here = (st == BT_CONNECTED || st == BT_CONNECTING) && same_mac(peer->mac, g_cfg.bt_mac);
-
-        r = &s_rows[s_nrows++];
-        r->kind = ROW_PAIRED;
-        dev_label(r->label, sizeof r->label, g_cfg.bt_mac, g_cfg.bt_name);
-        snprintf(r->value, sizeof r->value, "%s", here ? bt_state_name(st) : "remembered");
-    }
-    r = &s_rows[s_nrows++];
-    r->kind = ROW_SCAN;
-    snprintf(r->label, sizeof r->label, "Scan");
-    if (st == BT_SCANNING)
-        snprintf(r->value, sizeof r->value, "scanning");
-    else if (bt_scan_count())
-        snprintf(r->value, sizeof r->value, "found %d", bt_scan_count());
-    else
-        r->value[0] = 0;
-    for (int i = 0; i < bt_scan_count() && s_nrows < ROWS - 2; i++) {
-        const bt_dev_t *d = bt_scan_dev(i);
-        int here = (st == BT_CONNECTED || st == BT_CONNECTING) && same_mac(peer->mac, d->mac);
-
-        if (g_cfg.bt_paired && same_mac(d->mac, g_cfg.bt_mac))
+    s_rows[s_nrows++].kind = ROW_POWER;
+    if (g_cfg.bt_paired)
+        s_rows[s_nrows++].kind = ROW_PAIRED;
+    for (int i = 0; i < bt_scan_count() && s_nrows < ROWS - 3; i++) {
+        if (g_cfg.bt_paired && same_mac(bt_scan_dev(i)->mac, g_cfg.bt_mac))
             continue;                   /* (the remembered row has it) */
-        r = &s_rows[s_nrows++];
-        r->kind = ROW_DEV;
-        r->idx = (uint8_t)i;
-        dev_label(r->label, sizeof r->label, d->mac, d->name);
-        snprintf(r->value, sizeof r->value, "%s", here ? bt_state_name(st) : "");
+        s_rows[s_nrows].kind = ROW_DEV;
+        s_rows[s_nrows++].idx = (uint8_t)i;
     }
-    if (st == BT_CONNECTED || st == BT_CONNECTING) {
-        r = &s_rows[s_nrows++];
-        r->kind = ROW_DISCONNECT;
-        snprintf(r->label, sizeof r->label, "Disconnect");
-        r->value[0] = 0;
-    }
-    if (g_cfg.bt_paired) {
-        r = &s_rows[s_nrows++];
-        r->kind = ROW_FORGET;
-        snprintf(r->label, sizeof r->label, "Forget");
-        r->value[0] = 0;
-    }
-    if (s_view.cursor >= s_nrows)
-        s_view.cursor = s_nrows - 1;
+    s_rows[s_nrows++].kind = ROW_SCAN;
+    if (st == BT_CONNECTED || st == BT_CONNECTING)
+        s_rows[s_nrows++].kind = ROW_DISCONNECT;
+    if (g_cfg.bt_paired)
+        s_rows[s_nrows++].kind = ROW_FORGET;
+    return s_nrows;
 }
 
-static void draw(void)
+const char *bt_state_text(bt_state_t st)
 {
-    int page = menu_page_size();
+    static const char *const k[] = { "Off", "Starting\xE2\x80\xA6", "No module", "On", "Scanning\xE2\x80\xA6",
+                                     "Connecting\xE2\x80\xA6", "Connected" };
 
-    build();
-    display_clear(THEME_COLOR_BG);
-    display_fill_rect(0, 0, DISPLAY_W - 1, THEME_TITLE_H - 1, THEME_COLOR_TITLE_BG);
-    display_draw_text(THEME_PAD, THEME_TITLE_TEXT_Y + THEME_TEXT_YOFF, "Bluetooth",
-                      THEME_COLOR_ACCENT, THEME_COLOR_TITLE_BG);
-    for (int row = 0; row < page && s_view.top + row < s_nrows; row++) {
-        const bt_row_t *r = &s_rows[s_view.top + row];
-
-        menu_draw_item(THEME_MENU_TOP + row * THEME_ITEM_H, r->label, r->value,
-                       s_view.top + row == s_view.cursor);
-    }
+    return st <= BT_CONNECTED ? k[st] : "?";
 }
 
-static void select_row(const bt_row_t *r)
+static void bt_row(int i, row_t *r)
 {
+    const bt_row_t *b = &s_rows[i < s_nrows ? i : 0];
     bt_state_t st = bt_state();
 
-    log_printf("bt: ui: %s", r->label);
+    r->id = (uint16_t)(b->kind << 8 | b->idx);
+    switch (b->kind) {
+    case ROW_POWER:
+        r->icon = ICON_BT;
+        snprintf(r->text, sizeof r->text, "Bluetooth");
+        snprintf(r->value, sizeof r->value, "%s", bt_state_text(st));
+        break;
+    case ROW_PAIRED:
+        r->icon = ICON_HEADPHONES;
+        dev_label(r->text, sizeof r->text, g_cfg.bt_mac, g_cfg.bt_name);
+        snprintf(r->value, sizeof r->value, "%s", here(g_cfg.bt_mac) ? bt_state_text(st) : "Paired");
+        break;
+    case ROW_DEV: {
+        const bt_dev_t *d = bt_scan_dev(b->idx);
+
+        r->icon = ICON_HEADPHONES;
+        if (d) {
+            dev_label(r->text, sizeof r->text, d->mac, d->name);
+            if (here(d->mac))
+                snprintf(r->value, sizeof r->value, "%s", bt_state_text(st));
+        }
+        break;
+    }
+    case ROW_SCAN:
+        r->icon = ICON_UPDATE;
+        snprintf(r->text, sizeof r->text, "Scan for devices");
+        if (st == BT_SCANNING)
+            snprintf(r->value, sizeof r->value, "Scanning\xE2\x80\xA6");
+        else if (bt_scan_count())
+            snprintf(r->value, sizeof r->value, "found %d", bt_scan_count());
+        break;
+    case ROW_DISCONNECT:
+        r->icon = ICON_POWER;
+        snprintf(r->text, sizeof r->text, "Disconnect");
+        break;
+    case ROW_FORGET:
+        r->icon = ICON_WARN;
+        snprintf(r->text, sizeof r->text, "Forget");
+        break;
+    }
+}
+
+static void power_on(void)
+{
+    g_cfg.bt = 1;                       /* stock's toggle: settings +0x34b */
+    s_after_on = 1;
+    bt_power(1);
+    config_save_later();
+}
+
+static void bt_act(int a, int i)
+{
+    const bt_row_t *r;
+    bt_state_t st = bt_state();
+
+    if (a != A_OPEN || i >= build())
+        return;
+    r = &s_rows[i];
+    {
+        static row_t lr;                /* (the row's own words in the log: "bt: ui: Disconnect") */
+
+        bt_row(i, &lr);
+        log_printf("bt: ui: %s", r->kind == ROW_SCAN ? "Scan" : lr.text);
+    }
     switch (r->kind) {
     case ROW_POWER:
         if (st == BT_OFF || st == BT_NO_MODULE) {
-            g_cfg.bt = 1;               /* stock's toggle: settings +0x34b */
-            s_after_on = 1;
-            bt_power(1);
+            power_on();
         } else {
             g_cfg.bt = 0;
             s_after_on = 0;
             bt_power(0);
+            config_save_later();
         }
-        config_save_later();
         break;
     case ROW_PAIRED:
-        if (st == BT_OFF || st == BT_NO_MODULE) {
-            g_cfg.bt = 1;
-            s_after_on = 1;
-            bt_power(1);
-            config_save_later();
-        } else if (st == BT_ON || st == BT_SCANNING) {
+        if (st == BT_OFF || st == BT_NO_MODULE)
+            power_on();
+        else if (here(g_cfg.bt_mac))
+            bt_disconnect();
+        else if (st == BT_ON || st == BT_SCANNING)
             bt_connect(g_cfg.bt_mac, g_cfg.bt_name);
-        }
         break;
     case ROW_SCAN:
         bt_scan();
@@ -169,7 +191,9 @@ static void select_row(const bt_row_t *r)
     case ROW_DEV: {
         const bt_dev_t *d = bt_scan_dev(r->idx);
 
-        if (d)
+        if (d && here(d->mac))
+            bt_disconnect();
+        else if (d)
             bt_connect(d->mac, d->name);
         break;
     }
@@ -185,36 +209,40 @@ static void select_row(const bt_row_t *r)
         config_save_later();
         break;
     }
-    ui_invalidate_all();
+    nav_live_now();
 }
 
-static void handle(const input_event_t *ev)
+static const char *bt_verb(int i, int hold)
 {
-    build();
-    switch (ev->type) {
-    case KEY_UP:
-    case KEY_DOWN:
-        menu_view_move(&s_view, ev->type == KEY_UP ? -1 : 1, s_nrows, menu_page_size());
-        ui_invalidate_all();
-        break;
-    case KEY_SELECT:
-        if (ev->adc_value != INPUT_ADC_REPEAT && s_view.cursor >= 0 && s_view.cursor < s_nrows)
-            select_row(&s_rows[s_view.cursor]);
-        break;
-    case KEY_BACK:
-        ui_pop_screen();
-        break;
-    default:
-        break;
+    if (hold || i >= s_nrows)
+        return "";
+    switch (s_rows[i].kind) {
+    case ROW_POWER:      return "CHANGE";
+    case ROW_SCAN:       return "SCAN";
+    case ROW_DISCONNECT: return "DO";
+    case ROW_FORGET:     return "FORGET";
+    case ROW_PAIRED:     return here(g_cfg.bt_mac) ? "DISCONN." : "CONNECT";
+    default: {
+        const bt_dev_t *d = bt_scan_dev(s_rows[i].idx);
+
+        return d && here(d->mac) ? "DISCONN." : "CONNECT";
+    }
     }
 }
 
-static void enter(void)
-{
-    menu_view_init(&s_view);
-}
+static const keydef_t k_bt[] = {
+    { KEY_UP, IG_DOWN, A_UP, "UP" }, { KEY_UP, IG_REPEAT, A_UP, NULL },
+    { KEY_DOWN, IG_DOWN, A_DOWN, "DOWN" }, { KEY_DOWN, IG_REPEAT, A_DOWN, NULL },
+    { KEY_SELECT, IG_TAP, A_OPEN, VERB },
+    { KEY_MENU, IG_TAP, A_NP, "PLAYING" }, { KEY_MENU, IG_HOLD, A_OPTIONS, "OPTIONS" },
+    { KEY_BACK, IG_TAP, A_BACK, "BACK" }, { KEY_BACK, IG_HOLD, A_HOME, "HOME" },
+    { 0 }
+};
 
-const ui_screen_t bt_screen = { "bluetooth", enter, NULL, draw, handle };
+const page_t pg_bt = {
+    .name = "bluetooth", .kind = PK_LIST, .icon = ICON_BT, .live = 1, .keys = k_bt, .title = "Bluetooth",
+    .count = build, .row = bt_row, .act = bt_act, .verb = bt_verb,
+};
 
 /* ---- glue ---------------------------------------------------------------------- */
 
@@ -351,7 +379,7 @@ void bt_app_tick(void)
 {
     static int s_live;                  /* the last tick did the work below */
     static int s_was_playing;
-    int in_screen = ui_top_screen() == &bt_screen;
+    int in_screen = nav_top() == &pg_bt;
     bt_state_t st = bt_state();
     int playing;
 
@@ -391,9 +419,8 @@ void bt_app_tick(void)
                 bt_scan();                                   /* seg84 0307a2a6: CS00 */
         }
     }
-    if (bt_seq() != s_shown_seq) {
+    if (bt_seq() != s_shown_seq) {      /* what the screen shows changed: its rows now */
         s_shown_seq = bt_seq();
-        if (ui_top_screen() == &bt_screen)
-            ui_invalidate_all();
+        nav_live_now();
     }
 }

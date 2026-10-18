@@ -290,7 +290,7 @@ static void frame_done(uint32_t t0)
         if (ms > s_st.key_worst_ms)
             s_st.key_worst_ms = ms;
         if (s_log)
-            s_log("ui: key->px %u ms", (unsigned)ms);
+            s_log("ui: key->px %u ms px %u", (unsigned)ms, (unsigned)s_px);   /* (px: what that frame pushed) */
     }
     s_rows = s_px = 0;
 }

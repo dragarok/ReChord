@@ -32,9 +32,8 @@
 #include "services/bootcrumb.h"
 #include "services/watchdog.h"
 #include "ui/ui.h"
-#include "ui/screens/screens.h"
+#include "ui/nav.h"
 
-extern const ui_screen_t bt_screen;   /* ap_bt.c */
 void ap_bg_poll(void);                /* ap_bg.c: the queued writes, the log, the settings */
 void ap_bg_sync(void);
 void bt_app_init(void);
@@ -42,16 +41,13 @@ void bt_app_tick(void);
 void bt_app_external(int streaming);
 
 static int s_adc = 1023, s_adc2 = 1023, s_power, s_cable, s_phy_parked;
-static int s_power_press_ok;
-static uint32_t s_shortcut_at;  /* VOL+/VOL- chord: a shortcut key may follow within 2 s */
-static uint32_t s_vol_at;       /* the last volume key press, and the volume before it */
-static int s_vol_before;  /* the power key's current press began after boot's was released */
+static int s_power_press_ok;    /* the power key's current press began after boot's was released */
+static int s_ui_up;             /* the new UI runs (before it: recovery's screens) */
 static uint32_t s_power_down_ms;     /* time_ms() when the power key went down */
 static int s_power_armed;    /* power key seen released since boot */
 static uint32_t s_user;              /* user volume start, 0 = unknown */
 static char s_emmc[32], s_usb[32] = "plug in", s_sd[32];
 static int s_sd_in = -1;
-static uint32_t s_cpu_shown_ms;
 
 /* Read-only eMMC probe for the root menu: size and user volume start. */
 static int s_storage_failed;          /* our driver could not use the storage the ROM booted from */
@@ -86,7 +82,6 @@ static void emmc_probe(void)
     text_fonts_load();                           /* the fonts module from our slot (drivers/text.h) */
 }
 
-static const char *emmc_text(void) { return s_emmc; }
 
 /* SD row: size, type, bus width and the first volume's file system. */
 static void sd_probe(void)
@@ -108,8 +103,6 @@ static void sd_probe(void)
              r ? (r == -3 ? "rd err" : "no fs") : fs_target_type(1));
 }
 
-static const char *sd_text(void) { return s_sd; }
-static const char *usb_text(void)  { return s_usb; }
 
 static const char *usbd_text(void)
 {
@@ -158,26 +151,6 @@ static void pump(void)
         bt_app_tick();
 }
 
-/* The gestures the screens' events come from, in the log (DESIGN 3.3: "ui: key PLAY.x2 on player
- * t=..."; the tests time holds and multi-presses by them). Left out, to keep the 4 KiB RAM log for
- * the rest: every DOWN, VOL+/VOL-'s taps and holds (the old "ui: key up/down" lines say those), and
- * the multi-press window closing but for PLAY's (its x2/x3 label). */
-static void log_gesture(const input_event_t *g)
-{
-    const ui_screen_t *top = ui_top_screen();
-
-    if (g->gesture == IG_DOWN || (g->gesture == IG_END && g->key != KEY_SELECT) ||
-        ((g->key == KEY_UP || g->key == KEY_DOWN) && (g->gesture == IG_TAP || g->gesture == IG_HOLD)))
-        return;
-    if (g->gesture == IG_REPEAT)
-        log_printf("ui: key %s.repeat on %s t=%u held=%u steps=%u n=%u", input_key_name(g->key),
-                   top ? top->name : "-", (unsigned)g->t_ms, (unsigned)g->held_ms, (unsigned)g->steps,
-                   (unsigned)g->repeat);
-    else
-        log_printf("ui: key %s.%s on %s t=%u held=%u", input_key_name(g->key), input_gesture_name(g),
-                   top ? top->name : "-", (unsigned)g->t_ms, (unsigned)g->held_ms);
-}
-
 /* KEY_SELECT = yes; BACK / power = no; any = 1 with any_key. */
 static int ask(int any_key)
 {
@@ -196,7 +169,7 @@ static int ask(int any_key)
             display_mark_input(time_ms());   /* key->px: logged when the answer is on the panel */
             log_printf("ui: key %s%s on %s", ev.type >= 0 && ev.type < 8 ? k_names[ev.type] : "?",
                        ev.adc_value == INPUT_ADC_LONG ? " (hold)" : ev.adc_value == INPUT_ADC_REPEAT ? " (repeat)" : "",
-                       ui_top_screen() ? ui_top_screen()->name : "-");
+                       nav_top() ? nav_top()->name : "-");
             if (any_key || ev.type == KEY_SELECT)
                 return 1;
             if (ev.type == KEY_BACK || ev.type == KEY_POWER)
@@ -272,13 +245,7 @@ static void update_prompt(void)
  * where the browser and player were, then the log. */
 static void save_state(const char *why)
 {
-    const browser_state_t *b = browser_screen_state();
-
-    if (b->path[0] && strcmp(b->path, "/")) {
-        snprintf(g_cfg.browse, sizeof g_cfg.browse, "%s", b->path);
-        g_cfg.cursor = (uint16_t)b->cursor;
-    }
-    config_save();
+    config_save();                       /* (g_cfg.browse / cursor: the browser keeps them, ui/screens.c) */
     log_flush(why);
     ap_bg_sync();                        /* (everything queued on the card before it ends) */
 }
@@ -432,10 +399,20 @@ static void usb_session(void)
     }
     player_stop();                       /* the PC may rewrite the files we stream */
     save_state("usb");
-    screen("USB mass storage");
-    line(1, "eject on the PC or press power");
-    display_flush_rows(0, DISPLAY_H - 1);
+    if (s_ui_up) {                       /* the disk session's page (the session holds the loop) */
+        extern const page_t pg_usbdisk;
+
+        nav_push(&pg_usbdisk, 0);
+        nav_tick();
+        ui_render();
+    } else {                             /* (recovery: as it always was) */
+        screen("USB mass storage");
+        line(1, "eject on the PC or press power");
+        display_flush_rows(0, DISPLAY_H - 1);
+    }
     r = usb_msc_run(luns, 2, keys_power, &rd, &wr);
+    if (s_ui_up)
+        nav_pop();
     fs_target_mount_rw(0, "Internal", emmc_read, emmc_write_async, s_user);   /* host may have written */
     snprintf(s_usb, sizeof s_usb, "x%d r%uM w%uM", r, (unsigned)(rd >> 11), (unsigned)(wr >> 11));
     log_printf("usb: disk session ended: exit %d, read %u MB, written %u MB, cable %d", r,
@@ -451,19 +428,6 @@ static void usb_session(void)
         update_prompt();
     ui_invalidate_all();
 }
-
-/* After a settings change: what applies at once (brightness, debug strip and CPU
- * policy arrive with the power work; the play mode applies in settings_screen). */
-void settings_apply(void)
-{
-    power_brightness_changed();
-    config_save_later();
-}
-
-static void open_files(void)    { browser_screen_set_root("/"); ui_push_screen(&browser_screen); }
-static void open_player(void)   { ui_push_screen(&player_screen); }
-static void open_settings(void) { settings_screen_reload(); ui_push_screen(&settings_screen); }
-static void open_bt(void)       { ui_push_screen(&bt_screen); }
 
 /* "200M 1.5%": core A clock and its busy share over the last second */
 static const char *cpu_text(void)
@@ -740,58 +704,6 @@ static void usb_storage_run(void)
     usb_session();
 }
 
-/* RECHO's Debug > Power page: the battery state and rates, the clocks. Refreshed
- * once a second; any key returns. */
-static void battery_info_run(void)
-{
-    input_event_t ev;
-    uint32_t shown = 0;
-
-    while (keys_power())
-        cpu_wait_tick();
-    input_mock_clear();
-    for (;;) {
-        if (!shown || time_ms() - shown >= 1000u) {
-            const power_battery_t *b = power_battery();
-            char buf[40];
-
-            shown = time_stamp(time_ms());
-            screen("Power");
-            snprintf(buf, sizeof buf, "%u mV  %u.%u %%  level %u", b->mv, b->pct10 / 10u, b->pct10 % 10u, b->level);
-            line(1, b->mv ? buf : "battery: measuring");
-            line(2, !b->vbus ? "on battery" : b->full ? "cable, full" : "cable, charging");
-            if (b->rate_ok) {
-                snprintf(buf, sizeof buf, "%d mV/min", b->mv_min);
-                line(3, buf);
-                snprintf(buf, sizeof buf, "%%/h 1m %d.%u 5m %d.%u 30m %d.%u", b->pct_h10[0] / 10,
-                         (unsigned)(b->pct_h10[0] < 0 ? -b->pct_h10[0] : b->pct_h10[0]) % 10u, b->pct_h10[1] / 10,
-                         (unsigned)(b->pct_h10[1] < 0 ? -b->pct_h10[1] : b->pct_h10[1]) % 10u, b->pct_h10[2] / 10,
-                         (unsigned)(b->pct_h10[2] < 0 ? -b->pct_h10[2] : b->pct_h10[2]) % 10u);
-                line(4, buf);
-            } else {
-                line(3, b->vbus ? "rates: on battery only" : "rates: after 90 s on battery");
-            }
-            if (b->left_min)
-                snprintf(buf, sizeof buf, "time left %u h %02u min", b->left_min / 60u, b->left_min % 60u);
-            else
-                snprintf(buf, sizeof buf, "time left: not yet");
-            line(5, buf);
-            snprintf(buf, sizeof buf, "A %u MHz  B %u MHz", (unsigned)(clock_core_hz() / 1000000u),
-                     (unsigned)(clock_core_b_hz() / 1000000u));
-            line(6, buf);
-            display_flush_rows(0, DISPLAY_H - 1);
-        }
-        pump();                          /* the music goes on meanwhile */
-        input_scan(keys_adc(), keys_power());
-        if (input_poll(&ev) > 0) {
-            power_activity();
-            break;
-        }
-        cpu_wait_tick();
-    }
-    ui_invalidate_all();
-}
-
 static void usb_dac_session(void);
 
 /* USB-C probe: which of the player's own pins puts voltage on VBUS (usb_probe.h), and
@@ -866,129 +778,16 @@ static void usb_probe_menu(void)
     ui_invalidate_all();
 }
 
-static const menu_item_t k_root_items[] = {
-    { "DAC test",    NULL,      dac_test_run },
-    { "USB console", NULL,      usb_console_run },
-    { "USB storage", NULL,      usb_storage_run },
-    { "Files",       NULL,      open_files },
-    { "Now Playing", NULL,      open_player },
-    { "Settings",    NULL,      open_settings },
-    { "CPU",         cpu_text,  NULL },
-    { "Keys",        keys_text, NULL },
-    { "eMMC",        emmc_text, NULL },
-    { "SD",          sd_text,   NULL },
-    { "USB",         usb_text,  NULL },
-    { "USB diag",    usbd_text, NULL },
-    { "Battery",     power_battery_text, battery_info_run },
-    { "USB DAC",     NULL,      usb_dac_session },       /* (last but one: tests count rows to Files) */
-    { "USB-C probe", NULL,      usb_probe_menu },
-    { "USB detect",  NULL,      usb_detect_test },       /* (appended: tests count rows from the top) */
-    { "Bluetooth",   NULL,      open_bt },               /* (appended, as above) */
-};
-#define ROOT_CPU_ROW 6               /* index of "CPU" in k_root_items */
-#define ROOT_BAT_ROW 12
-#define RC_BUILD "m7a"
-static const menu_model_t k_root = { "ReChord " RC_BUILD, k_root_items,
-                                      sizeof k_root_items / sizeof k_root_items[0] };
+#define RC_BUILD "m8"
 
-/* A key restarts the screen and idle timers. The power key's short press turns
- * the screen off and on. With the screen off (RECHO, C.6): VOL+/VOL- and PLAY
- * work as on Now Playing, MENU and BACK only turn it on. Returns 1 if the event
- * still goes to the screen on top. */
-static int dark_or_power_key(const input_event_t *ev)
-{
-    int on = power_screen_on();
-
-    power_activity();
-    if (ev->type == KEY_POWER) {
-        if (ev->adc_value != INPUT_ADC_LONG) {
-            power_screen(!on);
-            if (on)
-                config_save();           /* RECHO saves at screen off */
-            else
-                ui_invalidate_all();
-        }
-        return 0;
-    }
-    if (on)
-        return 1;
-    if (ev->type == KEY_UP || ev->type == KEY_DOWN || ev->type == KEY_SELECT)
-        player_screen.handle_event(ev);
-    else if (ev->type == KEY_MENU || ev->type == KEY_BACK) {
-        if (ev->adc_value != INPUT_ADC_LONG) {
-            power_screen(1);
-            ui_invalidate_all();
-        }
-    }
-    return 0;
-}
-
-/* RECHO's shortcuts (0x0305b3cc): VOL+ and VOL- together arm them, and the next
- * key within 2 s picks one: PLAY saves the screen as /Internal/SHOTn.BMP. The
- * chord undoes a volume step its first key made in the last 500 ms. Returns 1 if
- * the event was taken. */
-static int shortcut_key(const input_event_t *ev)
-{
-    uint32_t armed = s_shortcut_at;
-
-    if (ev->type == KEY_CHORD) {
-        power_activity();
-        if (time_ms() - s_vol_at < 500u && player_get_volume() != s_vol_before)
-            player_set_volume(s_vol_before);
-        s_shortcut_at = time_stamp(time_ms());
-        log_printf("ui: shortcut: play = screenshot");
-        return 1;
-    }
-    if (!armed)
-        return 0;
-    s_shortcut_at = 0;
-    if (time_ms() - armed > 2000u || ev->type != KEY_SELECT || ev->adc_value == INPUT_ADC_LONG)
-        return 0;
-    power_activity();
-    log_printf("ui: screenshot: %d", screenshot_save());
-    return 1;
-}
-
-/* The USB DAC's screen. usb_uac_run() reports about once a second; it is drawn
- * only when what it shows changed (and not while the screen is off). */
-static usb_uac_status_t s_uac;
-static char s_uac_shown[4][40];
-
-static void uac_draw(int force)
-{
-    char t[4][40];
-    const usb_uac_status_t *st = &s_uac;
-
-    if (!power_screen_on())
-        return;
-    memset(t, 0, sizeof t);              /* (compared whole below: no stack bytes after the text) */
-    if (!st->configured)
-        snprintf(t[0], sizeof t[0], "waiting for the host");
-    else if (!st->bits)
-        snprintf(t[0], sizeof t[0], "%s speed, idle", st->high_speed ? "high" : "full");
-    else
-        snprintf(t[0], sizeof t[0], "%u Hz  %u-bit", (unsigned)st->rate, (unsigned)st->bits);
-    if (st->mute)
-        snprintf(t[1], sizeof t[1], "host: muted");
-    else
-        snprintf(t[1], sizeof t[1], "host volume %d.%d dB", (int)(st->volume_256db / 256),
-                 (int)((st->volume_256db < 0 ? -st->volume_256db : st->volume_256db) % 256 * 10 / 256));
-    snprintf(t[2], sizeof t[2], "player volume %d dB", audio_get_volume_db());
-    snprintf(t[3], sizeof t[3], "late %u  lost %u", (unsigned)st->underruns, (unsigned)(st->dropped + st->missed));
-    if (!force && !memcmp(t, s_uac_shown, sizeof t))
-        return;
-    memcpy(s_uac_shown, t, sizeof t);
-    screen("USB DAC");
-    for (int i = 0; i < 4; i++)
-        line(1 + i, t[i]);
-    line(6, "PLAY/BACK: host  MENU: leave");
-    display_flush_rows(0, DISPLAY_H - 1);
-}
+/* The USB DAC's screen is Now Playing's template (ui/screens.c pg_dac): usb_uac_run() reports
+ * about once a second into g_uac, the page repaints what changed. */
+extern usb_uac_status_t g_uac;
+extern int g_uac_leave;
 
 static void uac_status(const usb_uac_status_t *st)
 {
-    s_uac = *st;
-    uac_draw(0);
+    g_uac = *st;
 }
 
 /* The DAC session's supply (Settings > DAC power): s_dac_sw = the pins were switched
@@ -1012,45 +811,27 @@ static void dac_power_only(void)
     }
 }
 
-/* Every tick of the DAC session, keys as on Now Playing: VOL+/VOL- the player's
- * volume (on top of the host's); PLAY play/pause on the host, held: next track;
- * BACK previous track; MENU leaves; power toggles the screen. Volume and PLAY
- * work with the screen off, BACK and MENU then only light it. Also the screen-off
- * timer and the battery. Nonzero = leave. */
+/* Every tick of the DAC session: the keys through the UI (VOL the player's volume on top of the
+ * host's, PLAY taps the host's transport, BACK ends it; the screen off: VOL and PLAY blind), the
+ * screen, the power, the BT module. Nonzero = leave. */
 static int uac_tick(void)
 {
     input_event_t ev;
-    int leave = 0;
 
-    input_scan(keys_adc(), keys_power());
-    while (input_poll(&ev) > 0) {
-        int was_on = power_screen_on(), hold = ev.adc_value == INPUT_ADC_LONG;
-
-        power_activity();
-        if (ev.type == KEY_POWER && !hold) {
-            power_screen(!was_on);
-            if (!was_on)
-                uac_draw(1);
-        } else if (ev.type == KEY_UP || ev.type == KEY_DOWN) {
-            player_set_volume(player_get_volume() + (ev.type == KEY_UP ? 1 : -1));
-            uac_draw(0);
-        } else if (ev.type == KEY_SELECT && ev.adc_value != INPUT_ADC_REPEAT) {
-            usb_uac_key(hold ? USB_UAC_NEXT : USB_UAC_PLAY_PAUSE);
-        } else if (!was_on) {
-            power_screen(1);             /* BACK, MENU: just light it */
-            uac_draw(1);
-        } else if (ev.type == KEY_BACK && !hold) {
-            usb_uac_key(USB_UAC_PREV);
-        } else if (ev.type == KEY_MENU && !hold) {
-            leave = 1;
-        }
-    }
+    input_scan(keys_adc(), keys_power());   /* (the watchdog: a loop that scans the keys is alive) */
+    input_set_repeat(nav_volume_keys() ? INPUT_REPEAT_VOLUME : INPUT_REPEAT_LIST);
+    while (input_next(&ev) > 0)
+        nav_key(&ev);
     if (power_poll(1, POWER_SESSION_DAC) == POWER_OFF_BATTERY)   /* (no auto power off: the cable is in) */
-        leave = 1;
+        g_uac_leave = 1;
     dac_power_only();
     bt_app_external(usb_uac_streaming());   /* the BT module served here too: the host's audio to */
     bt_app_tick();                          /* the earphones, their keys to the host */
-    return leave;
+    if (power_screen_on()) {
+        nav_tick();
+        ui_render();
+    }
+    return g_uac_leave;
 }
 
 static void usb_dac_session(void)
@@ -1059,12 +840,8 @@ static void usb_dac_session(void)
 
     if (!usb_cable()) {                  /* from the menu without a cable: nothing to wait for (on the
                                           * device this path hung with no way out, 2026-10-16) */
-        screen("USB DAC");
-        line(2, "Plug in a USB cable first");
-        display_flush_rows(0, DISPLAY_H - 1);
         log_printf("ui: USB DAC: no cable");
-        panel_io_delay_ms(1500);
-        ui_invalidate_all();
+        nav_toast(ICON_USB, TOAST_WARN, "Connect the cable first");
         return;
     }
     bootcrumb(BC_DAC);                   /* the session's steps, on the eMMC as they start */
@@ -1075,7 +852,8 @@ static void usb_dac_session(void)
     while (keys_power())                 /* the press that got us here (or switched us on) */
         cpu_wait_tick();
     input_mock_clear();
-    memset(&s_uac, 0, sizeof s_uac);
+    memset(&g_uac, 0, sizeof g_uac);
+    g_uac_leave = 0;
     /* Settings > DAC power, before the USB core connects. battery (stock's default): no
      * charging, no supply from VBUS, the phone or computer gives the player nothing but the
      * audio; power only: no charging, VBUS runs the player while its battery is low
@@ -1089,8 +867,11 @@ static void usb_dac_session(void)
                "battery (not charging, nothing drawn from USB)" : "power only (not charging, USB below 3.95 V)");
     (void)power_poll(1, POWER_SESSION_DAC);  /* its clock before the USB core runs on it */
     dac_power_only();
-    uac_draw(1);
+    nav_push(&pg_dac, 0);
+    ui_render();
     r = usb_uac_run(uac_tick, uac_status);
+    if (nav_find(&pg_dac) > 0)
+        nav_pop_to(nav_find(&pg_dac));
     bt_app_external(-1);
     log_printf("ui: USB DAC ended (%d)", r);
     bootcrumb(BC_LOOP);
@@ -1136,48 +917,42 @@ static void usb_wake(const char *why)
                (unsigned)(time_ms() - t0), (unsigned)(w[0] & 0xFu));
 }
 
-static void cable_connected(void)
+static int s_cable_q;                    /* the cable question is up: the answer comes from the UI */
+static int s_cable_answer;               /* ap_cable_choice(): 1 + the choice */
+
+/* The mode for a cable: 0 USB disk, 1 USB DAC, 2 charge only. */
+static void cable_mode(int c)
 {
-    int disk = g_cfg.usb == CFG_USB_DISK, dac = g_cfg.usb == CFG_USB_DAC;
-
-    log_printf("usb: cable in (%s)", g_cfg.usb == CFG_USB_ASK ? "ask" : g_cfg.usb == CFG_USB_DISK ? "disk" :
-               g_cfg.usb == CFG_USB_DAC ? "dac" : "charge");
-    if (g_cfg.usb == CFG_USB_ASK) {
-        input_event_t ev;
-
-        power_screen(1);
-        screen("Cable connected");
-        line(2, "PLAY: USB disk");
-        line(3, "MENU: USB DAC");
-        line(4, "BACK: charge only");
-        display_flush_rows(0, DISPLAY_H - 1);
-        while (keys_power()) {
-            pump();
-            cpu_wait_tick();
-        }
-        input_mock_clear();
-        for (;;) {                       /* PLAY, MENU or BACK/power (the music plays on meanwhile) */
-            input_scan(keys_adc(), keys_power());
-            if (input_poll(&ev) > 0 && ev.adc_value != INPUT_ADC_REPEAT) {
-                disk = ev.type == KEY_SELECT;
-                dac = ev.type == KEY_MENU;
-                if (disk || dac || ev.type == KEY_BACK || ev.type == KEY_POWER)
-                    break;
-            }
-            if (!usb_cable())
-                break;
-            pump();
-            cpu_wait_tick();
-        }
-        ui_invalidate_all();
-    }
-    if (dac && usb_cable()) {
+    if (c == 1 && usb_cable()) {
         usb_dac_session();
-    } else if (disk) {
+    } else if (c == 0) {
         power_screen(1);
         usb_session();
     }
     power_activity();
+}
+
+void ap_cable_choice(int c)
+{
+    s_cable_answer = 1 + c;
+}
+
+/* 1: the question is up (a screen: the music and the UI go on; its answer: ap_cable_choice()). */
+static int cable_connected(void)
+{
+    log_printf("usb: cable in (%s)", g_cfg.usb == CFG_USB_ASK ? "ask" : g_cfg.usb == CFG_USB_DISK ? "disk" :
+               g_cfg.usb == CFG_USB_DAC ? "dac" : "charge");
+    if (g_cfg.usb == CFG_USB_ASK) {
+        extern const page_t pg_cable;
+
+        power_screen(1);
+        power_activity();
+        s_cable_q = 1;
+        nav_push(&pg_cable, 0);
+        return 1;
+    }
+    cable_mode(g_cfg.usb == CFG_USB_DISK ? 0 : g_cfg.usb == CFG_USB_DAC ? 1 : 2);
+    return 0;
 }
 
 /* USB-C earphones (Settings): while there is no cable, the player is a USB host waiting for
@@ -1365,6 +1140,83 @@ static void recovery_menu(void)
     }
 }
 
+/* ---- what the screens (ui/screens.c, ui/nav.c) ask of this file ------------------------------ */
+
+static const ui_screen_t k_rc = { "rc", NULL, NULL, nav_draw, NULL };
+static void (*s_later)(void);
+
+void ap_later(void (*fn)(void)) { s_later = fn; }
+int ap_cable(void) { return usb_cable() && !usb_out_active(); }
+int ap_power_ok(void) { return s_power_press_ok; }
+void ap_usb_disk(void) { usb_storage_run(); }
+void ap_usb_dac(void) { usb_dac_session(); }
+void ap_dac_test(void) { dac_test_run(); }
+void ap_usb_console(void) { usb_console_run(); }
+void ap_usb_probe(void) { usb_probe_menu(); }
+void ap_usb_detect(void) { usb_detect_test(); }
+void ap_power_off(void) { power_off(NULL); }
+
+void ap_update(void)
+{
+    if (s_user)
+        update_prompt();
+}
+
+void ap_screen(int on)
+{
+    power_screen(on);
+    if (!on)
+        config_save();                   /* RECHO saves at screen off */
+    else
+        ui_invalidate_all();
+}
+
+void ap_brightness(int d)
+{
+    int b = g_cfg.brightness + d;
+
+    g_cfg.brightness = (uint8_t)(b < 1 ? 1 : b > 8 ? 8 : b);
+    power_brightness_changed();
+    config_save_later();
+}
+
+const char *ap_keys_text(void)
+{
+    return keys_text();
+}
+
+/* Developer > Diagnostics: the system, then the UI's own numbers (DESIGN 4.7). */
+int ap_diag_count(void) { return 14; }
+
+void ap_diag_row(int i, row_t *r)
+{
+    static const char *const l[14] = { "Core A", "Core B", "Battery", "eMMC", "SD card", "USB", "USB diag",
+                                       "Frames", "Last frame", "Key to pixels", "Display path", "Display ops",
+                                       "Keys", "Input" };
+    const display_stats_t *d = display_stats();
+    char *v = r->value;
+    int n = sizeof r->value;
+
+    snprintf(r->text, sizeof r->text, "%s", l[i]);
+    switch (i) {
+    case 0: snprintf(v, n, "%s", cpu_text()); break;
+    case 1: snprintf(v, n, "%u MHz", (unsigned)(clock_core_b_hz() / 1000000u)); break;
+    case 2: snprintf(v, n, "%s", power_battery_text()); break;
+    case 3: snprintf(v, n, "%s", s_emmc); break;
+    case 4: snprintf(v, n, "%s", s_sd); break;
+    case 5: snprintf(v, n, "%s", s_usb); break;
+    case 6: snprintf(v, n, "%s", usbd_text()); break;
+    case 7: snprintf(v, n, "%u, %u slow", (unsigned)d->frames, (unsigned)d->slow); break;
+    case 8: snprintf(v, n, "%u.%u ms, %u rows", (unsigned)(d->last_us / 1000u), (unsigned)(d->last_us / 100u % 10u),
+                     (unsigned)d->last_rows); break;
+    case 9: snprintf(v, n, "%u ms (worst %u)", (unsigned)d->key_last_ms, (unsigned)d->key_worst_ms); break;
+    case 10: snprintf(v, n, "%s", panel_io_path()); break;
+    case 11: snprintf(v, n, "%u, %u dropped", display_op_count(), display_ops_dropped); break;
+    case 12: snprintf(v, n, "%s", keys_text()); break;
+    case 13: snprintf(v, n, "%u lost", input_dropped()); break;
+    }
+}
+
 void ap_ui_loop(void)
 {
     input_event_t ev;
@@ -1372,7 +1224,6 @@ void ap_ui_loop(void)
 
     log_set_sync(emmc_sync);   /* a named log flush is on the disk when it returns (log.h) */
     input_set_clock(time_ms);
-    input_set_observer(log_gesture);
     keys_isr_start();     /* the keys sampled every 10 ms from now on (ap_tick.c), whatever runs */
     boot_key_sample();    /* first: the keys work whatever comes after */
     if (s_boot_key == KEY_DOWN)   /* before our storage driver runs at all (it might be what fails) */
@@ -1415,16 +1266,15 @@ void ap_ui_loop(void)
     s_bt_ready = 1;
     bootcrumb(BC_UI_INIT);
     ui_init();
-    menu_screen_bind(&k_root);
-    ui_push_screen(&menu_screen);
-    if (s_user && g_cfg.resume != CFG_RESUME_OFF && g_cfg.browse[0]) {   /* resume: the folder */
-        browser_screen_set_root("/");
-        browser_screen_resume(g_cfg.browse, g_cfg.cursor);
-        ui_push_screen(&browser_screen);
-    }
+    theme_load_index(g_cfg.theme);
+    ui_push_screen(&k_rc);               /* one ui.c screen: the page stack draws (ui/nav.c) */
+    s_ui_up = 1;
+    if (g_cfg.resume == CFG_RESUME_OFF)
+        g_cfg.browse[0] = 0;             /* (Folders opens where you were only with resume on) */
+    nav_reset(&pg_home);
     if (s_user && g_cfg.resume == CFG_RESUME_TRACK && g_cfg.track[0] &&
         player_resume(g_cfg.track) == 0 && player_play() == PLAYER_OK) {
-        ui_push_screen(&player_screen);
+        nav_push(&pg_np, 0);
         log_printf("ui: resumed %s", g_cfg.track);
     }
     {   /* the USB block as the ROM left it, before the park (USB DAC audit D6, SoC report 6.1) */
@@ -1493,8 +1343,7 @@ void ap_ui_loop(void)
             cable = 0;                   /* (VBUS is the player's own while host) */
         if (cable && !s_cable) {         /* the cable in (also at boot) */
             s_wake_due = 0;
-            cable_connected();
-            if (!usb_out_active())
+            if (!cable_connected() && !usb_out_active())
                 usb_dwc2_park();         /* (charge only: no session parked it) */
         } else if (!cable && !s_phy_parked && !usb_out_active()) {
             /* no cable at boot: the comparators woken so a later plug is seen, but after the first
@@ -1510,8 +1359,19 @@ void ap_ui_loop(void)
         s_phy_parked = 1;
         s_cable_seen |= cable;
         s_cable = cable;
-        usb_dwc2_idle_tick();            /* the armed PHY held after USB_ARM_MS */
-        usb_out_tick();
+        if (s_cable_answer) {            /* the cable question answered */
+            int c = s_cable_answer - 1;
+
+            s_cable_answer = 0;
+            s_cable_q = 0;
+            cable_mode(c);
+            if (!usb_out_active())
+                usb_dwc2_park();
+        }
+        if (!s_cable_q) {                /* (while it asks, the USB block stays as the cable found it) */
+            usb_dwc2_idle_tick();        /* the armed PHY held after USB_ARM_MS */
+            usb_out_tick();
+        }
 
         /* hold power 2 s to switch off; the press that switched us on may
          * still be held, so arm only after the key has been released once
@@ -1526,68 +1386,22 @@ void ap_ui_loop(void)
         else if (time_ms() - s_power_down_ms >= 2000u)
             power_off(NULL);
 
-        /* live "Keys" row on the root menu: hardware check without a log */
-        if ((adc - s_adc > 8 || s_adc - adc > 8 || power != s_power ||
-             adc2 - s_adc2 > 8 || s_adc2 - adc2 > 8) &&
-            ui_stack_depth() == 1) {
-            ui_invalidate_all();
-        }
-        if (time_ms() - s_cpu_shown_ms >= 1000u) {
-            s_cpu_shown_ms = time_ms();  /* CPU row: once a second */
-            menu_screen_invalidate_item(ROOT_CPU_ROW);
-            menu_screen_invalidate_item(ROOT_BAT_ROW);
-        }
-        s_adc = adc;
+        s_adc = adc;                     /* (Developer > Keys) */
         s_adc2 = adc2;
         s_power = power;
         input_scan(adc, power);
         /* VOL held: the volume's pace on Now Playing and with the screen off, the lists' elsewhere */
-        input_set_repeat(!power_screen_on() || ui_top_screen() == &player_screen ? INPUT_REPEAT_VOLUME :
-                         INPUT_REPEAT_LIST);
+        input_set_repeat(nav_volume_keys() ? INPUT_REPEAT_VOLUME : INPUT_REPEAT_LIST);
+        while (input_next(&ev) > 0)
+            nav_key(&ev);
+        if (s_later) {                   /* what a row started (a USB session, a bring-up tool) */
+            void (*fn)(void) = s_later;
 
-        while (input_poll(&ev) > 0) {
-            static const char *const k_names[] = { "none", "up", "down", "select", "back", "power", "menu", "chord" };
-
-            display_mark_input(time_ms());   /* key->px: logged when the answer is on the panel */
-            log_printf("ui: key %s%s on %s", ev.type >= 0 && ev.type < 8 ? k_names[ev.type] : "?",
-                       ev.adc_value == INPUT_ADC_LONG ? " (hold)" : ev.adc_value == INPUT_ADC_REPEAT ? " (repeat)" : "",
-                       ui_top_screen() ? ui_top_screen()->name : "-");
-            if (ev.type == KEY_POWER && !s_power_press_ok)
-                continue;                /* the release of the press that switched us on */
-            if (shortcut_key(&ev))
-                continue;
-            if ((ev.type == KEY_UP || ev.type == KEY_DOWN) && ev.adc_value != INPUT_ADC_REPEAT) {
-                s_vol_before = player_get_volume();
-                s_vol_at = time_ms();
-            }
-            if (!dark_or_power_key(&ev))
-                continue;
-            if (ev.adc_value == INPUT_ADC_LONG && ev.type != KEY_MENU &&
-                ui_top_screen() != &player_screen && ui_top_screen() != &browser_screen)
-                continue;                /* holds mean something on Now Playing and Files (and MENU) */
-            if (ev.type == KEY_MENU && ev.adc_value == INPUT_ADC_LONG) {
-                while (ui_stack_depth() > 1)       /* hold: the main menu */
-                    ui_pop_screen();
-            } else if (ev.type == KEY_MENU) {      /* Files <-> Now playing */
-                if (ui_top_screen() == &browser_screen) {
-                    ui_push_screen(&player_screen);
-                } else {
-                    while (ui_stack_depth() > 1 && ui_top_screen() != &browser_screen)
-                        ui_pop_screen();
-                    if (ui_top_screen() != &browser_screen) {
-                        if (browser_screen_state()->path[0])
-                            ui_push_screen(&browser_screen);   /* where it was */
-                        else
-                            open_files();
-                    }
-                }
-                ui_invalidate_all();
-            } else {
-                ui_handle_event(&ev);
-            }
+            s_later = 0;
+            fn();
+            frame_invalidate();
+            ui_invalidate_all();
         }
-        if (ui_stack_depth() == 0)       /* BACK on the root menu */
-            ui_push_screen(&menu_screen);
         t_keys = time_ms();
 
         /* audio pump + Now Playing sync (no-ops without a playing track) */
@@ -1617,13 +1431,12 @@ void ap_ui_loop(void)
             }
         }
         bt_app_tick();                   /* the BT module: frames, polls, keys (nothing while off) */
-        if (!power_screen_on())
-            ;                            /* backlight off: nothing to draw */
-        else if (ui_top_screen() == &player_screen)
-            player_screen_refresh();     /* only while it is on screen */
         t_draw = time_ms();
-        if (power_screen_on())
+        if (power_screen_on()) {         /* (backlight off: nothing to draw) */
+            nav_tick();
             ui_render();
+        }
+        nav_after();                     /* (a track to start: after Now Playing is on the panel) */
         {   /* a pass that held the UI (the device froze 23 s in Files, 2026-10-16): where */
             static unsigned s_slow;
             uint32_t now = time_ms();
@@ -1632,7 +1445,7 @@ void ap_ui_loop(void)
 
             if (now - t_pass > s_slowest && now - t_pass >= 300u) {
                 s_slowest = now - t_pass;
-                bootcrumb_set(BCK_SLOW_PASS, s_slowest | (uint32_t)ui_stack_depth() << 24);
+                bootcrumb_set(BCK_SLOW_PASS, s_slowest | (uint32_t)nav_depth() << 24);
             }
             static uint32_t s_worst, s_worst_at, s_worst_parts[4];
             static const char *s_worst_on;
@@ -1649,7 +1462,7 @@ void ap_ui_loop(void)
                 s_worst_parts[1] = t_play - t_keys;
                 s_worst_parts[2] = t_draw - t_play;
                 s_worst_parts[3] = now - t_draw;
-                s_worst_on = ui_top_screen() ? ui_top_screen()->name : "-";
+                s_worst_on = nav_top() ? nav_top()->name : "-";
             }
             if (now - s_worst_at >= 10000u) {
                 if (s_worst >= 50u && s_worst < 300u)
@@ -1663,7 +1476,7 @@ void ap_ui_loop(void)
             if (now - t_pass >= 300u && s_slow < 30u) {
                 s_slow++;
                 log_printf("ui: slow pass %u ms on %s: keys+events %u, player %u, rest %u, draw %u",
-                           (unsigned)(now - t_pass), ui_top_screen() ? ui_top_screen()->name : "-",
+                           (unsigned)(now - t_pass), nav_top() ? nav_top()->name : "-",
                            (unsigned)(t_keys - t_pass), (unsigned)(t_play - t_keys),
                            (unsigned)(t_draw - t_play), (unsigned)(now - t_draw));
             }

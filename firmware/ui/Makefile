@@ -14,21 +14,13 @@ CFLAGS    := -std=c99 -Wall -Werror -O1 -g
 ARMCFLAGS := -mcpu=cortex-m3 -mthumb -Os -std=c99 -Wall -Werror
 
 UI_SRCS := ui.c \
-           settings_schema.c \
-           screens/boot_screen.c \
-           screens/menu_screen.c \
-           screens/browser_screen.c \
-           screens/player_screen.c \
-           screens/settings_screen.c
+           settings_schema.c
 
 TEST_SRCS := tests/main.c \
              tests/mock_display.c \
              tests/mock_services.c \
              tests/test_screen_stack.c \
              tests/test_ui_redraw.c \
-             tests/test_menu_nav.c \
-             tests/test_settings_keys.c \
-             tests/test_browser_pagination.c \
              ../theme/theme.c \
              ../theme/themes_builtin.c
 

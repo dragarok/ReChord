@@ -40,6 +40,7 @@ typedef struct {
     uint8_t bt_mac[6];
     char bt_name[33];
     uint8_t display;             /* the panel's pixel path: CFG_DISPLAY_AUTO or a PANEL_PATH_* */
+    uint8_t theme;               /* theme/theme.h built-in index (theme=<name>, Classic by default) */
 } config_t;
 #define CFG_DISPLAY_AUTO 4       /* = PANEL_PATH_AUTO (drivers/panel_io.h): the build's default path */
 #define CFG_BT_VOLUME_UNSET 127

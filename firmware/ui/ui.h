@@ -58,6 +58,7 @@ int ui_stack_depth(void);
 void ui_invalidate(int x0, int y0, int x1, int y1); /* mark x0..x1, y0..y1   */
 void ui_invalidate_all(void);
 bool ui_is_dirty(void);
+extern unsigned ui_inval_seq;                   /* counts ui_invalidate() calls */
 
 /* Introspection for host tests. */
 int  ui_dirty_band_count(void);                 /* rectangles pending       */

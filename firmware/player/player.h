@@ -48,6 +48,7 @@ typedef struct
 {
     char title[64];
     char artist[64];
+    char album[64];             /* tags; "" = none */
     char path[128];
     int  track_no;
     long duration_ms;
@@ -105,6 +106,7 @@ int   player_play(void);
 int   player_open_tree(const char *path);   /* a folder and everything under it */
 int   player_mode(void);                    /* services/queue.h Q_* */
 int   player_cycle_mode(void);
+const char *player_source(void);           /* the folder the queue came from, "" = none */
 int   player_resume(const char *track);     /* config.h track= string */
 void  player_note_track(uint32_t clus);     /* the heard track -> g_cfg.track */
 int   player_pause(void);
