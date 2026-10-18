@@ -42,6 +42,7 @@ void ap_bg_sync(void);
 void bt_app_init(void);
 void bt_app_tick(void);
 void bt_app_external(int streaming);
+void ap_usb_dac(void);                /* ap_ovl.c: the USB DAC overlay's gate */
 
 static int s_adc = 1023, s_adc2 = 1023, s_power, s_cable, s_phy_parked;
 static int s_power_press_ok;    /* the power key's current press began after boot's was released */
@@ -331,7 +332,7 @@ static int detect_wait(int want, uint32_t ms, uint32_t *took)
     return 0;
 }
 
-static void usb_detect_test(void)
+void usb_detect_test(void)   /* in the Developer tests overlay (startup/ap_ovl.c) */
 {
     uint32_t result = 0, took;
     char buf[48];
@@ -419,7 +420,7 @@ static int listen_save(const bt_listen_t *r)
     return fs_close(f) || !ok ? -1 : 0;
 }
 
-static void bt_listen_test(void)
+void bt_listen_test(void)   /* in the Developer tests overlay (startup/ap_ovl.c) */
 {
     bt_listen_t r;
     char txt[48], buf[48];
@@ -571,7 +572,7 @@ static int tone_burst(const int16_t *sine64, int seconds, int16_t *chunk,
 /* DAC bring-up test (Exp 1/2 of docs/rewrite/dac.md §7): run the CS43131
  * init (recovered from the reference fw1), show the breadcrumb + I2C scan
  * + HP status, then feed a 1 kHz tone over I2S1 until POWER (or 3 s). */
-static void dac_test_run(void)
+void dac_test_run(void)   /* in the Developer tests overlay (startup/ap_ovl.c) */
 {
     /* sin(2*pi*i/64) * 9000, i = 0..63 */
     static const int16_t sine64[64] = {
@@ -734,7 +735,7 @@ static void cdc_exec(char *ln)
  * storage" menu entry runs MSC on demand). Returns on POWER or unplug,
  * then tears the core down so the next mode starts from a host-visible
  * disconnect instead of stale endpoint state. */
-static void usb_console_run(void)
+void usb_console_run(void)   /* in the Developer tests overlay (startup/ap_ovl.c) */
 {
     char ln[64];
     unsigned len = 0, frames = 0;
@@ -794,8 +795,6 @@ static void usb_storage_run(void)
     usb_session();
 }
 
-static void usb_dac_session(void);
-
 /* USB-C probe: which of the player's own pins puts voltage on VBUS (usb_probe.h), and
  * whether a USB-C earphone plugged in then connects. A row per step: the comparators'
  * trip masks over their eight reference codes (v VBUS valid, b B-session, a A-session,
@@ -809,7 +808,7 @@ static void usb_probe_screen(int step, const char *name)
     display_flush_rows(0, DISPLAY_H - 1);
 }
 
-static void usb_probe_menu(void)
+void usb_probe_menu(void)   /* in the Developer tests overlay (startup/ap_ovl.c) */
 {
     static usb_probe_step_t st[USB_PROBE_STEPS];
     char buf[64], up[40] = "", dev[40] = "";
@@ -924,7 +923,7 @@ static int uac_tick(void)
     return g_uac_leave;
 }
 
-static void usb_dac_session(void)
+void usb_dac_session(void)   /* in the USB DAC overlay (startup/ap_ovl.c) */
 {
     int r;
 
@@ -1014,7 +1013,7 @@ static int s_cable_answer;               /* ap_cable_choice(): 1 + the choice */
 static void cable_mode(int c)
 {
     if (c == 1 && usb_cable()) {
-        usb_dac_session();
+        ap_usb_dac();                    /* (an overlay: through its gate, startup/ap_ovl.c) */
     } else if (c == 0) {
         power_screen(1);
         usb_session();
@@ -1243,12 +1242,8 @@ void ap_later(void (*fn)(void)) { s_later = fn; }
 int ap_cable(void) { return usb_cable() && !usb_out_active(); }
 int ap_power_ok(void) { return s_power_press_ok; }
 void ap_usb_disk(void) { usb_storage_run(); }
-void ap_usb_dac(void) { usb_dac_session(); }
-void ap_dac_test(void) { dac_test_run(); }
-void ap_usb_console(void) { usb_console_run(); }
-void ap_usb_probe(void) { usb_probe_menu(); }
-void ap_usb_detect(void) { usb_detect_test(); }
-void ap_bt_listen(void) { bt_listen_test(); }
+/* ap_usb_dac, ap_dac_test, ap_usb_console, ap_usb_probe, ap_usb_detect, ap_bt_listen: the gates of
+ * the overlays that hold them (startup/ap_ovl.c) */
 void ap_power_off(void) { power_off(NULL); }
 
 void ap_update(void)

@@ -25,9 +25,9 @@ static struct { uint32_t fat, data, spc, root, nfats, fatsz, fsinfo; } s_fs;
 static uint32_t le16(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8; }
 static uint32_t le32(const uint8_t *p) { return le16(p) | le16(p + 2) << 16; }
 
-/* ---- CRC-32 poly 0x04C10DB7, MSB first, init 0 (device trailer) ---- */
+/* ---- CRC-32 poly 0x04C10DB7, MSB first, init 0 (device trailer; the overlays' too: ovl.h) ---- */
 
-static uint32_t crc_update(uint32_t crc, const uint8_t *p, uint32_t n)
+uint32_t fwu_crc(uint32_t crc, const uint8_t *p, uint32_t n)
 {
     static uint32_t tab[256];
 
@@ -258,7 +258,7 @@ static int validate(fw_image_t *img, uint32_t first, fwu_progress_t progress)
         if (img_read(img, off >> 9, (n + 511u) >> 9, s_blk))
             return FWU_EIO;
         if (off < img->fw_end)
-            crc = crc_update(crc, h, img->fw_end - off < n ? img->fw_end - off : n);
+            crc = fwu_crc(crc, h, img->fw_end - off < n ? img->fw_end - off : n);
         else if (off == img->fw_end)             /* fw_end is 1 MiB aligned */
             trailer = le32(h);
         sha_update(&sha, h, n);

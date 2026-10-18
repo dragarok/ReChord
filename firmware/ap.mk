@@ -53,7 +53,8 @@ AP_STARTUP_SRCS := \
   firmware/startup/ap_ui.c \
   firmware/startup/ap_bt.c \
   firmware/startup/ap_tick.c \
-  firmware/startup/ap_bg.c
+  firmware/startup/ap_bg.c \
+  firmware/startup/ap_ovl.c
 
 # UI layer (same set as $(UI_SRCS) in firmware/ui/ui.mk).
 AP_UI_SRCS := \
@@ -107,7 +108,8 @@ AP_SERVICE_SRCS := \
   firmware/services/power.c \
   firmware/services/bt_proto.c \
   firmware/services/keyseq.c \
-  firmware/services/bt_keys.c
+  firmware/services/bt_keys.c \
+  firmware/services/ovl.c
 
 # Theme module (same set as $(THEME_SRCS) in firmware/theme/theme.mk).
 AP_THEME_SRCS := \
@@ -177,10 +179,29 @@ AP_CFLAGS := $(AP_ARCH_FLAGS) -Os -Wall \
   $(addprefix -I,$(AP_INCLUDE_DIRS)) \
   -include firmware/rockchip/include/armcc_compat.h
 
+# ---- overlays (firmware/services/ovl.h, docs/MEMORY_MAP.md) --------------
+# Code for modes the user enters and leaves, loaded on demand into the overlay window. What each
+# holds: firmware_ap.ld (its OVERLAY list). AP_OVLS: output section -> module name in the image.
+# AP_OVL_WRAP: the overlays' functions resident code calls by name; each call from another object
+# reaches a gate (__wrap_<name>, firmware/startup/ap_ovl.c) that loads or checks the overlay.
+AP_OVLS := usbdac:ov_dac usbout:ov_uout dev:ov_dev
+comma := ,
+AP_OVL_WRAP := $(addprefix -Wl$(comma)--wrap=,usb_uac_key \
+  usb_out_active usb_out_status usb_out_start usb_out_stop usb_out_poll usb_out_set_format \
+  usb_out_stream_start usb_out_stream_stop usb_out_release usb_out_streaming usb_out_pause \
+  usb_out_set_volume)
+
+# ---- core A's code budget (tools/ap_size.py, run at every link) -----------
+# The build fails with less than AP_MIN_FREE bytes of FW_CODE free: room kept for a fix that must
+# be resident (boot, recovery, a driver). Measured over main's last 60 commits (2026-10-15..18):
+# resident code grew 96.9 KB, per commit median 880 B, 75th percentile 2552 B, 90th 6956 B; 4 KiB
+# lets any ordinary change land and stops a feature-sized one that belongs in an overlay.
+AP_MIN_FREE ?= 4096
+
 # Link: no toolchain libc/startup -- the firmware provides its own libc
 # sources (AP_LIBC_SRCS); -lgcc supplies the compiler runtime
 # (__aeabi_* soft-float helpers), same as link-bb in the Makefile.
 AP_LDFLAGS := $(AP_ARCH_FLAGS) -T $(AP_LDSCRIPT) -Wl,-z,max-page-size=0x1000 \
-  -nostartfiles -nostdlib -ffreestanding
+  -nostartfiles -nostdlib -ffreestanding -Wl,--gc-sections $(AP_OVL_WRAP)
 
 AP_LDLIBS := -lgcc
