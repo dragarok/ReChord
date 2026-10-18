@@ -92,12 +92,12 @@ Stock's FLAC decoder ([code: decode_subframe_lpc 0x0100423E–0x0100436A] = [SDK
   [code: 0x010042C0].
 - What comes back, as stock relies on it: the first `order` words unchanged (the warm-up), every
   later one `res[n] + ((Σ c·s) >> shift)` [code: the in-place job leaves the decoder's final samples
-  in the buffer]. Stock and RECHO play bit-exact against `flac -d` in our machine with a 64-bit sum
-  [trace].
+  in the buffer]. With a 64-bit sum in the model, stock's output in our machine equals `flac -d` on
+  every frame it plays (CD16 and HR24_96; it drops the last 2868 / 3076 frames, as before) [trace].
 - **Accumulator width, rounding, overflow: unknown** [device]. FLAC needs up to
   bits + precision + log2(order) = 25 + 15 + 5 = 45 bits; stock sends 24-bit files' subframes
   (bits 24/25, shift up to 15) to the block [trace: HR24_96 jobs with `FLAC_CFG` 0x00080F00], so
-  either the silicon is wide or stock's 24-bit FLAC is wrong. ReChord tests both classes itself (§5).
+  either the silicon is wide or stock's 24-bit FLAC is wrong. ReChord tests both classes itself (§4).
 - The SDK's software reference for what the block replaces is `Flac_Decode_Lpc` (64-bit sum,
   arithmetic shift, 32-bit add) [SDK-bin]; libFLAC and dr_flac compute the same.
 
@@ -221,27 +221,30 @@ decode in QEMU) computed the same FLAC function with no checks.
 ## 6. Benefit, measured in QEMU
 
 Core B instructions per output frame (`tests/bench.py`, `-icount 2`, `PROF_EXACT`, storage latency
-zero, as m3's budget run), the whole file:
+zero, as m3's budget run; the steady-state window), and the wait loop's share (its turns, logged as
+`polls`, times its 19 instructions):
 
-| File | hifi=off | hifi=auto | hifi=verify | stock (its HIFI) |
-|---|---|---|---|---|
-| CD16 (16/44.1, flac -5) | 135 | 101 | 191 | 260 |
-| HR24_96 (24/96) | 161 | 112 | 210 | 230 |
-| HR24_192 (24/192) | 158 | 111 | 210 | |
-| GAPLESS (2 × 16/44.1) | 136 | 101 | 200 | |
+| File | hifi=off | hifi=auto | of which waiting | auto without the wait | LPC's share of software FLAC | hifi=verify |
+|---|---|---|---|---|---|---|
+| CD16 (16/44.1, flac -5) | 137 | 101 | 6.9 | 94 | 31 % | 191 |
+| HR24_96 (24/96) | 163 | 112 | 6.7 | 105 | 35 % | 210 |
+| HR24_192 (24/192) | 158 | 111 | 6.4 | 105 | 34 % | 210 |
+| GAPLESS (2 × 16/44.1) | 136 | 101 | | | | 200 |
 
-`auto` includes the wait loop at the model's DMA speed (200 MB/s, an assumption: the silicon's
-speed is unknown), about 9 instructions a frame here; without it, the LPC restore was **33 % of
-16-bit FLAC's core-B instructions and 36 % of 24-bit's**. The rest is the bit reader, Rice decoding,
-frame parsing, stereo decorrelation and the output. So the block can at most take a third off
-FLAC's core-B time.
+The wait is the model's (DMA2 at 200 MB/s, the block instant): an assumption, the silicon's speed is
+unknown. **The LPC restore is about a third of FLAC's core-B instructions** (31 % at 16 bits, 35 % at
+24); the rest is the bit reader, Rice decoding, frame parsing, stereo decorrelation and the output.
+So the block can take at most a third off FLAC. For comparison, ReChord's software FLAC already ran
+on 1.6–1.8× fewer core-B instructions than stock and RECHO with their HIFI (`docs/PARITY_PLAN.md` in
+the project repo).
 
-In clock terms (load governor: double above 60 % load, halve below 20 %, 96/48/24/12 MHz), at one
-instruction a cycle: 16/44.1 FLAC needs 6.0 M instructions/s in software and 4.5 M with the block:
-both run at 12 MHz, the lowest step. 24/96: 15.5 M → 10.8 M, 48 → 24 MHz. 24/192: 30.3 M → 21.3 M,
-96 → 48 MHz. **That holds only if the block is at least as fast as the software it replaces**: if it
-takes more than ~8–10 core-B cycles a sample at order 8, it saves nothing (the wait is busy time).
-Its speed is the first thing the device must show (§7).
+In clock terms (the load governor doubles B's clock above 60 % load and halves it below 20 %:
+96/48/24/12 MHz), at one instruction a cycle: 16/44.1 needs 6.0 M instructions/s in software and
+4.5 M with the block: both run at 12 MHz, the lowest step, so **no change for CD-quality FLAC**.
+24/96: 15.6 M → 10.8 M, **48 → 24 MHz**. 24/192: 30.3 M → 21.3 M, **96 → 48 MHz**. That holds only
+if the block is at least as fast as the software it replaces: if it takes more than about 8–10 core-B
+cycles a sample at order 8, it saves nothing (the wait is busy time). Its speed is the first thing
+the device must show (§7).
 
 `verify` costs about 40 % more than software alone: a measurement mode, not one to keep.
 
