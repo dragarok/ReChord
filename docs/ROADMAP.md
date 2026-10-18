@@ -67,11 +67,14 @@ Nothing in ReChord may change what the ROM sees on that path:
   core B for each format).
 
 ### 2. Features
+- A library index: a background scan into a crash-safe index file, then Artists, Albums,
+  Genres, Years, Composers and All Tracks (the idea from upstream, docs/UPSTREAM_IDEAS.md).
+- Settings and the resume point in a double-buffered, checksummed record that survives a power
+  cut mid-write; the log appended and rotated.
 - A 10-band EQ and ReplayGain applied on core B.
 - A real-time clock, a persistent queue across power-off, hold-to-boot, a battery-empty
   shutdown, and swap up/down.
 - A spectrum view.
-- Key gestures like the official firmware: long, double and triple press, and seek.
 - Settings from a phone or a computer. Open question: the stock Bluetooth module has no data
   channel.
 
