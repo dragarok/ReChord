@@ -486,8 +486,9 @@ int b_hifi_open(void)
         return 0;
     }
     if (st == AS_HIFI_OK || st == AS_HIFI_NARROW) {
-        if (s_jobs == 0)
-            hifi_up();                       /* a new core B (image swap): the same set-up again */
+        hifi_up();                           /* stock's FLAC open at every track (seg78 0x01002B76 ->
+                                              * 0x01000228): reset, then the set-up; ALAC or APE may have
+                                              * used the block since (b_hifi_alac.c) */
         return 1;
     }
     if (st != AS_HIFI_UNTESTED)

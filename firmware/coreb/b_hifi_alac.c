@@ -35,6 +35,7 @@ static struct {
     int32_t *ver;                                 /* hifi=verify: a channel's software result (frame_len) */
     uint32_t chans, hw;                           /* channel-frames with LPC; those the block restored */
     uint32_t orders;                              /* bit n: an LPC of order n */
+    int powered;                                  /* this track's open reset the block: its close gates it */
 } s;
 
 /* One channel: in[] (out[0..order] already in place of the residuals), the coefficients in the
@@ -154,8 +155,14 @@ int b_hifi_alac_open(uint32_t frame_len)
         return 0;
     if (AS->hifi_mode == AS_HIFI_VERIFY && !(s.ver = b_try_alloc(frame_len * 4u)))
         return 0;                                 /* (verify without room to verify: software) */
-    if (!b_hifi_is_up())
-        b_hifi_power();                           /* stock's decoder open: clocks on, 1 ms reset */
+    /* Stock's ALAC open resets the block at every track (seg79 0x010024B2 -> HIFI_DMA_TO_register
+     * 0x01000228: the HIFI and DMA2 clocks on, both resets held 1 ms) and its close gates it
+     * (0x0100259C -> 0x01000278), as its APE and FLAC decoders do: a function never starts on what
+     * the last one left. Device 2026-10-18: ALAC after the APE tracks, the block up and not reset,
+     * "ALAC hifi=auto, failed" (its self-test's line was among the dropped ones); APE's own case
+     * (docs/HIFI.md 3b.4) showed a configuration change without a reset going wrong */
+    b_hifi_power();
+    s.powered = 1;
     b_hifi_fn_busy();                             /* Alac_decode_init's set-up */
     HIFI_REG(HIFI_R_FUN_CFG) = FUN_ALAC;
     HIFI_REG(HIFI_R_ACC_CLR) = 3u;
@@ -263,6 +270,9 @@ void b_hifi_alac_close(void)
                              AS->hifi_alac == AS_HIFI_FAILED ? "failed" :
                              AS->hifi_alac == AS_HIFI_OK ? "ok" : "untested");
     s.on = 0;
+    if (s.powered && AS->hifi_state != AS_HIFI_DEAD)
+        b_hifi_gate();                            /* stock's decoder close (0x0100259C -> 0x01000278) */
+    s.powered = 0;
 }
 
 /* For b_alac.c's track line. */

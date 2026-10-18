@@ -178,6 +178,9 @@ void b_flac_close(void)
     const b_hifi_stats_t *h = &b_hifi_stats;
     uint32_t mhz100, wait100;
 
+    if (b_hifi_is_up() && (AS->hifi_state == AS_HIFI_OK || AS->hifi_state == AS_HIFI_NARROW))
+        b_hifi_gate();                           /* stock's FLAC close (seg78 0x01002C76 -> 0x01000278); the
+                                                  * next open resets it (b_hifi_open) */
     if (!s_trk.frames || !b_trk.rate)
         return;
     mhz100 = (uint32_t)((uint64_t)s_trk.cyc * b_trk.rate / s_trk.frames / 10000u);
