@@ -13,6 +13,15 @@
  * The block runs every filter of the level on the channel (16 / 64 / 32 + 256 / 16 + 256 + 1280 taps)
  * and keeps their state (coefficients, history, adapt values, average) inside itself from job to job
  * until the next clear: the software cannot check a job without having run the frame itself.
+ *   each track (stock's decoder open 0x0100261A -> HIFI_DMA_TO_register 0x01000228, its close
+ *     0x0100274E -> 0x01000278): both clocks on and the block and DMA2 through a 1 ms reset at the open,
+ *     the clocks gated at the close. So stock's block only ever runs one configuration (one level and
+ *     version class) between two resets. ReChord does the same: every APE track (and the self-test of
+ *     its level, run at the open) starts on a freshly reset block, and the close gates it. Without it
+ *     (round3) the device failed exactly where the configuration changed with no reset in between
+ *     (ECHOLOG_20261018_round3: the level 4000 self-test after a level 3000 track, "sample 2: hifi -193,
+ *     software -151"; a level 2000 24-bit track after that self-test, "sample 3: hifi -12387, software
+ *     -12481"); docs/HIFI.md 3b.5.
  *
  * So, beyond stock:
  *   - a self-test per level (and version class) before its first use: two frames of jobs on synthetic
@@ -30,7 +39,13 @@
  *   - a bounded wait; a job that times out: the block off until power-off; if the software has the
  *     frame's state (a checked job) it redoes the chunk exactly; otherwise the filter state of the rest
  *     of that frame is gone with the block and those blocks play as silence (the next frame decodes in
- *     software). Stock waits forever.
+ *     software). Stock waits forever;
+ *   - for the next device run (measurement only, nothing plays from it): a failing self-test or check
+ *     logs the job's hifi - software differences (samples s..s+11 from the first bad one, and 32..39,
+ *     where the candidate semantics of docs/HIFI.md 3b.5 differ), and a failing self-test runs once more
+ *     after another reset with 20 ms after each clear start (stock leaves ~15 ms [trace] between the
+ *     clear and the first job: it entropy-decodes a 4096-block chunk in between; ReChord 0.02-0.2 ms).
+ *     The level stays in software either way.
  */
 #include "b_rt.h"
 #include "b_hifi.h"
@@ -58,6 +73,8 @@ static struct {
     uint32_t cfg, taps, k;                        /* APE_CFG, taps a sample, its hifi_ape bit */
     int32_t *chk;                                 /* APE_CHUNK words: a checked job's input, then the software's */
     uint32_t frames;                              /* frames started on the block */
+    int powered;                                  /* this track's open reset the block: its close gates it */
+    uint32_t gap;                                 /* cycles to wait after a clear start (the retry only) */
 } s;
 
 /* ---- the block -------------------------------------------------------------------------------- */
@@ -84,6 +101,12 @@ static void ape_clear(void)
     HIFI_REG(HIFI_R_INTCR) = HIFI_INTCR_STOCK;             /* Hifi_Set_ACC_Intcr */
     HIFI_REG(HIFI_R_FUN_CFG) = CLR_COUNT << 15 | HIFI_FUN_START;   /* Hifi_Set_ACC_XFER_Start(0, 4096, 0) */
     AS->hifi_busy = 0;
+    if (s.gap) {                                           /* the retry: stock's time before the first job */
+        uint32_t t0 = b_cycles();
+
+        while (b_cycles() - t0 < s.gap)
+            ;
+    }
 }
 
 /* One channel's filters over n blocks, in place. 0, or < 0: timed out (the block is off; d[] lost). */
@@ -99,6 +122,37 @@ static int ape_job(int ch, int32_t *d, uint32_t n)
     b_hifi_dma(d, d, n);
     /* the limit: 10 ms, plus 8 cycles a tap (the block's speed is not measured) */
     return b_hifi_fn_wait(t0, (SYST_RVR + 1u) + s.taps * n * 8u, 0, "APE", n);
+}
+
+/* ---- what a failure logs (for the next device run) ---------------------------------------------- */
+
+/* Room for two lines in core A's log ring (4 lines; b_msg drops a line when it is full): up to 100 ms. */
+static void ape_msg_room(void)
+{
+    uint32_t t0 = b_cycles();
+
+    while (AS->b_msg_wr - AS->b_msg_rd > 2u && b_cycles() - t0 < 10u * (SYST_RVR + 1u))
+        ;
+}
+
+/* hifi - software over the job's samples first..first+11 and 32..39 (0 where the job is shorter):
+ * where the candidate semantics of docs/HIFI.md 3b.5 differ (sample 3 and on: one 13-bit filter against
+ * a 3970-style 10-bit one; 35 and on: the 256-tap filter against a 32-tap one). */
+static void ape_dump(const int32_t *hw, const int32_t *sw, uint32_t n, uint32_t first, uint32_t k0)
+{
+    int32_t v[20];
+
+    for (uint32_t i = 0; i < 20u; i++) {
+        uint32_t j = i < 12u ? first + i : 32u + i - 12u;
+
+        v[i] = j < n ? hw[j] - sw[j] : 0;
+    }
+    b_msg("hifi: APE diff hifi-sw from sample %u: %d %d %d %d %d %d %d %d %d %d %d %d", (unsigned)(k0 + first),
+          (int)v[0], (int)v[1], (int)v[2], (int)v[3], (int)v[4], (int)v[5], (int)v[6], (int)v[7], (int)v[8],
+          (int)v[9], (int)v[10], (int)v[11]);
+    b_msg("hifi: APE diff hifi-sw at samples %u..%u: %d %d %d %d %d %d %d %d", (unsigned)(k0 + 32u),
+          (unsigned)(k0 + 39u), (int)v[12], (int)v[13], (int)v[14], (int)v[15], (int)v[16], (int)v[17],
+          (int)v[18], (int)v[19]);
 }
 
 /* ---- self-test -------------------------------------------------------------------------------- */
@@ -123,7 +177,7 @@ static int32_t residual(int ch, uint32_t k, int hot)
 }
 
 /* Two frames: 8 + 2 jobs per channel, interleaved left/right as the decoder sends them. 0 = passed. */
-static int ape_selftest(struct ape_ctx_t *ctx, int32_t *hw, uint32_t *t_us)
+static int ape_selftest(struct ape_ctx_t *ctx, int32_t *hw, uint32_t *t_us, int retry)
 {
     static const uint16_t k_len[2][8] = { { 256, 256, 256, 256, 256, 256, 256, 256 }, { 200, 56 } };
     static const uint8_t k_jobs[2] = { 8, 2 };
@@ -150,10 +204,13 @@ static int ape_selftest(struct ape_ctx_t *ctx, int32_t *hw, uint32_t *t_us)
                 demac_filters_sw(ctx, ch, sw, (int)n);
                 for (uint32_t i = 0; i < n; i++) {
                     if (hw[i] != sw[i]) {
-                        b_msg("hifi: APE self-test (level %u, version %s3980) frame %d job %d channel %d sample %u: "
-                              "hifi %d, software %d", (unsigned)ctx->compressiontype,
+                        ape_msg_room();
+                        b_msg("hifi: APE self-test%s (level %u, version %s3980) frame %d job %d channel %d sample %u: "
+                              "hifi %d, software %d", retry ? " retry" : "", (unsigned)ctx->compressiontype,
                               ctx->fileversion >= 3980 ? ">= " : "< ", f, j, ch, (unsigned)(k[ch] - n + i),
                               (int)hw[i], (int)sw[i]);
+                        ape_msg_room();
+                        ape_dump(hw, sw, n, i, k[ch] - n);
                         return 1;
                     }
                 }
@@ -188,20 +245,40 @@ int b_hifi_ape_open(struct ape_ctx_t *ctx)
     s.chk = b_try_alloc(APE_CHUNK * 4u);
     if (!s.chk)
         return 0;
-    if (!b_hifi_is_up())
-        b_hifi_power();                           /* stock's decoder open: clocks on, 1 ms reset */
+    /* stock's decoder open, at every track (seg80 0x0100261A -> HIFI_DMA_TO_register 0x01000228): both
+     * clocks on, the block and DMA2 through a 1 ms reset, so the block runs one configuration (this
+     * track's level and version class, its self-test included) from a reset, as stock's always does */
+    b_hifi_power();
+    s.powered = 1;
     if (!(AS->hifi_ape & bit)) {
         int32_t *hw = b_try_alloc(APE_CHUNK * 4u);
 
         if (!hw)
             return 0;
-        r = ape_selftest(ctx, hw, &t_us);
+        r = ape_selftest(ctx, hw, &t_us, 0);
+        if (r > 0) {
+            /* measurement only: once more from another reset, with stock's time between each clear
+             * start and the first job (~15 ms [trace]); the level stays in software either way */
+            uint32_t t2 = 0;
+            int r2;
+
+            b_hifi_power();
+            s.gap = 2u * (SYST_RVR + 1u);         /* 20 ms */
+            r2 = ape_selftest(ctx, hw, &t2, 1);
+            s.gap = 0;
+            ape_msg_room();
+            b_msg("hifi: APE self-test retry (another reset, 20 ms after each clear start): %s",
+                  r2 < 0 ? "timed out" : r2 ? "failed" : "passed");
+            if (r2 < 0)
+                r = -1;
+        }
         b_free(hw);
         memset(&b_hifi_fn_stats, 0, sizeof b_hifi_fn_stats);   /* (the self-test's jobs are not the track's) */
         if (r < 0)
             return 0;                             /* timed out: dead, logged */
         if (r) {
             AS->hifi_ape |= bit << 8;
+            ape_msg_room();
             b_msg("hifi: APE self-test failed: level %u in software", (unsigned)ctx->compressiontype);
             return 0;
         }
@@ -285,6 +362,8 @@ int demac_rechord_filters(struct ape_ctx_t *ctx, int ch, int32_t *d, int count)
                 b_hifi_fn_stats.redone++;
                 if (m < n)
                     demac_filters_sw(ctx, ch, s.chk + m, (int)(n - m));
+                if (b_hifi_fn_stats.mismatch == 1u)
+                    ape_dump(d, s.chk, n, i, 0);      /* (dropped if core A's ring is full: no wait here) */
                 memcpy(d, s.chk, n * 4u);         /* the software's samples play */
                 if (AS->hifi_mode != AS_HIFI_VERIFY) {
                     AS->hifi_ape |= 1u << (s.k + 8u);
@@ -313,4 +392,7 @@ void b_hifi_ape_close(void)
         b_hifi_fn_track_line("APE", AS->hifi_state == AS_HIFI_DEAD ? "dead" : AS->hifi_ape & 1u << (k + 8u) ?
                              "failed" : AS->hifi_ape & 1u << k ? "ok" : "untested");
     s.on = 0;
+    if (s.powered && AS->hifi_state != AS_HIFI_DEAD)
+        b_hifi_gate();                            /* stock's decoder close (0x0100274E -> 0x01000278) */
+    s.powered = 0;
 }

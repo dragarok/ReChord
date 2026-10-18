@@ -229,6 +229,72 @@ Each chunk of up to 4096 blocks, per channel (ape_apply_filters 0x0100341E):
 Where in that clear sequence the silicon resets the state (the bit-21 write, ACC_CLR or the
 data-less start) is not known [device]; ReChord replays the whole sequence.
 
+Each track: the decoder's open (seg80 0x01002594…0x0100261A) calls HIFI_DMA_TO_register
+(0x01000228: HCLK_HIFI and HCLK_HIGH_DMA on, DMA2_SRST and HIFI_SRST held 1 ms, released, DMA2's
+interrupt registered) [code], and its close (0x0100274A) APE_free then HIFI_DMA_TO_Unregister
+(0x01000278: the interrupt off, both clocks gated) [code]. **So stock's block runs one APE
+configuration (one level, one version class) from a reset to the next**: one file per decoder open.
+[trace, 2026-10-18, `-machine hifi-log=on`]: stock's APE16, APE16X, APE24 (24/96 normal: the same
+APE_CFG 0x840B0000 and sequence as 16-bit, 4096-word jobs; nothing kept off the block for 24-bit),
+APE24X: `hifi-srst` (HIFI_SRST asserted) at the decoder open, then the same writes as above in every
+frame, 0 VIOLATION (the model's new "configuration since the reset" rule included; one file per run:
+the bench does not drive stock through a playlist, so the per-track reset is shown by the code). Between the clear start and the frame's first
+job stock entropy-decodes the first chunk: **14.96–15.51 ms** at 16/44.1, **19.2–19.4 ms** at 24/96
+(virtual time, `-icount shift=2`) [trace].
+
+### 3b.5 What the device showed (2026-10-18) and why
+
+ECHOLOG_20261018_round3 (round3, one boot, bape loaded once, so the block reset once at the first
+APE open: round3 reset it only when `!b_hifi_is_up()`) [device]:
+
+| Order | Block use since that reset | Result [device] |
+|---|---|---|
+| 1 | level 2000 self-test, then 2000 track (16-bit) | passed; 46 jobs checked, 0 mismatched |
+| 2 | level 3000 self-test, then 3000 track | passed; 46 checked, 0 mismatched |
+| 3 | level 4000 self-test | `frame 0 job 0 channel 0 sample 2: hifi -193, software -151` |
+| 4 | level 2000, 24/96 track (APE_HR24_96) | `APE job 0 (level 2000, channel 0, frame 1) sample 3: hifi -12387, software -12481` |
+
+Where ReChord differed from stock [code, trace]: (a) **the configuration changed with no reset in
+between** (rows 2–4; stock resets at every decoder open, 3b.4); (b) the clear start to first job gap:
+0.020–0.028 ms in the self-test, 0.15–0.20 ms when decoding, against stock's ~15 ms [trace: ReChord
+APE16/16X/24/24X, `hifi-log=on`]; (c) 256-word jobs against stock's 4096. Every register value and
+write order is stock's (APE_CFG 0xA80AD000 / 0x840B0000 written version-bit-first then OR-ed into the
+read-back, the clear sequence, DMACR, INTCR, FUN_CFG) [trace, both]; ReChord sends every level and
+both bit depths to the block, as stock does.
+
+The two values, reproduced (a host simulation of libdemac's filters with knobs, on the self-test's
+own vectors: residuals 1561, 1342, -198, 0, … for frame 0 channel 0, and APE_HR24_96's frame 1
+channel 0 job 0 input 0, -15557, -5993, -12387, …, dumped from aperef's decoder) [inferred]:
+
+- Level 4000 at sample 2 is the first sample any filter changes (the first adaption needs two
+  samples): the 32/10 filter adds `(32·1342 + 512) >> 10 = 42`, the 256/13 one `(32·1342 + 4096) >> 13
+  = 5`, so libdemac gives -198 + 42 + 5 = **-151** (the device's "software"). The device's **-193** =
+  -198 + 5: **the 256/13 filter alone; the 32-tap filter contributed nothing.** Of the candidates tried
+  (both filters in either order, either one alone, fraction bits swapped, either filter or both with
+  3.97 adaption, unsaturated history, adaption from the input, both filters on the input in parallel
+  or chained), only "one 13-bit filter, the 32/10 one absent" (the 256/13 alone, or 32 taps at 13 bits)
+  gives -193 while passing levels 2000 and 3000; "the 32/10 filter alone with 3.97 adaption" gives
+  -193 too but fails 2000 and 3000, which the device passed.
+- Level 2000 at 24/96: samples 0–2 pass through every filter unchanged (the input's first sample is
+  0, so the first adaption value is 0); at sample 3 libdemac adds `(32·(-5993) + 1024) >> 11 = -94`
+  (**-12481**); the device's **-12387** is the input itself: **the 16-tap filter contributed nothing.**
+  No arithmetic of the filter does that from a cleared state with these small (16-bit) values; the
+  device passed the same level with clean state (rows 1). Nothing here is 24-bit specific.
+- One rule fits all four rows: **after a configuration change with no reset, the first filter slot
+  (the 16/64/32-tap one) is inert where its order shrank or its fraction bits changed (64 → 32 taps,
+  11 → 10 bits; 32 → 16, 10 → 11), and works where it only grew (16 → 64 at 11 bits, row 2); a slot
+  used for the first time since the reset (the 256-tap one, row 3) works.** It reproduces -193 and
+  -12387 exactly and the passes; the records do not tell "order shrank" from "fraction bits changed"
+  [inferred]. A mechanism that would give it: the clear zeroes the state but not a slot's internal
+  ring position/configuration latch, which only the reset sets [inferred].
+- The other difference, the clear-to-job gap (b), does not explain row 4 (2000 passed with a 0.028 ms
+  gap in row 1 and failed with 0.2 ms in row 4); it is measured anyway (4.2, retry).
+
+The fix (branch ape-fix): stock's decoder open and close at every APE track (b_hifi_ape_open:
+`b_hifi_power()` unconditionally, so the track's level, self-test included, runs from a reset;
+b_hifi_ape_close: `b_hifi_gate()`). The model (§5) reproduces rows 3 and 4 with round3's firmware,
+names the cause with a VIOLATION, and passes the fixed firmware on the same playlist.
+
 ## 3c. The ALAC function (type 3)
 
 ### 3c.1 What it computes
@@ -368,6 +434,16 @@ bytes of FW_CODE.
   blocks play as **silence** (counted, "silenced"); the next frame decodes in software.
 - **Costs nothing when off**: `hifi=off` (or fast, or a failed level) is one call that returns 0
   per channel and chunk, and the block is never touched (m39 k: no access at all).
+- **A reset at every track (ape-fix)**: stock's decoder open (clocks on, the block and DMA2 through a
+  1 ms reset) at every APE track that uses the block, before its level's self-test, and stock's close
+  (the clocks gated) at its end: the block runs one configuration from a reset, as stock's (§3b.4,
+  §3b.5). Costs 1 ms of core B a track.
+- **What a failure logs (measurement only)**: a failing self-test or check also logs the job's
+  hifi − software differences at samples s..s+11 (from the first bad one) and 32..39 (where the
+  candidates of §3b.5 differ: sample 3 on tells one 13-bit filter from a 3.97-style 10-bit one, 35 on
+  the 256-tap filter from a 32-tap one). A failing self-test runs once more after another reset with
+  20 ms after each clear start (stock's gap, §3b.4) and logs the result; the level stays in software
+  either way.
 
 ### 4.3 ALAC (b_hifi_alac.c, b_alac.c, alac/alac_dec.c)
 
@@ -415,7 +491,10 @@ APE and ALAC (b_hifi_ape.c, b_hifi_alac.c, b_hifi_fn.c):
 
 ```
 hifi: APE self-test passed (level <L>, version >= 3980|< 3980, 20 jobs, <t> us): NN filters on HIFI[, every sample verified]
-hifi: APE self-test (level <L>, version ...) frame <f> job <j> channel <c> sample <i>: hifi <x>, software <y>
+hifi: APE self-test[ retry] (level <L>, version ...) frame <f> job <j> channel <c> sample <i>: hifi <x>, software <y>
+hifi: APE diff hifi-sw from sample <i>: <d_i> ... <d_i+11>
+hifi: APE diff hifi-sw at samples <k+32>..<k+39>: <d> x8
+hifi: APE self-test retry (another reset, 20 ms after each clear start): passed|failed|timed out
 hifi: APE self-test failed: level <L> in software
 hifi: ALAC self-test passed (5 jobs, <t> us on the block): its LPC on HIFI[, every sample verified]
 hifi: ALAC self-test job <v> (order <o>, quant <q>, <bps>-bit) sample <i>: hifi <x>, software <y>
@@ -478,6 +557,11 @@ The same section models stock's other two functions ("APE and ALAC" in echo_mini
   A hung job's RX transfer now never completes (`dma_block_done`: the RX request never comes), as
   on the silicon; before, the model's DMA read zeros out of the empty FIFO and finished.
 - `hifi-ape:` / `hifi-alac:` lines (under `-d unimp`) name each APE_CFG and ALAC order the first time.
+- **Configuration changes without a reset (ape-fix)**: VIOLATION for an APE clear with another
+  APE_CFG than the first since the block's reset (stock: one configuration per decoder open, §3b.4);
+  and, as the device does (§3b.5, [inferred]), a filter slot whose order shrank or whose fraction bits
+  changed since the reset passes its input through (`hifi-ape: APE_CFG … filter <i> … passes its input
+  through`). With round3's firmware on APELEVELS the model gives the device's two lines value for value.
 - **Stock on the model** [trace, 2026-10-18]: APE16, APE16H, APE16X, APE24, ALAC16, ALAC24: 0
   VIOLATION; every frame stock plays equals the reference, with no event. (Stock leaves out the first
   12288 frames of an APE track and 4096 of an ALAC one, silence in their place: the capture is all
@@ -636,6 +720,16 @@ The NN filter is a multiply-accumulate and an adapt add a tap: a block doing one
 10. **Insane**: core A still skips it (`audio: APE level 5000 at 44100 Hz is too slow for core B`);
     whether to admit it with the block on depends on item 8 (§6.2: real time at 96 MHz needs the
     block at 1.75 taps a cycle or more; 1.43 with the overlap proposal). A proposal, not shipped.
+
+11. **APE after ape-fix** (the same files as 2026-10-18, in the same order: APE_CD16_C2000, C3000,
+    C4000, APE_HR24_96, APE_HR24_X, one boot, `hifi=auto`): every level's `hifi: APE self-test passed`
+    (4000 included), every `hifi: track <n>: APE …, ok, … 0 mismatched`, extra high `NN filters on HIFI`
+    with `core B` well under 96 M cycles/s and no underrun. That confirms §3b.5's cause (a configuration
+    change with no reset). If the 4000 self-test still fails right after its reset: the `hifi: APE diff`
+    lines tell the candidates apart (the 256/13 filter alone gives diffs from sample 2 of -42 21 -1 15 713
+    -62 …; a 3.97-style 32/10 filter alone -42 19 0 10 812 …; 256 vs 32 taps differ from sample 35), and
+    the `retry` line tells whether stock's ~15 ms between the clear and the first job matters (passed:
+    the clear runs on after its start; the decode path then needs that gap too).
 
 No step writes anything but the log and RECHORD.CFG; the block is off with `hifi=off` (all three
 functions). APE extra high 16/44.1 is a good first test of the benefit: in software it needs more
