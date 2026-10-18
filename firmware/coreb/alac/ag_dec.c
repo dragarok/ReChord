@@ -88,18 +88,11 @@ void set_ag_params(AGParamRecPtr params, uint32_t m, uint32_t p, uint32_t k, uin
 
 
 // note: implementing this with some kind of "count leading zeros" assembly is a big performance win
+// ReChord: so it is: Cortex-M3's CLZ (the loop counted up to 32 bits a call, ~90 instructions a
+// sample in lg3a alone); the same result, 32 for 0
 static inline int32_t lead( int32_t m )
 {
-	long j;
-	unsigned long c = (1ul << 31);
-
-	for(j=0; j < 32; j++)
-	{
-		if((c & m) != 0)
-			break;
-		c >>= 1;
-	}
-	return (j);
+	return m ? __builtin_clz((uint32_t)m) : 32;
 }
 
 #define arithmin(a, b) ((a) < (b) ? (a) : (b))

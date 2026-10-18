@@ -12,6 +12,12 @@
 #include "aglib.h"
 #include "dplib.h"
 
+#ifdef ALAC_RECHORD_HIFI
+/* ReChord: unpc_block's LPC on the HIFI block when stock would send it there (coreb/b_hifi_alac.c) */
+void alac_rechord_unpc(int32_t *pc1, int32_t *out, int32_t num, int16_t *coefs, int32_t numactive,
+                       uint32_t chanbits, uint32_t denshift);
+#endif
+
 static uint32_t be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
 
 int alac_init(alac_t *a, const uint8_t *c, void *(*alloc)(size_t))
@@ -46,7 +52,11 @@ static int channel(alac_t *a, BitBuffer *bits, int32_t *dst, uint32_t n, uint32_
         return -1;
     if (mode != 0)
         unpc_block(a->pred, a->pred, (int32_t)n, NULL, 31, chan_bits, 0);
+#ifdef ALAC_RECHORD_HIFI
+    alac_rechord_unpc(a->pred, dst, (int32_t)n, coefs, (int32_t)num, chan_bits, den);   /* (ReChord: HIFI) */
+#else
     unpc_block(a->pred, dst, (int32_t)n, coefs, (int32_t)num, chan_bits, den);
+#endif
     return 0;
 }
 

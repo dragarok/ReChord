@@ -179,10 +179,14 @@ static void delay_cycles(uint32_t n)
         ;
 }
 
+static int s_up;                            /* this core B has powered the block (not gated since) */
+
 /* Stock's decoder open (HIFI_DMA_TO_register 0x01000228, FLAC_decode_init 0x01002D00): both clocks
- * on, both blocks through a 1 ms reset, then the block's set-up. */
-static void hifi_up(void)
+ * on, both blocks through a 1 ms reset (the same in its ALAC and APE images: hifi_power), then the
+ * block's set-up. */
+static void hifi_power(void)
 {
+    s_up = 1;
     REG(CRU_CLKGATE3) = 0x02000000u;
     REG(CRU_CLKGATE4) = 0x08000000u;
     REG(CRU_SOFTRST3) = 0x00800080u;
@@ -190,6 +194,11 @@ static void hifi_up(void)
     delay_cycles((SYST_RVR + 1u) / 10u);     /* 1 ms (stock DelayMs2(1)) */
     REG(CRU_SOFTRST3) = 0x00800000u;
     REG(CRU_SOFTRST2) = 0x00080000u;
+}
+
+static void hifi_up(void)
+{
+    hifi_power();
     REG(HIFI_FUN_CFG) = FUN_FLAC;
     REG(HIFI_ACC_CLR) = 3u;                  /* TX and RX logic clear */
     REG(HIFI_DMACR) = 0x01080108u;           /* both FIFOs on DMA requests, levels 8 */
@@ -198,9 +207,9 @@ static void hifi_up(void)
 
 /* Off for good this boot: DMA2's channels stopped, both blocks reset and their clocks gated
  * (stock's decoder close, HIFI_DMA_TO_Unregister 0x01000278, gates them too). */
-static void hifi_down(uint32_t state)
+static void hifi_gate(void)
 {
-    if (AS->hifi_state == AS_HIFI_OK || AS->hifi_state == AS_HIFI_NARROW || AS->hifi_busy) {
+    if (s_up || AS->hifi_busy) {             /* (powered by this core B: b_hifi_fn.c's functions too) */
         REG(DMA2_CHEN) = 0x0300u;            /* ch0, ch1 off (write enables 8, 9) */
         REG(CRU_SOFTRST3) = 0x00800080u;
         REG(CRU_SOFTRST2) = 0x00080008u;
@@ -210,6 +219,12 @@ static void hifi_down(uint32_t state)
     }
     REG(CRU_CLKGATE3) = 0x02000200u;
     REG(CRU_CLKGATE4) = 0x08000800u;
+    s_up = 0;
+}
+
+static void hifi_down(uint32_t state)
+{
+    hifi_gate();
     AS->hifi_state = state;
     AS->hifi_busy = 0;
 }
@@ -507,4 +522,38 @@ int b_hifi_open(void)
           "passed", (unsigned)t_us, r ? " for narrow subframes only" : "",
           AS->hifi_mode == AS_HIFI_VERIFY ? ", every sample verified" : "");
     return 1;
+}
+
+/* ---- shared with the APE and ALAC functions (b_hifi_fn.c, b_hifi_ape.c, b_hifi_alac.c) ----------- */
+
+void b_hifi_power(void)
+{
+    hifi_power();
+}
+
+int b_hifi_is_up(void)
+{
+    return s_up;
+}
+
+void b_hifi_gate(void)
+{
+    hifi_gate();
+}
+
+void b_hifi_down(uint32_t state)
+{
+    hifi_down(state);
+}
+
+/* One job's two transfers, as stock starts them: TX (in[] -> the TX FIFO) first, then RX. */
+void b_hifi_dma(const int32_t *in, int32_t *out, uint32_t n)
+{
+    dma2_start(CH_TX, sysaddr(in), HIFI_TX, n, CTL_TX, CFGL_TX, CFGH_TX);
+    dma2_start(CH_RX, HIFI_RX, sysaddr(out), n, CTL_RX, CFGL_RX, CFGH_RX);
+}
+
+uint32_t b_hifi_sysaddr(const void *p)
+{
+    return sysaddr(p);
 }

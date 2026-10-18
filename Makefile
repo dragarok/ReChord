@@ -70,13 +70,13 @@ COREB_WMA  := $(patsubst %,wma/%,wmadeci wmafixed mdct fft-ffmpeg mdct_lookup ff
 COREB_WMAPRO := $(patsubst %,wma/pro/%,wmaprodec wma mdct_tables) $(patsubst %,wma/%,mdct fft-ffmpeg mdct_lookup ffmpeg_bitstream)
 COREB_WMALL := wma/lossless/wmalldec wma/pro/wma wma/ffmpeg_bitstream
 COREB_FAMILIES := main aac ogg opus wv dsd ape wma wmapro wmall
-COREB_FAM_main := b_codecs_main b_flac b_hifi b_pcm b_mp3 b_alac $(COREB_MAD) $(COREB_ALAC)
+COREB_FAM_main := b_codecs_main b_flac b_hifi b_pcm b_mp3 b_alac $(COREB_MAD) $(COREB_ALAC) b_hifi_fn b_hifi_alac
 COREB_FAM_aac  := b_codecs_aac b_aac $(COREB_FAAD)
 COREB_FAM_ogg  := b_codecs_ogg b_vorbis $(COREB_TREMOR) $(COREB_OGG)
 COREB_FAM_opus := b_codecs_opus b_opus $(COREB_OPUS) $(COREB_OGG)
 COREB_FAM_wv   := b_codecs_wv b_wavpack $(COREB_WAVPACK)
 COREB_FAM_dsd  := b_codecs_dsd b_dsd dsd/dsd_dec
-COREB_FAM_ape  := b_codecs_ape b_ape $(COREB_DEMAC)
+COREB_FAM_ape  := b_codecs_ape b_ape $(COREB_DEMAC) b_hifi b_hifi_fn b_hifi_ape
 COREB_FAM_wma  := b_codecs_wma b_wma b_asf asf $(COREB_WMA)
 COREB_FAM_wmapro := b_codecs_wmapro b_wmapro b_asf asf $(COREB_WMAPRO)
 COREB_FAM_wmall := b_codecs_wmall b_wmall b_asf asf $(COREB_WMALL)
@@ -100,6 +100,7 @@ $(COREB_DIR)/faad/%.o: COREB_CFLAGS += $(COREB_FAAD_DEFS) -Os
 $(COREB_DIR)/faad/common.o: COREB_CFLAGS += -Dfaad_malloc=faad_malloc_unused -Dfaad_free=faad_free_unused
 $(COREB_DIR)/b_aac.o: COREB_CFLAGS += $(COREB_FAAD_DEFS)
 $(COREB_DIR)/alac/%.o: COREB_CFLAGS += -Ifirmware/coreb/alac -w
+$(COREB_DIR)/alac/alac_dec.o: COREB_CFLAGS += -DALAC_RECHORD_HIFI    # (coreb/b_hifi_alac.c)
 COREB_OPUS_DEFS := -DOPUS_BUILD -DFIXED_POINT -DDISABLE_FLOAT_API -DVAR_ARRAYS -DOP_FIXED_POINT \
                    -DOP_DISABLE_FLOAT_API -DOP_DISABLE_HTTP -Ifirmware/coreb/opus/include -Ifirmware/coreb/opus/celt \
                    -Ifirmware/coreb/opus/silk -Ifirmware/coreb/opus/silk/fixed -Ifirmware/coreb/opus/src \
@@ -111,6 +112,7 @@ $(COREB_DIR)/tremor/%.o $(COREB_DIR)/ogg/%.o $(COREB_DIR)/b_vorbis.o: COREB_CFLA
 $(COREB_DIR)/b_alac.o: COREB_CFLAGS += -Ifirmware/coreb/alac
 $(COREB_DIR)/dsd/%.o: COREB_CFLAGS += -O3
 $(COREB_DIR)/demac/%.o: COREB_CFLAGS += -Wno-unused-variable
+$(COREB_DIR)/demac/decoder.o: COREB_CFLAGS += -DDEMAC_RECHORD_HIFI   # (coreb/b_hifi_ape.c)
 # Rockbox libwma / libwmapro (fixed point, C paths: Rockbox's ARM asm is ARM-mode), FFmpeg's
 # WMA Lossless decoder made standalone (integer). No strict
 # aliasing: the vendored code mixes int32_t (long on newlib) and int pointers.

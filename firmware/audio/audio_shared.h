@@ -41,7 +41,7 @@
 #define AS_LLI            (AS_PCM_RING - 0x100u)   /* 8 x 28 B, just below the ring (SRAM ends at 0x030A0000) */
 
 #define AS_MAGIC          0x4F445541u   /* "AUDO" */
-#define AS_VERSION        10u
+#define AS_VERSION        11u
 #define AS_QUEUE          4u
 
 enum { AS_CODEC_FLAC = 1, AS_CODEC_WAV = 2, AS_CODEC_MP3 = 3, AS_CODEC_AIFF = 4, AS_CODEC_AAC = 5, AS_CODEC_ALAC = 6,
@@ -137,10 +137,16 @@ typedef struct {
     volatile uint32_t b_msg_wr;      /* B */
     volatile uint32_t b_msg_rd;      /* A */
     char b_msg[4][128];              /* B */
+    /* The HIFI block's APE and ALAC functions (coreb/b_hifi_fn.c), each on its own: hifi_state stays
+     * FLAC's, but DEAD there stops every function. hifi_ape: bit k passed, bit 8 + k failed (its
+     * self-test or a check: software until power-off), k = level / 1000 - 2 (+ 4 from version 3980) */
+    volatile uint32_t hifi_ape;      /* B */
+    volatile uint32_t hifi_alac;     /* B: AS_HIFI_UNTESTED, AS_HIFI_OK or AS_HIFI_FAILED */
 } audio_shared_t;
 
-/* hifi_mode: auto = HIFI for FLAC LPC once its self-test passed; off = software only; verify = HIFI,
- * then every sample checked in software (the software result is played; mismatches counted) */
+/* hifi_mode: auto = the HIFI block for FLAC LPC, APE's NN filters and ALAC's LPC, each once its
+ * self-test passed; off = software only; verify = HIFI, then every sample checked in software (the
+ * software result is played; mismatches counted) */
 enum { AS_HIFI_AUTO = 0, AS_HIFI_OFF = 1, AS_HIFI_VERIFY = 2 };
 /* hifi_state */
 enum { AS_HIFI_UNTESTED = 0, AS_HIFI_OK = 1 /* narrow and wide */, AS_HIFI_NARROW = 2 /* wide failed */,
