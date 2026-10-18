@@ -1524,7 +1524,8 @@ int audio_write_ok(void)
 static void stream_switch(void);
 
 /* B fell behind the DMA (input late, or its clock too low): back to full speed,
- * B scales down again from its load. Logged at most once a second. */
+ * B scales down again from its load. Logged at most once every 5 s (the count is the total; at once a
+ * second a stuttering track filled the log's ring, device 2026-10-18). */
 static void check_underrun(void)
 {
     uint32_t n = AS->underruns;
@@ -1532,7 +1533,7 @@ static void check_underrun(void)
     if (n == s_underruns)
         return;
     b_full_speed();
-    if (!s_underrun_log || time_ms() - s_underrun_log >= 1000u) {
+    if (!s_underrun_log || time_ms() - s_underrun_log >= 5000u) {
         log_printf("audio: underrun (%u in all), input %u B buffered", (unsigned)n,
                    (unsigned)(AS->in_wr - AS->in_rd));
         s_underrun_log = time_stamp(time_ms());

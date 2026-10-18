@@ -23,6 +23,7 @@
 #define LOG_SOON_BYTES   2048u      /* this much unsaved: written at the next chance */
 #define LOG_IDLE_MS      10000u     /* anything unsaved, nothing playing: within 10 s */
 #define LOG_PLAYING_MS   30000u     /* while playing: within 30 s */
+#define LOG_URGENT_BYTES 3072u      /* 3/4 of the log's 4 KiB ring: about to drop lines (services/log.c) */
 
 static uint32_t s_log_at;           /* time_ms() of the last log write */
 static uint32_t s_stats_at;
@@ -33,7 +34,11 @@ void ap_bg_poll(void)
     int playing = player_get_state() == PLAYER_PLAYING;
     uint32_t now = time_ms();
 
-    if (!emmc_wq_step(audio_write_ok()))
+    /* A log about to drop lines outranks the audio's headroom: while B is behind (underruns),
+     * audio_write_ok() stays 0 and the queue, and so the log, never moved (device 2026-10-18: 78 and
+     * 36 lines dropped during APE underruns, the ALAC self-test's result among them). A track that
+     * underruns is already failing; one block a pass keeps what says why. */
+    if (!emmc_wq_step(audio_write_ok() || log_bytes() > LOG_URGENT_BYTES))
         log_durable();                   /* (the log written so far is on the disk) */
     config_poll(playing);
     if (!emmc_wq_pending() && log_bytes() &&
