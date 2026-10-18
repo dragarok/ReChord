@@ -37,7 +37,9 @@ published yet.
 | USB-C earphones: the player as USB host to a UAC1/UAC2 device | done | QEMU |
 | Bluetooth (JieLi module, off by default): scan, connect, reconnect, audio routing, earphone keys, settings from earphone key sequences, USB DAC to Bluetooth earphones | done | device (2026-10-17), QEMU; see [BT_DEVICE_NOTES.md](BT_DEVICE_NOTES.md) |
 | Updater: power-cut-safe, both slots, slot repair, ROM USB loader fallback | done | QEMU, maskrom flashing on the device |
-| UI | basic: menus, browser, now playing, settings, Bluetooth and power pages; 8x8 ASCII font | device |
+| UI: no key bar, a status header (play state, volume, Bluetooth icon, battery), 7-row lists, Now Playing on the full height, options, queue, track info, settings, themes, questions that keep the music going, toasts, a hold line; Noto Sans in five sizes with Devanagari; key gestures in milliseconds (tap, hold, 2x, 3x, holds after taps) | device (2026-10-18): key to screen 8 ms median, a screen change ~95 ms on the GPIO bus |
+| Display: display list in 16-row bands, dirty rectangles with column windows, GPIO writer; VOP + DMA path behind a trial guard (display=dma) | GPIO on the device; DMA in QEMU only |
+| No stalls: storage writes queued behind the audio, settings saved at pause, core B at full speed on resume | device |
 
 ## The recovery path comes first
 
@@ -57,32 +59,14 @@ Nothing in ReChord may change what the ROM sees on that path:
 
 ## Next
 
-### 1. A proper UI
-The current UI is functional but plain. In order:
-1. A screenshot test per screen (QEMU `--vshots`), so every UI change is reviewed as images.
-2. A real framebuffer and a faster panel push. Today the CPU drives the panel bus pin by
-   pin, 56-65 ms a full frame. Next: DMA, with a guard that refuses a push method that ever
-   hung, as RECHO 0.10 does.
-3. A UTF-8 text engine. Today every non-ASCII byte is shown as `?`, so curly quotes and
-   Devanagari titles are unreadable. Next: Latin and Devanagari built in, CJK loaded from
-   storage.
-4. Screens:
-   - now playing with tags, cover art, progress and format
-   - the browser by folder and by tag
-   - a queue view and reworked settings
-   - selectable themes (three are built in, none can be picked yet)
+### 1. Display speed and seek
+- **The DMA panel path on the device** (display=dma, behind its trial guard): a full screen in ~8 ms
+  instead of ~90 ms on the GPIO bus, and no more brief tearing during screen changes.
+- **The first Now Playing draw** at a track start took 401 ms on the device: find and remove it.
+- **Seek:** VOL+ or VOL- twice, then held, seeks forward or back in the track (codec-side seek on
+  core B for each format).
 
-### 2. Reliability and speed
-- **Writes without stalls.** Log and config writes block the main loop for up to ~600 ms (one
-  sector at a time, each waiting for the card). They should not stall the UI or the audio.
-- **Core B clock after a pause.** Core B lowers its clock while paused, and nothing raises it
-  again on resume. This is the likely cause of the underrun logged after a pause.
-- **Prompts that starve the audio.** Modal prompts, such as the cable question, must keep
-  feeding the audio.
-- **Resume to an SD folder.** It fails because the card is checked after the resume runs.
-- **Key timing** in milliseconds rather than loop passes.
-
-### 3. Features
+### 2. Features
 - A 10-band EQ and ReplayGain applied on core B.
 - A real-time clock, a persistent queue across power-off, hold-to-boot, a battery-empty
   shutdown, and swap up/down.
@@ -91,7 +75,7 @@ The current UI is functional but plain. In order:
 - Settings from a phone or a computer. Open question: the stock Bluetooth module has no data
   channel.
 
-### 4. Bluetooth follow-ups
+### 3. Bluetooth follow-ups
 - Whether the module answers status polls on a link that came from `CH06`.
 - A listen-only capture of the module's own output.
 

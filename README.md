@@ -61,28 +61,21 @@ The full table, with what's verified on the device and what only in QEMU, is in
 | USB-C earphones (the player as USB audio host) | ✅ QEMU |
 | Bluetooth (JieLi module): connect, reconnect, routing, earphone keys | ✅ device, see [`docs/BT_DEVICE_NOTES.md`](docs/BT_DEVICE_NOTES.md) |
 | Power-cut-safe updater, both slots, ROM USB loader fallback | ✅ QEMU |
-| UI | 🟡 functional but basic (8x8 ASCII font); the rebuild is next |
+| UI: header with play state, volume, Bluetooth icon and battery; 7-row lists; Now Playing with tags, badges, progress and next track; PLAY tap/hold/2x/3x gestures; themes; Noto Sans fonts with Devanagari | ✅ device (2026-10-18) |
+| Fast display: dirty rectangles with column windows; GPIO writer (default); VOP + DMA path behind a trial guard | ✅ GPIO on the device; DMA in QEMU only |
 
 ReChord is experimental. Keep the stock firmware image at hand.
 
 ## Roadmap
 
 Next, in order:
-1. **A proper UI:**
-   - a screenshot test for every screen
-   - a framebuffer with DMA panel push
-   - UTF-8 text (Latin, Devanagari, CJK)
-   - new now-playing, browser, queue and settings screens
-   - themes
-2. **Reliability:**
-   - log and config writes that don't stall the main loop
-   - core B's clock after a pause
-   - prompts that keep feeding the audio
-3. **Features:**
-   - EQ and ReplayGain on core B
-   - a real-time clock and a persistent queue
-   - key gestures
-   - a spectrum view
+1. **Display speed on the device:** the DMA panel path (a full screen in ~8 ms instead of ~90 ms
+   on the GPIO bus), which also removes the brief tearing.
+2. **Seek** (VOL 2x + hold), then EQ and ReplayGain on core B, a real-time clock, a persistent queue,
+   a spectrum view.
+3. **On-device self-test mode** and **hardware decoding** (APE on the HIFI block first): planned.
+4. **Bluetooth control layer:** a data channel through the JieLi module, behind a non-destructive
+   probe of its ROM bootloader first.
 
 Details: [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
