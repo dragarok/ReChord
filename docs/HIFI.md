@@ -1,15 +1,18 @@
 # The HIFI accelerator (RKNanoD, 0x01060000) and ReChord's use of it
 
-ReChord uses the block for one thing: **FLAC's LPC restore** (the prediction filter that turns
-residuals back into samples), on core B, the way stock MINIV390's FLAC decoder uses it, with a
-self-test, a bounded wait, a check of every result and the decoder's own software behind it.
-RECHORD.CFG `hifi=auto|off|verify` (default `auto`). Nothing here has been measured on the device
-yet; section 7 lists what the next flash must measure and the log lines that carry it.
+ReChord uses the block for the three things stock MINIV390 uses it for, on core B, each the way
+stock's decoder for it does: **FLAC's LPC restore** (§3), **APE's NN filters** (§3b) and **ALAC's
+adaptive LPC** (§3c), each with a self-test, a bounded wait, a check of its jobs against the
+decoder's own software and that software behind it. RECHORD.CFG `hifi=auto|off|verify` (default
+`auto`) covers all three. Nothing here has been measured on the device yet; section 7 lists what
+the next flash must measure and the log lines that carry it.
 
-Code: `firmware/coreb/b_hifi.c` (the block), `firmware/coreb/b_flac.c` (the decoder's side),
-`firmware/player/codecs/dr_flac/dr_flac.h` (the `DRFLAC_RECHORD_LPC` hook). Emulator model and
-checker: project repo `qemu/hw/arm/echo_mini.c` ("HIFI accelerator", `dma2_hifi_check`), tests
-`tests/cfw/m37_hifi.sh` and `tests/cfw/hifi_checker_mutants.sh`.
+Code: `firmware/coreb/b_hifi.c` (the block, FLAC), `b_hifi_fn.c` / `b_hifi_fn.h` (what APE and ALAC
+share), `b_hifi_ape.c`, `b_hifi_alac.c`; the decoders' side `b_flac.c`, `b_ape.c` (+ libdemac's
+`demac/decoder.c` hook), `b_alac.c` (+ `alac/alac_dec.c`'s), `firmware/player/codecs/dr_flac/dr_flac.h`
+(the `DRFLAC_RECHORD_LPC` hook). Emulator model and checker: project repo `qemu/hw/arm/echo_mini.c`
+("HIFI accelerator", "APE and ALAC", `dma2_hifi_check`), tests `tests/cfw/m37_hifi.sh`,
+`m39_hifi_ape_alac.sh`, `hifi_checker_mutants.sh`, `hifi2_mutants.sh`.
 
 ## 1. Sources and tags
 
@@ -18,12 +21,14 @@ checker: project repo `qemu/hw/arm/echo_mini.c` ("HIFI accelerator", `dma2_hifi_
 | [SDK] | Rockchip RKNanoD SDK source in `firmware/rockchip/` (`driver/hifi/`, `driver/dma/`) |
 | [SDK-bin] | The SDK's prebuilt decoder libraries (armcc objects with symbols and DWARF macro text): `audio/HIFI/flac/RkNanoD_BHFLAC_20160923.lib` (`hifi_flacdec.o`, `hifi_flac_dec.o`), `HIFI/alac/RkNanoD_BHALAC_20160926.lib`, `HIFI/ape/RkNanoD_BHAPE_20160806.lib`, read with `llvm-objdump` and `strings` |
 | [code: 0x…] | Stock MINIV390, core-B FLAC image (`work/segs/MINIV390/seg78_code_01000000.bin`, loaded at 0x01000000), unless another image is named (seg79 ALAC, seg80 APE) |
-| [trace] | Stock MINIV390 running in our QEMU machine (`tests/bench.py --fw stock`, `-machine hifi-log=on`): CD16 and HR24_96, 2026-10-18 |
+| [trace] | Stock MINIV390 running in our QEMU machine (`tests/bench.py --fw stock`, `-machine hifi-log=on`): CD16 and HR24_96 (FLAC); APE16, APE16H, APE16X, APE24, ALAC16, ALAC24 (APE, ALAC, branch hifi2); 2026-10-18 |
 | [inferred] | Our reading of the above; not proven |
 | [device] | Only the device can tell; not measured |
 
 Stock's FLAC image matches the SDK library instruction for instruction in every HIFI and DMA2 path;
-the only differences are extra log strings [code].
+the only differences are extra log strings [code]. Its ALAC image's `lpc_prediction` and its APE
+image's `ape_apply_filters` / frame start match theirs the same way, but for one detail of
+`APE_Set_CFG` (a register re-read, §3b.2) [code vs SDK-bin].
 
 ## 2. The block
 
@@ -36,11 +41,11 @@ the only differences are extra log strings [code].
 | 0x08 | ACC_INTSR (read) | bit 0 TX empty, bit 1 TX underrun, **bit 15 done**, bit 16 RX at threshold, bit 17 RX overrun. Stock reads only bit 15 [code: 0x01004330] |
 | 0x0C | FUN_CFG | [31:29] type: 0 APE L, 1 APE R, 2 FFT, 3 ALAC, 4 MAC, **5 FLAC**; `count << 15`; bit 0 TX start, bit 1 RX start. The SDK also defines `Data_count 0x1ff << 20`, but every user writes `count << 15` [SDK-bin, code] |
 | 0x10 | ACC_CLR | bit 0 TX logic clear, bit 1 RX logic clear. Stock: 3 at init only [code: 0x01005340] |
-| 0x20 / 0x24 / 0x28 / 0x2C / 0x30 | APE_CFG / FFT_CFG / ALAC_CFG / **FLAC_CFG** / MAC_CFG | FLAC_CFG = `order << 16 \| shift << 8` [SDK `hifi_flac.c` Flac_Set_CFG; code: 0x01002AD0] |
+| 0x20 / 0x24 / 0x28 / 0x2C / 0x30 | **APE_CFG** / FFT_CFG / **ALAC_CFG** / **FLAC_CFG** / MAC_CFG | FLAC_CFG = `order << 16 \| shift << 8` [SDK `hifi_flac.c` Flac_Set_CFG; code: 0x01002AD0]; ALAC_CFG = `bps << 24 \| order << 16 \| quant << 8` [SDK `hifi_alac.c` Alac_Set_CFG; code: seg79 0x01002470]; APE_CFG: version bit 31, level bits, clear bit 21 (§3b.2) |
 | 0x34 / 0x38 | MAC_RSL / MAC_RSH | MAC result |
 | 0x40 | TX FIFO | written by DMA2 ch1 only [code] |
 | 0xA0 | RX FIFO | read by DMA2 ch0 only [code] |
-| 0x1000…0xCFFF | RAM windows | FFT 0x1000/0x2000, APE 0x3000–0x8000, ALAC 0x9000/0xA000, **FLAC coefficients 0xB000** ("max=64x32bit"), FLAC initial data 0xC000 (stock never writes it: the warm-up goes through TX) |
+| 0x1000…0xCFFF | RAM windows | FFT 0x1000/0x2000; APE 0x3000–0x8FFF (L/R coefficients, adapt values, history: the block's own state, stock never touches them); **ALAC coefficients 0x9000** ("max=64x32bit", by the CPU), ALAC initial data 0xA000 (never written); **FLAC coefficients 0xB000** ("max=64x32bit"), FLAC initial data 0xC000 (stock never writes it: the warm-up goes through TX) |
 
 ### 2.2 Clocks, resets, interrupts [SDK-bin DWARF enums; code: 0x01000228, 0x01000278]
 
@@ -132,16 +137,167 @@ Per LPC subframe of order ≥ 3 [code: 0x010042F0–0x01004342; trace]:
 Decoder close [code: 0x01000278]: the DMA2 interrupt off, both clocks gated. No timeouts, retries or
 error paths anywhere [code].
 
+## 3b. The APE function (types 0 = left, 1 = right)
+
+### 3b.1 What it computes
+
+Monkey's Audio decodes in three stages: the range decoder (the residuals), the NN filters (one to
+three adaptive sign-LMS filters a channel, by level) and the predictor (a short adaptive predictor
+and, in stereo, the channels' decorrelation). Stock sends each channel's **NN-filter stage** to the
+block and keeps the other two in software [code: seg80 ape_apply_filters 0x0100341E, ape_unpack_mono
+0x010034A6, ape_unpack_stereo 0x01003508, ape_decode_frame 0x0100368E] = [SDK-bin hifi_ape_apedec.o
+0x6C6, 0x74E, 0x7B0, 0x934]. The library is ffmpeg's APE decoder (its function names, `APESIGN`,
+`ape_filter_orders`, `ape_filter_fracbits`) [SDK-bin].
+
+- **A job** is one channel's filters over `n` blocks, **in place** (TX from the decoded buffer, RX
+  back into it), every filter of the level in turn (normal 16 taps; high 64; extra high 32, then 256;
+  insane 16, 256, then 1280) [code: one job a channel per call; SDK-bin ape_filter_orders].
+- **The filter state lives inside the block** from job to job, one set for the left channel and one
+  for the right (the SDK's windows: coefficients 0x3000 / 0x4000, adapt values 0x5000 / 0x6000,
+  history 0x7000 / 0x8000 [SDK Hw_hifi.h]): the coefficients, the saturated history, the adapt
+  values and the running average. **APE_CFG bit 21 (`APE_Clear`) zeroes it**; stock clears at every
+  frame's start [code: Get_Frame_Info 0x01003926], as libdemac's and ffmpeg's `init_filter` do.
+  Stock never reads or writes the windows [code: no literal in 0x01063000–0x01068FFF].
+- **The arithmetic** [inferred]: the SDK has no software twin (every level above 1000 goes to the
+  block; the lib has no filter code [SDK-bin]). What stock's ffmpeg-derived decoder expects of the
+  block is ffmpeg's `do_apply_filter` = libdemac's `do_apply_filter_3980` / `_3970`, for each
+  sample x of the channel and each filter (order N, fraction bits F):
+
+      dot = Σ c[i]·d[i] over the last N saturated outputs d   (32-bit, wrapping)
+      c[i] -= a[i] if x > 0, += a[i] if x < 0                   (16-bit coefficients, wrapping)
+      y = x + ((dot + 2^(F−1)) >> F);  d ← sat16(y)
+      3.98+: a ← ±32 / ±16 / ±8 / 0 from |y| against the running average (> 3·avg, > 4/3·avg, > 0),
+             avg += (|y| − avg) / 16, then a[−1], a[−2], a[−8] halved
+      before 3.98: a ← ±4 (0 for y = 0), a[−4], a[−8] halved
+
+  and y goes on to the next filter. **[trace]**: with that model, stock's APE decoding in our
+  machine equals the reference on every frame it plays (normal, high and extra high at 16/44.1,
+  normal at 24/96; 0 VIOLATION): what stock relies on the block for is this filter. What the
+  silicon does where stock's use does not pin it down — the dot product's width (Monkey's Audio
+  and libdemac wrap at 32 bits), the rounding add — is [device]: the self-test drives the dot
+  product past 32 bits on purpose (§4.2).
+
+### 3b.2 APE_CFG [code: APE_Set_CFG 0x01002502; SDK hifi_ape.c, hifi_ape.h]
+
+| Level | Filters (taps, fraction bits) | APE_CFG, version ≥ 3.98 | Before 3.98 |
+|---|---|---|---|
+| 1000 fast | none: no job | — | — |
+| 2000 normal | 16, 11 | 0x840B0000 | 0x040B0000 |
+| 3000 high | 64, 11 | 0x900B0000 | 0x100B0000 |
+| 4000 extra high | 32, 10; 256, 13 | 0xA80AD000 | 0x280AD000 |
+| 5000 insane | 16, 11; 256, 13; 1280, 15 | 0xC40BDF00 | 0x440BDF00 |
+
+Bit 31 = version ≥ 3980 (`APE_VERSION_EQUAL_OR_GREAT_3980`), bit 21 = `APE_CLC` [SDK]. Read as
+[inferred]: [28:22] the first filter's order, [30:29] how many follow (256, then 1280), [19:16] /
+[15:12] / [11:8] their fraction bits. `APE_Set_CFG` writes the register twice: the version bit
+alone, then with the level's bits (for normal from a register; for the others OR-ed into a re-read
+of the register) [code; trace: `+0x020 <- 80000000`, `<- 840b0000`].
+
+### 3b.3 Limits stock never exceeds
+
+| Limit | Value | Evidence |
+|---|---|---|
+| levels on the block | above 1000 (fast has no filters) | `cmp #1000` before every job [code: 0x0100342C, 0x01003928] |
+| blocks a job | ≤ 4096 | `blockstodecode = min(left, 4096)` [code: ape_decode_frame 0x010036A8] |
+| APE_CFG | the 8 values above | [code: 0x01002502] |
+| types | 0 (left; mono and pseudo-stereo too), 1 (right) | [code: 0x01003472, ape_unpack_mono] |
+| the clear's start | type 0, 4096, no data after it | [code: 0x0100392E–0x01003964; trace] |
+| INTCR bit 15 | never set; INTSR never read | the image holds `Hifi_Enable_FUN_DONE_FLAG` (0x01004CCA) and `Hifi_Get_ACC_Intsr` (0x01004D10), nothing calls them [code]; hifi_ape_apedec.o imports neither [SDK-bin]; [trace] |
+| the windows 0x3000–0x8FFF | never touched by the CPU | no address of them in the image, the HIFI base only with register offsets [code]; [trace] |
+
+### 3b.4 Programming sequence (stock) [code; trace: stock APE16, `-machine hifi-log=on`]
+
+Decoder open: the same clocks-and-resets open as FLAC's (`HIFI_DMA_TO_register`).
+
+Each frame's start, levels above 1000 (Get_Frame_Info 0x01003926–0x01003964):
+
+1. `FUN_CFG = 0 | 4096 << 15` (stopped: 0x08000000)
+2. `APE_CFG = version`, `APE_CFG = cfg` (APE_Set_CFG)
+3. `APE_CFG |= 0x00200000` (APE_Clear: a read, then 0x842B0000 at normal)
+4. `ACC_CLR = 3`, `DMACR = 0x01080108`, `INTCR = 0x00830083`
+5. `FUN_CFG = 0 | 4096 << 15 | 3` (0x08000003) — and no data: the next write is the first job's
+   stopped `FUN_CFG`
+
+Each chunk of up to 4096 blocks, per channel (ape_apply_filters 0x0100341E):
+
+1. `FUN_CFG = type << 29 | n << 15` (stopped)
+2. `APE_CFG = version`, `APE_CFG = cfg` (bit 21 off again)
+3. `FUN_CFG = type << 29 | n << 15 | 3`
+4. DMA2 ch1 (TX) then ch0 (RX), `n` words, in place (HIFI_DMA_TO_ACC 0x01004EA6)
+5. WFI until ch0's transfer interrupt (0x01004F28) — **without a limit**; nothing else
+
+Where in that clear sequence the silicon resets the state (the bit-21 write, ACC_CLR or the
+data-less start) is not known [device]; ReChord replays the whole sequence.
+
+## 3c. The ALAC function (type 3)
+
+### 3c.1 What it computes
+
+Stock's ALAC decoder is ffmpeg's alac.c [SDK-bin hifi_alac_alac.o: `lpc_prediction`,
+`decode_element`, `rice_decompress`]. Its `lpc_prediction` [code: seg79 0x0100459A, inlined again
+in decode_element at 0x01004B40] = [SDK-bin 0x1D6]:
+
+- **order 0** copies, **order 31** is ALAC's first-order filter: both in software [code: 0x010045BE].
+- The warm-up `out[1..order] = sign_extend(out[i−1] + err[i], bps)` by the CPU, **written back into
+  `err[]`** as well (what the block takes) [code: 0x01004620].
+- **quant ≥ 12**: software (`Alac_Decode_Lpc`, the SDK's own twin of the block) [code: 0x0100462E];
+  quant < 12: the block, out of place (`err[]` → TX, RX → `out[]`), all `n` words [code: 0x01004656–
+  0x010046B0].
+- The coefficients go to 0x9000 by the CPU, in ffmpeg's array order — the bitstream's reversed
+  (decode_element reads them last first, [SDK-bin 0x484–0x4A0]): word j multiplies out[i−order+j].
+  Apple's `unpc_block` (ReChord's software) keeps them in bitstream order: coefs[k] ↔ lag k+1.
+- What comes back [SDK-bin Alac_Decode_Lpc 0xFA, = ffmpeg]: out[0..order] = in[0..order]; then, with
+  d = out[i−order−1],
+
+      val = (Σ c[j]·(out[i−order+j] − d) + 2^(quant−1)) >> quant      (32-bit)
+      out[i] = sign_extend(val + d + in[i], bps)
+      if in[i] ≠ 0: for j = 0.. while in[i]'s remainder keeps its sign: c[j] −= sign(d − out[i−order+j])·sign(in[i]),
+                    the remainder −= ((that sign·(d − out[…])) >> quant)·(j + 1)
+
+  — the coefficients adapt inside the job; nothing is kept between jobs. Apple's `unpc_block`
+  computes the same (its 16-bit coefficients wrap where the SDK's 32-bit ones would not: only past
+  ±32767, never in practice [inferred]). [trace]: stock's ALAC decoding (16/44.1, 24/96) through the
+  model equals the reference on every frame it plays.
+
+### 3c.2 Limits stock never exceeds
+
+| Limit | Value | Evidence |
+|---|---|---|
+| order on the block | 1..30 | 0 and 31 in software [code: 0x010045BE–0x010045CC] |
+| quant (denshift) | < 12 | [code: 0x0100462E] |
+| bps (ALAC_CFG [31:24]) | ffmpeg's sample size − shift + channels − 1, ≤ 32 | [SDK-bin decode_element 0x3BC–0x3CE] |
+| words a job | ≥ 2; the frame length, ≤ 4096 with stock's buffers | `nb_samples > 1` [code: 0x010045B4]; six frame-length buffers from a 0x18400-byte pool [SDK-bin allocate_buffers 0xAB4] [inferred] |
+| ALAC_CFG bits 7..0 | 0 (the SDK's `ALAC_INPUT_END_FLAG`, bit 5, unused) | [SDK hifi_alac.h; code] |
+| ALAC data window 0xA000 | never written (the warm-up goes through TX) | [code] |
+
+### 3c.3 Programming sequence (stock) [code: seg79; trace]
+
+Decoder open (Alac_decode_init 0x010025CC): `FUN_CFG = 0x60000000`, `ACC_CLR = 3`,
+`DMACR = 0x01080108`, `INTCR = 0x00830083` (after the clocks-and-resets open).
+
+Each channel of each frame with order 1..30 and quant < 12 (0x01004656–0x010046B0):
+
+1. `FUN_CFG = 0x60000000 | n << 15` (stopped)
+2. `INTCR |= 0x8000`
+3. `ALAC_CFG = bps << 24 | order << 16 | quant << 8`
+4. `order` words to 0x9000 (`HIFITranData`)
+5. `FUN_CFG = 0x60000000 | n << 15 | 3`
+6. DMA2 ch1 (TX, `err[]`) then ch0 (RX, `out[]`), `n` words
+7. WFI until ch0's transfer, then poll `INTSR & 0x8000` — **without a limit**
+8. `INTCR &= ~0x8000`
+
 ### 3.4 What stock exercises on the 512 MB unit
 
 | Function | Stock image | Evidence |
 |---|---|---|
 | FLAC (type 5) | seg78 | [code], [trace]: CD16 orders 4–8, shifts 9–11; HR24_96 orders 5–8, shifts 12–15; every job 4096 words (the files' block size) |
-| ALAC (type 3) | seg79 | `FUN_CFG 0x60000000`, `ALAC_CFG = bps << 24 \| order << 16 \| quant << 8`, coefficients unreversed to 0x9000, only for `quant < 12` [code: seg79 0x01004656–0x010046B0] |
-| APE (types 0, 1) | seg80 | per channel, `APE_CFG` from version and level, `APE_Clear` (bit 21) per frame, only for levels > 1000 [code: seg80 0x0100343C, 0x01002502] |
+| ALAC (type 3) | seg79 | §3c: orders 1..30 with `quant < 12`, coefficients in ffmpeg's order to 0x9000 [code: seg79 0x01004656–0x010046B0]; [trace]: ALAC16 and ALAC24 (both Apple-style: orders 4 and 8, quant 9, bps 17, 4096 words) |
+| APE (types 0, 1) | seg80 | §3b: per channel, `APE_CFG` from version and level, `APE_Clear` (bit 21) per frame, only for levels > 1000 [code: seg80 0x0100343C, 0x01002502]; [trace]: normal, high, extra high (0x840B0000, 0x900B0000, 0xA80AD000), 4096 words a job |
 | FFT (2), MAC (4) | none | no caller in any stock image or SDK decoder [SDK-bin, code] |
 
-## 4. What ReChord does (b_hifi.c, b_flac.c)
+## 4. What ReChord does
+
+### 4.1 FLAC (b_hifi.c, b_flac.c)
 
 - **Which subframes.** LPC subframes of order 3..32 with a block of at most 4608 (stock's split and
   limits). Fixed-predictor subframes, orders 1–2 and longer blocks stay in software, as in stock.
@@ -181,6 +337,65 @@ Core A's part: `hifi=` parsed and written back like `display=` (only when not `a
 `AS->hifi_mode` at each play, and core B's lines (`AS->b_msg`, 4 × 128 bytes) logged. Cost: 200
 bytes of FW_CODE.
 
+### 4.2 APE (b_hifi_ape.c, b_ape.c, demac/decoder.c)
+
+- **Which jobs.** Levels above fast (stock's split), both versions libdemac reads (3.97–3.99), any
+  bit depth, mono and stereo: each channel of each 256-block chunk (b_ape.c's `CHUNK`; stock sends up
+  to 4096) is one job, in place, stock's sequence and values (§3b.4), including APE_Set_CFG's two
+  writes and the frame-start clear with its data-less start. libdemac's filters are a function of
+  their own (`demac_filters_init`, `demac_filters_sw`, ReChord changes in decoder.c) behind the hook
+  `demac_rechord_filters`; with the hook declining, decode_chunk is libdemac's.
+- **Self-test, per level and version class**, before the level's first use in a boot: two frames
+  (8 and 2 jobs a channel, both channels interleaved as the decoder sends them, a clear before
+  each), synthetic residuals (xorshift32, fixed seeds: ±2^11, every 7th 0, every 61st ±2^18, and
+  in the first frame 200 samples of a constant 30000 that drive the dot product past 32 bits), every
+  output against libdemac's filters on the same input from the same reset. All equal: the block
+  computes libdemac's filters for that level (and its clear works: the second frame). Cost: 20 jobs;
+  in software about 0.5 M (normal) to 24 M (insane) instructions, once.
+- **Checks** (`hifi=auto`): the filter state is in the block, so a job can only be checked by
+  software that has run the frame from its reset. Each frame's first job per channel is checked:
+  its first 64 samples (`APE_CHECK_PART`; the rest only if they differ); in a track's first frame,
+  whole, its first 4096 / taps jobs (16 at normal and high, 14 at extra high, 2 at insane: what
+  shows only once the block's history has filled). A difference: the software's samples play, the
+  rest of that frame goes on in software (exactly: the software has the frame's state) and the level
+  is off until power-off. A fault that starts later in a frame is caught at the next frame's start;
+  the samples between are the block's (m39 g: bounded to the frame). `hifi=verify` catches it at once.
+- **`hifi=verify`**: libdemac runs every job alongside; its samples play; mismatches are counted.
+- **A bounded wait**: 10 ms plus 8 core-B cycles a tap (taps × blocks); stock waits for the RX
+  transfer only (INTCR bit 15 is never set for APE), and so does ReChord. Past it: the block off
+  until power-off (both channels stopped, reset, gated). A checked job is redone from its copy,
+  exactly; any other: the filter state of the rest of that frame went with the block, and those
+  blocks play as **silence** (counted, "silenced"); the next frame decodes in software.
+- **Costs nothing when off**: `hifi=off` (or fast, or a failed level) is one call that returns 0
+  per channel and chunk, and the block is never touched (m39 k: no access at all).
+
+### 4.3 ALAC (b_hifi_alac.c, b_alac.c, alac/alac_dec.c)
+
+- **Which jobs.** Stock's: order 1..30 and quant < 12, plus quant ≥ 1 (Apple's code shifts by −1 at
+  0) and frames with something to predict (n > order + 1); ≤ 4096 words; out of place, Apple's
+  residual buffer → TX, the channel buffer ← RX. The CPU computes the warm-up (Apple's first loop)
+  and writes it over the residuals 1..order, as stock does (kept aside and restored after the job).
+  The coefficients go to 0x9000 reversed from Apple's array (= ffmpeg's order, §3c.1). Stock's open
+  (FUN_CFG 0x60000000, ACC_CLR, DMACR, INTCR) at every ALAC track.
+- **Self-test** at the first ALAC track of a boot: 5 jobs: 4096 words at order 8 / quant 9 / 17 bits
+  (Apple's encoder's own settings; a two-LLI chain), 1500 at 4 / 9 / 16, 1000 at 30 / 11 / 25,
+  700 at 1 / 1 / 32 (sums past 32 bits), 900 at 13 / 5 / 20; every output against `unpc_block`.
+- **Checks**: the coefficients adapt inside the job, so a sample can only be recomputed by running
+  the job from its start: `unpc_block` over the warm-up and the first 32 predicted samples
+  (`ALAC_CHECK`). A difference: the channel redone by `unpc_block` from the residuals, ALAC off until
+  power-off. `hifi=verify`: the whole channel, the software's samples play.
+- **A bounded wait**: 10 ms plus 16 cycles a tap; RX transfer and INTSR bit 15, as stock. Past it:
+  the block off until power-off, the channel redone from the residuals, exactly.
+
+### 4.4 Both: state, switches, logs
+
+- `hifi=auto|off|verify` covers all three functions; each has its own state in the shared block
+  (`hifi_state` FLAC's; `hifi_ape` a bit per level and version class, passed and failed;
+  `hifi_alac`), kept across core-B image swaps (ape ↔ main) until power-off. A dead block (a
+  timeout or a stalled bus: `hifi_busy` set when core B was reloaded) stops all three.
+- Core A: nothing new (the switch and the log drain are FLAC's); FW_CODE unchanged (139352 of
+  161824 B). Core B: `main` 107080 → 110948 B (of 131072), `ape` 20952 → 26124 B.
+
 ### Log lines (core A's log, ECHOLOG.TXT)
 
 ```
@@ -195,6 +410,29 @@ hifi: core B was reloaded while it used the block (a stalled bus?): FLAC LPC in 
 flac: track <n>, <bits>-bit: core B <M> M cycles/s, LPC <hw> of <lpc> subframes on HIFI (wait <W> M/s), orders <mask>
 hifi: track <n>: hifi=<mode>, block <state>, <jobs> jobs, <m> mismatched, <r> redone in software, longest job <t> us, <p> polls
 ```
+
+APE and ALAC (b_hifi_ape.c, b_hifi_alac.c, b_hifi_fn.c):
+
+```
+hifi: APE self-test passed (level <L>, version >= 3980|< 3980, 20 jobs, <t> us): NN filters on HIFI[, every sample verified]
+hifi: APE self-test (level <L>, version ...) frame <f> job <j> channel <c> sample <i>: hifi <x>, software <y>
+hifi: APE self-test failed: level <L> in software
+hifi: ALAC self-test passed (5 jobs, <t> us on the block): its LPC on HIFI[, every sample verified]
+hifi: ALAC self-test job <v> (order <o>, quant <q>, <bps>-bit) sample <i>: hifi <x>, software <y>
+hifi: ALAC self-test failed: its LPC in software
+hifi: check: APE job <j> (level <L>, channel <c>, frame <f>) sample <i>: hifi <x>, software <y>: level in software
+hifi: check: ALAC job <j> (order <o>, quant <q>, <bps>-bit) sample <i>: hifi <x>, software <y>: ALAC's LPC in software from now on
+hifi: verify: APE|ALAC job <j> (...) sample <i>: hifi <x>, software <y> (counting on)
+hifi: APE|ALAC job <j> (<n> samples) not done after <t> us (RX done|not done): the block off until power-off
+hifi: core B was reloaded while it used the block (a stalled bus?): the block off until power-off
+ape: track <n>, level <L>, <bits>-bit: core B <M> M cycles/s, NN filters on HIFI|in software (<jobs> jobs, wait <W> M/s)
+alac: track <n>, <bits>-bit: core B <M> M cycles/s, LPC <hw> of <n> channels on HIFI (wait <W> M/s), orders <mask>
+hifi: track <n>: APE|ALAC hifi=<mode>, <state>, <jobs> jobs, <c> checked, <m> mismatched, <r> redone, <s> silenced, max <t> us, <p> polls
+```
+
+`<state>`: `ok|failed|untested|dead` (APE: the track's level and version class; dead: the block,
+for all three functions); `max`: the longest job's wait. `silenced`: APE blocks played as silence after a failure mid-frame (§4.2). `channels`: ALAC's
+channel-frames with an LPC (orders 1..31); `orders` a bit mask (bit n = order n).
 
 `core B <M> M cycles/s` is core B's time inside the FLAC decoder per second of audio, from SysTick:
 the clock FLAC needs. `wait` is the part of it spent waiting for the block. `orders` is a bit mask of
@@ -212,13 +450,43 @@ RAM window or the MAC result, writes to INTSR or the FFT/MAC registers or the FL
 window, unknown offsets; and through `dma2_hifi_check`: a DMA2 block in core B's 0 alias, longer
 than 4088 words, or a HIFI block with other than stock's CTL/CFG values or channels. Access with the
 clock gated or the block in reset is the machine's general rule (`clkdeps`). Fault injection:
-`-machine hifi-fault=wrong|hang|acc32[@N]`. ALAC and APE jobs (stock's other images) are not
-modelled: they never finish (logged under `-d unimp`).
+`-machine hifi-fault=wrong|hang|acc32[@N]` (FLAC); APE's and ALAC's below.
 
 Before this change the model (2026-10-14, "Bench groundwork", from the SDK headers and stock's
 decode in QEMU) computed the same FLAC function with no checks.
 
+### APE and ALAC (branch hifi2)
+
+The same section models stock's other two functions ("APE and ALAC" in echo_mini.c):
+
+- **APE**: per channel and filter level, the state stock relies on inside the block (16-bit
+  coefficients, the saturated history, the adapt values, the average), zeroed by a start with
+  APE_CFG bit 21 set (both channels); each TX word runs through the level's filters with libdemac's
+  arithmetic (§3b.1, [inferred]). No output word is held back: the RX FIFO has each result at once.
+- **ALAC**: the coefficients from 0x9000 at the start, adapting in the job; words 0..order pass
+  through; the rest per ffmpeg's `lpc_prediction` / the SDK's `Alac_Decode_Lpc` (§3c.1).
+- **VIOLATION**: an APE_CFG other than stock's 8 values; an APE data job with no clear since the
+  block's reset, with another APE_CFG than the clear's, with the clear bit still set, with INTCR
+  bit 15 set, of 0 or more than 4096 words; a clear start other than type 0 with 4096, or TX data in
+  it; ALAC_CFG with order outside 1..30, quant over 11, bps outside 1..32 or other bits; an ALAC
+  job of under 2 or over 4096 words, with INTCR bit 15 clear, or a coefficient outside 16 bits; CPU
+  writes to the APE windows, past the 64 ALAC coefficients, or to the ALAC data window.
+- **Faults** (`-machine hifi-fault=KIND[@N]`, N counting that function's jobs from the boot):
+  `ape-wrong` (every output + 1), `ape-hang` (no output, the RX transfer never ends), `ape-noclear`
+  (the clear does nothing), `ape-drift` (+1 from the 1025th sample after a clear),
+  `alac-wrong` (every predicted sample + 1), `alac-hang`, `alac-noadapt` (no coefficient adaption).
+  A hung job's RX transfer now never completes (`dma_block_done`: the RX request never comes), as
+  on the silicon; before, the model's DMA read zeros out of the empty FIFO and finished.
+- `hifi-ape:` / `hifi-alac:` lines (under `-d unimp`) name each APE_CFG and ALAC order the first time.
+- **Stock on the model** [trace, 2026-10-18]: APE16, APE16H, APE16X, APE24, ALAC16, ALAC24: 0
+  VIOLATION; every frame stock plays equals the reference, with no event. (Stock leaves out the first
+  12288 frames of an APE track and 4096 of an ALAC one, silence in their place: the capture is all
+  zeros up to there; its slower runs end at the bench's 240 s before the track does; it drops the
+  last 2868 frames as with FLAC.)
+
 ## 6. Benefit, measured in QEMU
+
+### 6.1 FLAC
 
 Core B instructions per output frame (`tests/bench.py`, `-icount 2`, `PROF_EXACT`, storage latency
 zero, as m3's budget run; the steady-state window), and the wait loop's share (its turns, logged as
@@ -248,13 +516,96 @@ the device must show (§7).
 
 `verify` costs about 40 % more than software alone: a measurement mode, not one to keep.
 
-ALAC and APE are not on the block yet. From the earlier QEMU profile (work/hwdecode/RESEARCH.md §7)
-APE's NN filters are 35 % (normal), 57 % (high), 83 % (extra high) and ≈ 96 % (insane) of APE's
-core-B cost, about 3.4 instructions a tap: APE extra high 16/44.1 is 105 M instructions/s and insane
-≈ 450 M, beyond 96 MHz. That is where the block could matter, not FLAC. What blocks it: the SDK has
-no software reference for the APE filters (stock sends every level above 1000 to the block), so the
-model's semantics would come from ffmpeg/libdemac only [inferred], and the filter state lives inside
-the block across jobs.
+### 6.2 APE and ALAC (branch hifi2)
+
+Core B instructions per output frame, as for FLAC (`tests/bench.py`, `-icount 2`, `PROF_EXACT`,
+storage latency zero, the steady-state window; work/hifi2 `measure.sh`, `table.py`); "waiting" is
+the wait loop's turns (`polls` in the track line) times its 25 instructions; insane through a
+measurement build that lifts core A's cost gate (`audio.c` `k_ape_cost`: core A skips insane), its
+`off` and `verify` runs at `-icount 0` (4× core B's instruction rate: insane is beyond 96 MHz in
+software). Every run bit-exact (verify at insane: what played before the bench's 120 s ended),
+0 VIOLATION. Build `997f27a`.
+
+| File | rate | hifi=off | hifi=auto | of which waiting | auto without the wait | saved | hifi=verify |
+|---|---|---|---|---|---|---|---|
+| APE fast (16/44.1) | 44.1 k | 394 | 396 | 0 | 396 | (no filters) | 394 |
+| APE normal | 44.1 k | 616 | 408 | 10.5 | 397 | 35 % | 632 |
+| APE high | 44.1 k | 920 | 407 | 10.7 | 396 | 57 % | 954 |
+| APE extra high | 44.1 k | 2390 | 409 | 10.7 | 398 | 83 % | 2390 |
+| APE insane | 44.1 k | 10080 | 406 | 10.7 | 395 | 96 % | 10149 |
+| APE normal 24/96 | 96 k | 642 | 429 | 10.7 | 418 | 35 % | 675 |
+| APE extra high 24/96 | 96 k | 2480 | 428 | 10.5 | 417 | 83 % | 2509 |
+| APE mono, high | 44.1 k | 417 | 157 | 5.3 | 151 | 64 % | 437 |
+| APE 8-bit, normal | 44.1 k | 546 | 350 | 10.5 | 339 | 38 % | 576 |
+| APE gapless pair, normal | 44.1 k | 620 | 406 | 10.5 | 395 | 36 % | 651 |
+| ALAC 16/44.1 | 44.1 k | 332 | 169 | 10.7 | 159 | 52 % | 359 |
+| ALAC 24/96 | 96 k | 424 | 233 | 10.1 | 223 | 47 % | 446 |
+
+- **APE: the block takes the whole NN-filter stage**: every level costs what fast costs (≈ 396),
+  i.e. what is left is the range decoder (≈ 153 a frame) and the predictor (≈ 215), libdemac's,
+  plus ≈ 30 for the output and the runtime [QEMU hotblocks, `tools/hotprof.py`]. The jobs' own
+  cost (set-up, DMA, the checks) is 1–3 instructions a frame at 256 blocks a job; larger jobs would
+  save at most that (not worth b_ape.c's input bound, `IN_KEEP`). The first frame's longer check
+  costs about 0.07 s of software at extra high, once a track (outside the steady window).
+- **ALAC**: with the CLZ change below, the LPC is half of ALAC's software (52 % / 47 %); the Rice
+  decoder `dyn_decomp` is most of the rest (≈ 120 a frame), then the element parsing and the
+  output copy.
+- **`hifi=off` costs nothing**: off is the software (APE fast with the block on: 396 against 394;
+  the differences between `off` here and before the branch, ±1 %, are the window's run-to-run
+  spread), and the block is not touched (m39 k).
+- **`verify`** costs a few per cent more than software alone: a measurement mode.
+
+**Found while profiling, taken: ALAC's `lead()`** (Apple's ag_dec.c: a bit loop counting leading
+zeros, up to 32 turns a call, ~90 instructions a sample in `lg3a` alone; Apple's comment asks for
+CLZ) is `__builtin_clz` (Cortex-M3 CLZ): the same result for every input (32 for 0), **ALAC
+software 648 → 332 (16/44.1) and 744 → 424 (24/96)**, m5 and m39 bit-exact.
+
+**In clock terms** (the governor: up above 60 % load, down below 20 %; 96/48/24/12 MHz), at one
+instruction a cycle [inferred: CPI 1], counting the block's time at an assumed 1 tap a core-B
+cycle [device: its speed is unknown]:
+
+| File | software M/s → MHz | block path (CPU + block at 1 tap/cycle) M/s → MHz |
+|---|---|---|
+| APE normal 16/44.1 | 27.2 → 48 | 17.5 + 1.4 = 18.9 → 48 (no change) |
+| APE high 16/44.1 | 40.6 → 96 | 17.5 + 5.6 = 23.1 → **48** |
+| APE extra high 16/44.1 | 105 → **beyond 96** | 17.6 + 25.4 = 43.0 → **96** (48 from 2.3 taps a cycle) |
+| APE insane 16/44.1 | 445 → beyond 96 (core A skips it) | 17.4 + 137 = 154 → beyond 96: real time needs **≥ 1.75 taps a cycle** at 96 MHz |
+| APE normal 24/96 | 61.6 → 96 | 40.1 + 3.1 = 43.2 → 96 (no change) |
+| APE extra high 24/96 | 238 → beyond 96 | 40.0 + 55.3 = 95.3 → 96 at 99 %: **needs ≥ 1 tap a cycle**, 2 for 70 % |
+| ALAC 16/44.1 | 14.6 → 48 | 7.0 + 0.5 = 7.5 → **24** |
+| ALAC 24/96 | 40.7 → 96 | 21.4 + 1.2 = 22.6 → **48** |
+
+(ALAC's "tap": order × channels × rate, orders 4 and 8 in the corpus.) Extra high at 44.1 kHz is
+past 96 MHz in software today: core A admits it (its gate assumes 240 M/s), so on the device it
+cannot keep up without the block [inferred from the instruction count; device: never measured].
+
+**Break-even** (the block saves nothing when its time per tap is the software's per tap, the wait
+being busy time): saved instructions per channel-sample ÷ taps:
+
+| Function | taps a channel-sample | saved a channel-sample | the block must beat |
+|---|---|---|---|
+| APE normal | 16 | 110 | 6.8 core-B cycles a tap |
+| APE high | 64 | 262 | 4.1 cycles a tap |
+| APE extra high | 288 | 996 | 3.5 cycles a tap |
+| APE insane | 1552 | 4843 | 3.1 cycles a tap |
+| ALAC (orders 4–8) | 4–8 | 87 (16-bit), 100 (24-bit) | about 87 cycles a sample (11–22 a tap) |
+| FLAC (§6.1: (137 − 94) / 2, (163 − 105) / 2) | 3–32 | 21 (16-bit), 29 (24-bit) | about 21–29 cycles a sample |
+
+The NN filter is a multiply-accumulate and an adapt add a tap: a block doing one tap a cycle is
+3–7× under break-even; one at 1/4 tap a cycle saves nothing at extra high and insane.
+
+**Proposals (not shipped)**:
+- **Overlap the job with the CPU's work.** Stock sleeps while a job runs; nothing in the block's use
+  stops core B decoding meanwhile (the next chunk's residuals for APE, the other channel's Rice
+  decoding for ALAC). Same jobs, same values; core B's time becomes max(CPU, block) instead of the
+  sum: at 1 tap a cycle APE extra high 43 → 25 M/s (48 MHz), insane real time from 1.43 taps a cycle.
+  QEMU cannot show it (its block is instant); it needs the device's speed (§7.8) and pipelining in
+  libdemac's decode_chunk.
+- **Admit insane** (core A's `k_ape_cost` gate) when the APE self-test for 5000 has passed — only
+  once the device shows the block at ≥ 1.75 taps a cycle (§7.10).
+- **The software that is left**: libdemac's predictor (≈ 215 a frame, more than half of APE with
+  the block) keeps its state in a struct through every sample; ALAC's output is decoded into a
+  buffer and copied (≈ 11 a frame). Not HIFI work; candidates for the next profiling round.
 
 ## 7. What the next device flash must measure
 
@@ -267,5 +618,26 @@ the block across jobs.
 4. **No timeout**: no `not done after` line; `longest job` well below the 10 ms floor.
 5. **Clock dependence**: the same tracks at the governor's lower steps (it picks them itself on
    16/44.1): still 0 mismatched.
+6. **APE and ALAC self-tests** on the silicon (the first APE track of each level, the first ALAC
+   track): `hifi: APE self-test passed (level <L>, version >= 3980, 20 jobs, <t> us on the block)` /
+   `hifi: ALAC self-test passed (5 jobs, <t> us ...)`, or the failing frame / job / channel / sample
+   with both values. A failure at the APE self-test's first frame after sample 600 (the constant
+   run) points at the dot product's width; one in its second frame at the clear.
+7. **APE and ALAC bit-exactness on real music**: one session with `hifi=verify`, APE normal, high
+   and extra high (16- and 24-bit), ALAC 16 and 24: every `hifi: track <n>: APE|ALAC hifi=verify, …`
+   line `0 mismatched`; a `hifi: verify: APE job …` line is a finding (frame, channel, sample, both
+   values).
+8. **The block's speed per function** (the break-even, §6): `hifi=off` and `hifi=auto` on the same
+   tracks: `ape: track <n>, level <L>, …: core B <M> M cycles/s, NN filters on HIFI (<jobs> jobs, wait
+   <W> M/s)`, `alac: track …`, and each `max <t> us`. Cycles a tap = W × 10^6 / (taps × channels
+   × rate); the block saves only below 6.8 (normal), 4.1 (high), 3.5 (extra high), 3.1 (insane)
+   cycles a tap, and below about 87 cycles a sample for ALAC (§6.2).
+9. **No timeout, no silence**: no `not done after`, every APE line `0 silenced`.
+10. **Insane**: core A still skips it (`audio: APE level 5000 at 44100 Hz is too slow for core B`);
+    whether to admit it with the block on depends on item 8 (§6.2: real time at 96 MHz needs the
+    block at 1.75 taps a cycle or more; 1.43 with the overlap proposal). A proposal, not shipped.
 
-No step writes anything but the log and RECHORD.CFG; the block is off with `hifi=off`.
+No step writes anything but the log and RECHORD.CFG; the block is off with `hifi=off` (all three
+functions). APE extra high 16/44.1 is a good first test of the benefit: in software it needs more
+than 96 MHz (§6.2), so with `hifi=off` it is expected to underrun on the device, and with the block
+on to play.

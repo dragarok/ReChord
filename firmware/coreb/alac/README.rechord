@@ -2,3 +2,6 @@ Apple ALAC (https://github.com/macosforge/alac, c38887c, Apache-2.0): ag_dec.c,
 dp_dec.c, ALACBitUtilities.c and their headers, with <stdio.h>/<math.h> includes
 removed. alac_dec.c is our C port of ALACDecoder.cpp (same element decoding,
 32-bit word output, stream sample counts clamped to the frame length).
+Local change: ag_dec.c lead() (the leading-zero count Apple's comment asks for in assembly) is
+__builtin_clz (Cortex-M3 CLZ) instead of a bit loop: the same results (32 for 0); core B's
+instructions per frame in QEMU 648 -> 335 (16/44.1) and 744 -> 424 (24/96), docs/HIFI.md section 6.

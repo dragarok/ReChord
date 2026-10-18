@@ -1,12 +1,19 @@
 /* Core B: ALAC. Stream from core A: u32 length + the 24-byte ALACSpecificConfig,
- * then u32 length + one frame (packet) each. */
+ * then u32 length + one frame (packet) each. The adaptive LPC goes to the HIFI block
+ * when RECHORD.CFG hifi= allows it (b_hifi_alac.c, docs/HIFI.md); each track ends with
+ * a line in core A's log: core B's cycles per second of audio, the block's share. */
 #include "b_rt.h"
+#include "b_hifi.h"
+#include "b_hifi_fn.h"
 #include "alac/alac_dec.h"
+
+void b_hifi_alac_counts(uint32_t *chans, uint32_t *hw, uint32_t *orders);
 
 static alac_t s_alac;
 static uint8_t *s_pkt;
 static int32_t *s_out;
 static uint32_t s_cap, s_pos, s_n, s_trim;
+static uint32_t s_cyc, s_frames;             /* decode cycles, frames (the track's line) */
 
 static void *alloc(size_t n) { return b_alloc(n); }
 
@@ -28,12 +35,16 @@ int b_alac_open(void)
     s_pos = s_n = 0;
     s_trim = b_trk.trim;
     b_in_need = 4u + s_cap;                  /* one packet */
-    return s_pkt && s_out ? 0 : -1;
+    if (!s_pkt || !s_out)
+        return -1;
+    s_cyc = s_frames = 0;
+    b_hifi_alac_open(s_alac.frame_len);
+    return 0;
 }
 
 uint32_t b_alac_read(int32_t *dst, uint32_t frames)
 {
-    uint32_t got = 0, ch = s_alac.channels;
+    uint32_t got = 0, ch = s_alac.channels, t0 = b_cycles();
 
     while (got < frames) {
         if (s_pos < s_n) {
@@ -67,5 +78,23 @@ uint32_t b_alac_read(int32_t *dst, uint32_t frames)
             s_pos = 0;
         }
     }
+    s_cyc += b_cycles() - t0;
+    s_frames += got;
     return got;
+}
+
+void b_alac_close(void)
+{
+    const b_hifi_fn_stats_t *h = &b_hifi_fn_stats;
+    uint32_t mhz100, wait100, chans, hw, orders;
+
+    if (!s_frames || !b_trk.rate)
+        return;
+    b_hifi_alac_counts(&chans, &hw, &orders);
+    mhz100 = (uint32_t)((uint64_t)s_cyc * b_trk.rate / s_frames / 10000u);
+    wait100 = (uint32_t)((uint64_t)h->wait_cyc * b_trk.rate / s_frames / 10000u);
+    b_msg("alac: track %u, %u-bit: core B %u.%02u M cycles/s, LPC %u of %u channels on HIFI (wait %u.%02u M/s), "
+          "orders %x", (unsigned)b_trk.seq, (unsigned)b_trk.bits, (unsigned)(mhz100 / 100u), (unsigned)(mhz100 % 100u),
+          (unsigned)hw, (unsigned)chans, (unsigned)(wait100 / 100u), (unsigned)(wait100 % 100u), (unsigned)orders);
+    b_hifi_alac_close();
 }

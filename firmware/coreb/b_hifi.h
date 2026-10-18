@@ -39,6 +39,17 @@ uint32_t b_us(uint32_t cycles);
 /* A line for core A's log (%u %d %x %s, %0Nu %0Nx), dropped when core A has 4 unread. */
 void b_msg(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
+/* Shared with the other functions' code (b_hifi_fn.c): the block's power-up (clocks on, 1 ms reset;
+ * b_hifi_up adds FLAC's set-up), its power-down (channels stopped, reset, gated; b_hifi_down also sets
+ * hifi_state), DMA2's two transfers of one job, and the system address DMA2 takes. */
+void b_hifi_power(void);
+int b_hifi_is_up(void);                     /* powered by this core B, not gated since */
+void b_hifi_up(void);
+void b_hifi_gate(void);
+void b_hifi_down(uint32_t state);
+void b_hifi_dma(const int32_t *in, int32_t *out, uint32_t n);
+uint32_t b_hifi_sysaddr(const void *p);
+
 /* Counters for the track's summary line, cleared at each FLAC track's open (b_flac.c). */
 typedef struct {
     uint32_t jobs, samples, wait_cyc, wait_max_cyc, mismatch_jobs, sw_subframes;

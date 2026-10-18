@@ -59,17 +59,11 @@ static filter_int filterbuf1280[(1280*3 + FILTER_HISTORY_SIZE) * 2]
                   IBSS_ATTR_DEMAC_INSANEBUF MEM_ALIGN_ATTR;
                   /* 17408 or 34816 bytes */
 
-void init_frame_decoder(struct ape_ctx_t* ape_ctx,
-                        unsigned char* inbuffer, int* firstbyte,
-                        int* bytesconsumed)
+/* ReChord: the NN filters' reset and one channel's filters, apart (DEMAC_RECHORD_HIFI: the HIFI
+   block can take a channel's filters, coreb/b_hifi_ape.c, and checks its jobs with these). */
+void demac_filters_init(int compressiontype)
 {
-    init_entropy_decoder(ape_ctx, inbuffer, firstbyte, bytesconsumed);
-    //printf("CRC=0x%08x\n",ape_ctx->CRC);
-    //printf("Flags=0x%08x\n",ape_ctx->frameflags);
-
-    init_predictor_decoder(&ape_ctx->predictor);
-
-    switch (ape_ctx->compressiontype)
+    switch (compressiontype)
     {
         case 2000:
             init_filter_16_11(FILTERBUF16);
@@ -89,6 +83,56 @@ void init_frame_decoder(struct ape_ctx_t* ape_ctx,
             init_filter_256_13(filterbuf256);
             init_filter_16_11(FILTERBUF32);
     }
+}
+
+void ICODE_ATTR_DEMAC demac_filters_sw(struct ape_ctx_t* ape_ctx, int ch,
+                                       int32_t* data, int count)
+{
+    switch (ape_ctx->compressiontype)
+    {
+        case 2000:
+            apply_filter_16_11(ape_ctx->fileversion,ch,data,count);
+            break;
+
+        case 3000:
+            apply_filter_64_11(ape_ctx->fileversion,ch,data,count);
+            break;
+
+        case 4000:
+            apply_filter_32_10(ape_ctx->fileversion,ch,data,count);
+            apply_filter_256_13(ape_ctx->fileversion,ch,data,count);
+            break;
+
+        case 5000:
+            apply_filter_16_11(ape_ctx->fileversion,ch,data,count);
+            apply_filter_256_13(ape_ctx->fileversion,ch,data,count);
+            apply_filter_1280_15(ape_ctx->fileversion,ch,data,count);
+    }
+}
+
+#ifdef DEMAC_RECHORD_HIFI
+void demac_rechord_frame(struct ape_ctx_t* ape_ctx);
+int demac_rechord_filters(struct ape_ctx_t* ape_ctx, int ch, int32_t* data, int count);
+#define FILTERS(ctx, ch, data, count) \
+    do { if (!demac_rechord_filters(ctx, ch, data, count)) demac_filters_sw(ctx, ch, data, count); } while (0)
+#else
+#define FILTERS(ctx, ch, data, count) demac_filters_sw(ctx, ch, data, count)
+#endif
+
+void init_frame_decoder(struct ape_ctx_t* ape_ctx,
+                        unsigned char* inbuffer, int* firstbyte,
+                        int* bytesconsumed)
+{
+    init_entropy_decoder(ape_ctx, inbuffer, firstbyte, bytesconsumed);
+    //printf("CRC=0x%08x\n",ape_ctx->CRC);
+    //printf("Flags=0x%08x\n",ape_ctx->frameflags);
+
+    init_predictor_decoder(&ape_ctx->predictor);
+
+    demac_filters_init(ape_ctx->compressiontype);
+#ifdef DEMAC_RECHORD_HIFI
+    demac_rechord_frame(ape_ctx);
+#endif
 }
 
 int ICODE_ATTR_DEMAC decode_chunk(struct ape_ctx_t* ape_ctx,
@@ -117,26 +161,9 @@ int ICODE_ATTR_DEMAC decode_chunk(struct ape_ctx_t* ape_ctx,
             return 0;
         }
 
-        switch (ape_ctx->compressiontype)
-        {
-            case 2000:
-                apply_filter_16_11(ape_ctx->fileversion,0,decoded0,count);
-                break;
-    
-            case 3000:
-                apply_filter_64_11(ape_ctx->fileversion,0,decoded0,count);
-                break;
-    
-            case 4000:
-                apply_filter_32_10(ape_ctx->fileversion,0,decoded0,count);
-                apply_filter_256_13(ape_ctx->fileversion,0,decoded0,count);
-                break;
-    
-            case 5000:
-                apply_filter_16_11(ape_ctx->fileversion,0,decoded0,count);
-                apply_filter_256_13(ape_ctx->fileversion,0,decoded0,count);
-                apply_filter_1280_15(ape_ctx->fileversion,0,decoded0,count);
-        }
+        /* Compression type 1000 doesn't have any filters (ReChord: apart, above) */
+        if (ape_ctx->compressiontype > 1000)
+            FILTERS(ape_ctx, 0, decoded0, count);
 
         /* Now apply the predictor decoding */
         predictor_decode_mono(&ape_ctx->predictor,decoded0,count);
@@ -169,33 +196,11 @@ int ICODE_ATTR_DEMAC decode_chunk(struct ape_ctx_t* ape_ctx,
             return 0;
         }
 
-        /* Apply filters - compression type 1000 doesn't have any */
-        switch (ape_ctx->compressiontype)
-        {
-            case 2000:
-                apply_filter_16_11(ape_ctx->fileversion,0,decoded0,count);
-                apply_filter_16_11(ape_ctx->fileversion,1,decoded1,count);
-                break;
-    
-            case 3000:
-                apply_filter_64_11(ape_ctx->fileversion,0,decoded0,count);
-                apply_filter_64_11(ape_ctx->fileversion,1,decoded1,count);
-                break;
-    
-            case 4000:
-                apply_filter_32_10(ape_ctx->fileversion,0,decoded0,count);
-                apply_filter_32_10(ape_ctx->fileversion,1,decoded1,count);
-                apply_filter_256_13(ape_ctx->fileversion,0,decoded0,count);
-                apply_filter_256_13(ape_ctx->fileversion,1,decoded1,count);
-                break;
-    
-            case 5000:
-                apply_filter_16_11(ape_ctx->fileversion,0,decoded0,count);
-                apply_filter_16_11(ape_ctx->fileversion,1,decoded1,count);
-                apply_filter_256_13(ape_ctx->fileversion,0,decoded0,count);
-                apply_filter_256_13(ape_ctx->fileversion,1,decoded1,count);
-                apply_filter_1280_15(ape_ctx->fileversion,0,decoded0,count);
-                apply_filter_1280_15(ape_ctx->fileversion,1,decoded1,count);
+        /* Apply filters - compression type 1000 doesn't have any (ReChord: per channel, all of a
+           channel's filters in turn: the channels' filters are independent) */
+        if (ape_ctx->compressiontype > 1000) {
+            FILTERS(ape_ctx, 0, decoded0, count);
+            FILTERS(ape_ctx, 1, decoded1, count);
         }
 
         /* Now apply the predictor decoding */
