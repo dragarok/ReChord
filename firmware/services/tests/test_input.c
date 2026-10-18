@@ -422,7 +422,8 @@ static void test_edges(void)
     edges(260, 4, p1, r1);                   /* (the band kept while the voltage rises) */
     edges(1023, 2, p1, r1);
     CHECK(next_is(KEY_SELECT, IG_DOWN, 1));
-    CHECK(input_next(&ev) == 1 && ev.gesture == IG_TAP && ev.t_ms == r1 && ev.held_ms == r1 - p1);
+    CHECK(input_next(&ev) == 1 && ev.gesture == IG_TAP && ev.t_ms == r1 && ev.held_ms == r1 - p1 &&
+          ev.in_ms == s_t - r1);             /* (in: the release edge to the TAP, key->px's "in") */
     edges(1023, 15, 0, r1);
     p2 = s_t + 5;                            /* tap 2: MENU's band stable 30 ms first */
     edges(360, 2 + 2, p2, 0);
@@ -439,7 +440,8 @@ static void test_edges(void)
     p1 = s_t + 5;
     edges(515, 3, p1, 0);                    /* BACK's band on the way (as long as you like) */
     edges(260, 70, p1, 0);
-    CHECK(next_is(KEY_SELECT, IG_DOWN, 1));
+    CHECK(input_next(&ev) == 1 && ev.key == KEY_SELECT && ev.gesture == IG_DOWN &&
+          ev.in_ms == ev.t_ms - p1 && ev.in_ms >= 60);   /* (a DOWN's in: from the press edge, the sweep in it) */
     CHECK(input_next(&ev) == 1 && ev.gesture == IG_HOLD && ev.t_ms - p1 >= 500 && ev.t_ms - p1 < 510);
     r1 = s_t + 5;
     edges(260, 5, p1, r1);

@@ -18,11 +18,6 @@
 #include "text.h"
 #include "panel_io.h"
 
-/* DCS command bytes. */
-#define DCS_CASET  0x2A  /* column address set */
-#define DCS_RASET  0x2B  /* row address set    */
-#define DCS_RAMWR  0x2C  /* memory write       */
-
 #define TEXT_BYTES 4096
 #define BAND       DISPLAY_BAND_ROWS
 
@@ -53,7 +48,8 @@ static display_stats_t s_st;
 static display_log_fn s_log;
 static int s_in_frame;
 static uint32_t s_frame_t0, s_rows, s_px;
-static uint32_t s_mark_ms;
+static uint32_t s_r0, s_p0;                     /* render_us, push_us when the last frame ended */
+static uint32_t s_mark_ms, s_mark_in, s_mark_at, s_mark_us;   /* the key: edge, edge->event, handled (ms, us) */
 static int s_marked;
 
 static int has_text(const op_t *o)
@@ -292,9 +288,14 @@ static void frame_done(uint32_t t0)
         s_st.key_last_ms = ms;
         if (ms > s_st.key_worst_ms)
             s_st.key_worst_ms = ms;
-        if (s_log)
-            s_log("ui: key->px %u ms px %u", (unsigned)ms, (unsigned)s_px);   /* (px: what that frame pushed) */
+        if (s_log)                   /* (px: what that frame pushed; the parts: display.h) */
+            s_log("ui: key->px %u ms px %u: in %u, loop %u, wait %d, render %u us, push %u us", (unsigned)ms,
+                  (unsigned)s_px, (unsigned)s_mark_in, (unsigned)(s_mark_at - s_mark_ms - s_mark_in),
+                  (int)((int32_t)(t0 - s_mark_us) / 1000), (unsigned)(s_st.render_us - s_r0),
+                  (unsigned)(s_st.push_us - s_p0));
     }
+    s_r0 = s_st.render_us;
+    s_p0 = s_st.push_us;
     s_rows = s_px = 0;
 }
 
@@ -314,11 +315,14 @@ void display_frame_end(void)
         frame_done(s_frame_t0);
 }
 
-void display_mark_input(uint32_t t_ms)
+void display_mark_input(uint32_t t_ms, uint32_t in_ms)
 {
     if (!s_marked) {                                 /* the oldest key not yet answered */
         s_marked = 1;
         s_mark_ms = t_ms;
+        s_mark_in = in_ms;
+        s_mark_at = panel_io_now_ms();
+        s_mark_us = panel_io_now_us();
     }
 }
 
@@ -338,12 +342,14 @@ const display_stats_t *display_stats(void)
 
 void display_init(void)
 {
-    backlight_on();
     panel_io_init();
     panel_init_sequence();
     /* Observed draw_init contract: panel_init + clear screen + flush. */
     display_clear(0x0000);
     display_flush_rows(0, DISPLAY_H - 1);
+    /* The light after the first clear, as stock (0x030549C0: the first screen flushed, then BL_On;
+     * work/stock_boot/02_display.md 4, 5 #11): before it, DISPON showed the panel's power-on RAM. */
+    backlight_on();
 }
 
 /* ---- the list -------------------------------------------------------------------------------------- */
@@ -482,25 +488,4 @@ const uint16_t *display_render_rows(int y, int n)
     panel_io_sync();
     render(s_band[0], y, n, 0, DISPLAY_W - 1);
     return s_band[0];
-}
-
-/* The generic blit, for transports without a faster one (panel_io_sim.c): the window, then the
- * pixels one by one. */
-void panel_io_blit_generic(int x0, int y0, int x1, int y1, const uint16_t *src, int pitch);
-void panel_io_blit_generic(int x0, int y0, int x1, int y1, const uint16_t *src, int pitch)
-{
-    panel_io_send_cmd(DCS_CASET);
-    panel_io_send_data((uint8_t)(x0 >> 8));
-    panel_io_send_data((uint8_t)x0);
-    panel_io_send_data((uint8_t)(x1 >> 8));
-    panel_io_send_data((uint8_t)x1);
-    panel_io_send_cmd(DCS_RASET);
-    panel_io_send_data((uint8_t)(y0 >> 8));
-    panel_io_send_data((uint8_t)y0);
-    panel_io_send_data((uint8_t)(y1 >> 8));
-    panel_io_send_data((uint8_t)y1);
-    panel_io_send_cmd(DCS_RAMWR);
-    for (int y = y0; y <= y1; y++, src += pitch)
-        for (int x = 0; x <= x1 - x0; x++)
-            panel_io_send_pixel(src[x]);
 }

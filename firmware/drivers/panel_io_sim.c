@@ -255,12 +255,25 @@ void panel_io_send_pixel(uint16_t rgb565)
     panel_io_send_data((uint8_t)(rgb565 & 0xFFu));
 }
 
-/* The flush path: the generic window + pixel stream (display.c), synchronous. */
-void panel_io_blit_generic(int x0, int y0, int x1, int y1, const uint16_t *src, int pitch);
+/* The flush path, synchronous: the window, then the pixels one by one (the target has its own
+ * writers in panel_io_rknanoc.c; this was display.c's generic blit, linked into the image unused). */
 void panel_io_blit(int x0, int y0, int x1, int y1, const uint16_t *src, int pitch)
 {
     blit_count++;
-    panel_io_blit_generic(x0, y0, x1, y1, src, pitch);
+    panel_io_send_cmd(0x2A);                         /* CASET */
+    panel_io_send_data((uint8_t)(x0 >> 8));
+    panel_io_send_data((uint8_t)x0);
+    panel_io_send_data((uint8_t)(x1 >> 8));
+    panel_io_send_data((uint8_t)x1);
+    panel_io_send_cmd(0x2B);                         /* RASET */
+    panel_io_send_data((uint8_t)(y0 >> 8));
+    panel_io_send_data((uint8_t)y0);
+    panel_io_send_data((uint8_t)(y1 >> 8));
+    panel_io_send_data((uint8_t)y1);
+    panel_io_send_cmd(0x2C);                         /* RAMWR */
+    for (int y = y0; y <= y1; y++, src += pitch)
+        for (int x = 0; x <= x1 - x0; x++)
+            panel_io_send_pixel(src[x]);
 }
 
 unsigned panel_io_sim_blits(void)

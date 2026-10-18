@@ -200,6 +200,7 @@ static void make(input_event_t *ev, int gesture, int key, uint32_t now)
     ev->steps = 0;
     ev->repeat = 0;
     ev->held_ms = (uint16_t)(held > 65535u ? 65535u : held);
+    ev->in_ms = (uint16_t)(k.now - (gesture == IG_DOWN ? k.t0 : now));
     ev->t_ms = now;
 }
 

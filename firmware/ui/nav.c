@@ -14,6 +14,7 @@
 #include "nav.h"
 #include "ui.h"
 #include "drivers/clock.h"
+#include "drivers/panel_io.h"
 #include "services/config.h"
 #include "services/log.h"
 #include "services/power.h"
@@ -382,9 +383,10 @@ static void log_key(const input_event_t *g)
         if (g->gesture == IG_REPEAT)
             log_printf("ui: key %s.repeat on %s t=%u held=%u steps=%u n=%u", input_key_name(g->key), on,
                        (unsigned)g->t_ms, (unsigned)g->held_ms, (unsigned)g->steps, (unsigned)g->repeat);
-        else
-            log_printf("ui: key %s.%s on %s t=%u held=%u", input_key_name(g->key), input_gesture_name(g), on,
-                       (unsigned)g->t_ms, (unsigned)g->held_ms);
+        else    /* (in: the edge to this event; rise, blips: the ladder's last release, panel_io.h) */
+            log_printf("ui: key %s.%s on %s t=%u held=%u in=%u rise=%u blips=%u", input_key_name(g->key),
+                       input_gesture_name(g), on, (unsigned)g->t_ms, (unsigned)g->held_ms, (unsigned)g->in_ms,
+                       (unsigned)(keys_release_stats() & 0xFFFFu), (unsigned)(keys_release_stats() >> 16));
     }
     /* the old events' lines too (input_poll's: VOL on its press and repeats, the others on a tap or a
      * hold, the chord), which the tests count */
@@ -582,7 +584,9 @@ void nav_key(const input_event_t *ev)
     act(d->act);
     if (ui_inval_seq == seq)
         return;
-    display_mark_input(ev->t_ms);         /* key->px: the result (when the key changed something) */
+    /* key->px: the result (when the key changed something), from the finger's edge (a DOWN's t_ms is
+     * the sample that sent it: its press was in_ms before) */
+    display_mark_input(ev->t_ms - (ev->gesture == IG_DOWN ? ev->in_ms : 0u), ev->in_ms);
     if (ev->gesture == IG_DOWN && (ev->key == KEY_UP || ev->key == KEY_DOWN)) {   /* for the chord */
         s_undo.t = ev->t_ms;
         s_undo.p = nav_top();

@@ -42,19 +42,20 @@ void panel_io_sync(void);
 const char *panel_io_path(void);
 
 /*
- * The pixel path (config key display=auto|pio|pio2|vop|dma). The boot always runs on the GPIO bus
- * (proven on the device); panel_io_select() moves to the VOP afterwards, only with the watchdog
- * running, as a TRIAL guarded the way RECHO 0.10 guards it: a marker in SRAM that a warm reset
- * keeps (and the boot trail's step on the eMMC), cleared once the new path has pushed frames for
- * 5 s (panel_io_poll(), every main-loop pass). A boot that finds the marker of an unfinished trial
- * (a hang, then the watchdog's reset) refuses the VOP until power-off. A band that does not finish
- * (DMA: 50 ms) falls back to the CPU-fed VOP; a VOP that stays busy falls back to GPIO, latched.
- * Returns the path now in use.
+ * The pixel path (config key display=auto|pio|gpio|vop|dma; auto = dma; gpio = pio). The boot
+ * always runs on the GPIO bus (proven on the device); panel_io_select() moves to the VOP afterwards,
+ * only with the watchdog running, as a TRIAL guarded the way RECHO 0.10 guards it: a marker in SRAM
+ * that a warm reset keeps (and the boot trail's step on the eMMC), cleared once the new path has
+ * pushed frames for 5 s (panel_io_poll(), every main-loop pass). A boot that finds the marker of an
+ * unfinished trial (a hang, then the watchdog's reset) refuses the VOP until power-off. A band that
+ * does not finish (DMA: 50 ms) falls back to the CPU-fed VOP; a VOP that stays busy falls back to
+ * GPIO, latched. Returns the path now in use.
  */
-enum { PANEL_PATH_PIO = 0, PANEL_PATH_VOP, PANEL_PATH_DMA, PANEL_PATH_PIO2, PANEL_PATH_AUTO };
+enum { PANEL_PATH_PIO = 0, PANEL_PATH_VOP, PANEL_PATH_DMA, PANEL_PATH_PIO2, PANEL_PATH_AUTO };   /* (PIO2 = PIO) */
 int panel_io_select(int path);
 void panel_io_poll(void);
-/* Counters: [0] DMA bands, [1] DMA band timeouts, [2] VOP busy timeouts, [3] slowest band us. */
+/* Counters: [0] DMA bands, [1] DMA band timeouts, [2] VOP busy timeouts, [3] us of the biggest band
+ * waited for to its end (the bus's own time: logged with its bytes when the trial passes). */
 const uint32_t *panel_io_counters(void);
 /* Time for the frame accounting: microseconds (for differences; wraps) and time_ms(). */
 uint32_t panel_io_now_us(void);
@@ -85,6 +86,11 @@ enum { ADC_DIAG_DONE, ADC_DIAG_TIMEOUTS, ADC_DIAG_BIT6, ADC_DIAG_FIRST_STAS, ADC
        ADC_DIAG_FIRST_DATA, ADC_DIAG_FIRST_US, ADC_DIAG_LAST_CTRL, ADC_DIAG_LAST_STAS, ADC_DIAG_N };
 const uint32_t *adc_diag(void);
 int keys_power(void);
+/* The last release: ms from its edge to the first idle reading (bits 0-15) and, since boot, presses
+ * that read idle and went back down within 30 ms (bits 16-31). */
+uint32_t keys_release_stats(void);
+/* Developer > Panel TE (test): which GPIO inputs change with the panel's TE output on and off (log). */
+void panel_te_probe(void);
 void board_power_off(void);   /* does not return */
 /* A GPIO0 pin that is not the panel's, set through the panel bus's shadow of the
  * port (every panel byte rewrites the whole GPIO0 data register from it). */

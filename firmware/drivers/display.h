@@ -165,14 +165,20 @@ const uint16_t *display_render_rows(int y, int n);
 /* ---- instrumentation ------------------------------------------------------------------------------
  * A frame is what one redraw pushes (ui_render: the screen's draw() and its dirty rectangles).
  * display_frame_end() logs "ui: frame <ms> rows <n> px <n> path <p>" when the frame took at least
- * DISPLAY_SLOW_MS from display_frame_begin(), and "ui: key->px <ms>" once after a
- * display_mark_input(t) (t = time_ms() of the key, ideally its key-down) when that frame put
- * pixels on the panel. A flush outside a frame counts as a frame of its own. Lines go to the
- * logger set with display_set_logger() (none: nothing is logged). */
+ * DISPLAY_SLOW_MS from display_frame_begin(), and once after a display_mark_input(t, in), when that
+ * frame put pixels on the panel:
+ *   ui: key->px <ms> ms px <n>: in <ms>, loop <ms>, wait <ms>, render <us> us, push <us> us
+ * <ms> from t, the finger's edge (the press for a DOWN, the release for a TAP or a RELEASE; a HOLD or
+ * a REPEAT: when it happened), to the frame on the panel; in = t to the event (the input's
+ * confirmation, services/input.h in_ms), loop = the event to its handling (display_mark_input's
+ * call), wait = the handling to the frame's start, render and push = what the frame's bands spent
+ * rendering and on the bus (push: the CPU's bus writes or the wait for the DMA); the rest of <ms> is
+ * the screen's draw() building the list. A flush outside a frame counts as a frame of its own.
+ * Lines go to the logger set with display_set_logger() (none: nothing is logged). */
 #define DISPLAY_SLOW_MS 30u
 void display_frame_begin(void);
 void display_frame_end(void);
-void display_mark_input(uint32_t t_ms);
+void display_mark_input(uint32_t t_ms, uint32_t in_ms);
 typedef void (*display_log_fn)(const char *fmt, ...);
 void display_set_logger(display_log_fn fn);
 
@@ -203,8 +209,9 @@ void panel_init_sequence(void);
 /*
  * Emit one specific extracted init variant (0 = variant A, 1 = variant
  * B) regardless of the compile-time choice; returns 0 on success, -1 for
- * an unknown variant number. Bring-up/test seam so both streams can be
- * exercised (e.g. from a debug menu, or by the host tests).
+ * an unknown variant number (the image carries only the compile-time
+ * variant: the other one is -1 there). Bring-up/test seam so both streams
+ * can be exercised (the host tests).
  */
 int panel_init_run_variant(int variant);
 
