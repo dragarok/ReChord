@@ -69,5 +69,10 @@ The build with the first four fixes in the table above, flashed to both slots:
 
 - Whether the module answers `CQ00` on a link that came from a bare `CH06`.
 - The earphones' name differs between the scan (`... - Find My`) and some `CQO` answers.
-- A listen-only capture build (sample the module's TX on GPIO2.17 with the UART off) to
-  see what the module says outside our frames.
+- What the module says outside our frames: Developer > BT listen (test) (`bt_listen()` in
+  `bt_jieli.c`) powers it twice the stock way and sends it nothing; first UART1 at 115200
+  (each byte, its time, its line status), then GPIO2.17 as an input (every edge, any baud
+  rate). It writes `/BTLISTEN.TXT`; decode it with the project repo's
+  `tools/bt_listen_decode.py`. QEMU: `tests/cfw/m35_btlisten.sh` (`jieli=listen=1`: any byte
+  to the module, a break, GPIO2.16 not idle-high while powered or a GPIO2.7 pulse fails it).
+  Not yet run on the device.

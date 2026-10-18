@@ -4,6 +4,7 @@
  * are debounced by input_scan() and dispatched to the screen stack.
  */
 #include "drivers/board.h"
+#include "drivers/bt_jieli.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -31,6 +32,8 @@
 #include "player.h"
 #include "services/bootcrumb.h"
 #include "services/watchdog.h"
+#include "services/fs.h"
+#include "services/scratch.h"
 #include "ui/ui.h"
 #include "ui/nav.h"
 
@@ -378,6 +381,80 @@ static void usb_detect_test(void)
     line(2, buf);
     display_flush_rows(0, DISPLAY_H - 1);
     panel_io_delay_ms(1500);
+    ui_invalidate_all();
+}
+
+/* Developer > BT listen (test): the module's own output, sending it nothing (bt_listen() in
+ * drivers/bt_jieli.h), kept in /BTLISTEN.TXT for tools/bt_listen_decode.py. */
+#define LISTEN_MS   4000u
+#define LISTEN_PATH "/Internal/BTLISTEN.TXT"
+
+static int listen_save(const bt_listen_t *r)
+{
+    fs_file_t *f = fs_open_write(LISTEN_PATH);
+    char b[100];
+    int n, ok;
+
+    if (!f)
+        return -1;
+    n = snprintf(b, sizeof b, "ReChord BT listen 1\ncore_hz %u\nuart 115200 ms %u bytes %u lsr_errors %u full %u\n",
+                 (unsigned)r->core_hz, LISTEN_MS, r->nbytes, r->lsr_errs, r->full & 1u);
+    ok = fs_write(f, b, (unsigned long)n) == n;
+    for (unsigned i = 0; ok && i < r->nbytes; i++) {
+        n = snprintf(b, sizeof b, "u %u %02x %02x\n", (unsigned)r->bytes[2 * i],
+                     (unsigned)(r->bytes[2 * i + 1] & 0xFFu), (unsigned)(r->bytes[2 * i + 1] >> 8));
+        ok = fs_write(f, b, (unsigned long)n) == n;
+    }
+    n = snprintf(b, sizeof b, "gpio ms %u level0 %u edges %u full %u\n", LISTEN_MS, r->level0, r->nedges,
+                 r->full >> 1 & 1u);
+    ok = ok && fs_write(f, b, (unsigned long)n) == n;
+    for (unsigned i = 0; ok && i < r->nedges; i += 8) {
+        n = snprintf(b, sizeof b, "e");
+        for (unsigned k = i; k < i + 8 && k < r->nedges; k++)
+            n += snprintf(b + n, sizeof b - (unsigned)n, " %x", (unsigned)r->edges[k]);
+        b[n++] = '\n';
+        ok = fs_write(f, b, (unsigned long)n) == n;
+    }
+    ok = ok && fs_write(f, "end\n", 4) == 4;
+    return fs_close(f) || !ok ? -1 : 0;
+}
+
+static void bt_listen_test(void)
+{
+    bt_listen_t r;
+    char txt[48], buf[48];
+    unsigned k = 0;
+    int saved;
+
+    usb_out_off();
+    player_stop();
+    screen("BT listen (test)");
+    line(1, "listening, nothing sent (9 s)");
+    display_flush_rows(0, DISPLAY_H - 1);
+    bt_listen(&r, g_scratch, SCRATCH_WORDS, LISTEN_MS);
+    saved = listen_save(&r);
+    while (k < r.nbytes && k < sizeof txt - 1u) {
+        uint8_t c = (uint8_t)r.bytes[2 * k + 1];
+
+        txt[k++] = c >= 0x20 && c < 0x7F ? (char)c : '.';   /* (one log line) */
+    }
+    txt[k] = 0;
+    log_printf("btlisten: uart %u bytes (%u line errors), the first at %u ms: '%.40s'%s", r.nbytes, r.lsr_errs,
+               r.nbytes ? (unsigned)(r.bytes[0] / 1000u) : 0u, txt, r.full & 1u ? " (full)" : "");
+    log_printf("btlisten: gpio %u edges, the first at %u us, level %u at power-on%s; " LISTEN_PATH " %s", r.nedges,
+               r.nedges ? (unsigned)(r.edges[0] / (r.core_hz / 1000000u)) : 0u, r.level0,
+               r.full & 2u ? " (full)" : "", saved ? "NOT saved" : "saved");
+    log_flush("btlisten");
+    snprintf(buf, sizeof buf, "UART: %u bytes, %u errors", r.nbytes, r.lsr_errs);
+    line(2, buf);
+    snprintf(buf, sizeof buf, "%.40s", txt);
+    line(3, buf);
+    snprintf(buf, sizeof buf, "GPIO: %u edges", r.nedges);
+    line(4, buf);
+    line(5, saved ? "BTLISTEN.TXT NOT saved" : "saved BTLISTEN.TXT");
+    line(7, "the module is off; any key");
+    display_flush_rows(0, DISPLAY_H - 1);
+    ask(1);
     ui_invalidate_all();
 }
 
@@ -1171,6 +1248,7 @@ void ap_dac_test(void) { dac_test_run(); }
 void ap_usb_console(void) { usb_console_run(); }
 void ap_usb_probe(void) { usb_probe_menu(); }
 void ap_usb_detect(void) { usb_detect_test(); }
+void ap_bt_listen(void) { bt_listen_test(); }
 void ap_power_off(void) { power_off(NULL); }
 
 void ap_update(void)

@@ -49,6 +49,10 @@ uint32_t clock_pclk_hz(void);       /* APB (pclk_logic) */
 /* Monotonic time since clock_init(). */
 uint64_t time_us(void);
 uint32_t time_ms(void);
+/* Core-A clock cycles since clock_init() (SysTick ticks x reload + the cycles into this tick),
+ * wrapping at 2^32 (21 s at 200 MHz): sub-microsecond stamps for spans well under that, at a
+ * clock that does not change meanwhile. Works with interrupts off, as delay_us() does. */
+uint32_t time_cycles(void);
 
 /* A time_ms() value as a nonzero stamp (0 meaning "not started"). Never `t | 1`: that is a
  * millisecond in the future half the time, so `time_ms() - stamp` wraps to ~2^32 in the same

@@ -30,7 +30,7 @@
 void ap_later(void (*fn)(void));
 int ap_cable(void);
 void ap_usb_disk(void), ap_usb_dac(void), ap_dac_test(void), ap_usb_console(void), ap_usb_probe(void);
-void ap_usb_detect(void), ap_update(void), ap_power_off(void), ap_screen(int on);
+void ap_usb_detect(void), ap_bt_listen(void), ap_update(void), ap_power_off(void), ap_screen(int on);
 void ap_cable_choice(int c);
 const char *ap_keys_text(void);
 int ap_diag_count(void);
@@ -1496,13 +1496,14 @@ static const set_t g_dev[] = {
     { ICON_USB, S_DO, 0, 0, "USB console", 0, 0, ap_usb_console },
     { ICON_USBC, S_DO, 0, 0, "USB-C probe", 0, 0, ap_usb_probe },
     { ICON_USB, S_DO, 0, 0, "USB detect", 0, 0, ap_usb_detect },
+    { ICON_BT, S_DO, 0, 0, "BT listen (test)", 0, 0, ap_bt_listen },
     { ICON_CHIP, S_INFO, 0, 0, "Keys" },
     { ICON_INFO, S_CYCLE, 2, 0, "Debug strip", &g_cfg.strip, n_offon },
 };
 static const struct { const char *title; uint8_t icon, n; const set_t *rows; } k_groups[] = {
     { "Settings", ICON_GEAR, 6, g_root }, { "Playback", ICON_PLAY, 3, g_playback },
     { "Display", ICON_SUN, 3, g_display }, { "Power", ICON_POWER, 3, g_power },
-    { "USB", ICON_USB, 6, g_usb }, { "System", ICON_INFO, 4, g_system }, { "Developer", ICON_BUG, 7, g_dev },
+    { "USB", ICON_USB, 6, g_usb }, { "System", ICON_INFO, 4, g_system }, { "Developer", ICON_BUG, 8, g_dev },
 };
 #define GRP (k_groups[nav_arg() < 7 ? nav_arg() : 0])
 
