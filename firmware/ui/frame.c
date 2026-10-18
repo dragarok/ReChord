@@ -95,6 +95,8 @@ int key_slot(int key)
 
 static int same(const char *a, const char *b)
 {
+    if (a == b)
+        return 1;
     return (!a || !*a) ? (!b || !*b) : (b && !strcmp(a, b));
 }
 

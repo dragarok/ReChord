@@ -22,6 +22,7 @@
 
 const input_event_t *g_ev;
 int g_locked;
+static int s_force;                       /* a key came: compare the model at once (nav_tick) */
 
 /* ---- the stack --------------------------------------------------------------------------------- */
 
@@ -53,6 +54,7 @@ static void entered(int first)
         L.y0 = p->kind == PK_QUESTION ? 82 : BODY_Y;
         L.nr = p->kind == PK_QUESTION ? 4 : NROWS;
     }
+    s_force = 1;
     if (p && p->enter)
         p->enter(first);
     if (is_list(nav_top()) && nav_top() == p)
@@ -497,6 +499,7 @@ void nav_key(const input_event_t *ev)
     unsigned seq;
 
     g_ev = ev;
+    s_force = 1;
     log_key(ev);
     power_activity();
     if (ev->key == KEY_POWER) {           /* tap: the screen off / on (the menu: nav_tick) */
@@ -575,7 +578,7 @@ void nav_key(const input_event_t *ev)
 
 void np_power_menu(void);                 /* screens.c */
 
-static uint32_t s_live;
+static uint32_t s_live, s_model_at;
 
 void nav_live_now(void)
 {
@@ -606,6 +609,13 @@ void nav_tick(void)
         np_power_menu();
     }
     frame_tick(now);
+    /* The model is compared with the panel every 40 ms (and at once after a key): what changes by
+     * itself (the time, the battery, a BT link) shows within 40 ms, and core A spends a pass's
+     * worth of comparisons four times less often while music plays (tests/cfw/m3_audio.sh budget). */
+    if (!s_force && now - s_model_at < 40u)
+        return;
+    s_force = 0;
+    s_model_at = now;
     memset(&h, 0, sizeof h);
     nav_header(&h);
     {

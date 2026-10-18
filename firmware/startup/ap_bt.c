@@ -160,7 +160,12 @@ static void bt_act(int a, int i)
     if (a != A_OPEN || i >= build())
         return;
     r = &s_rows[i];
-    log_printf("bt: ui: row %d/%d", r->kind, r->idx);
+    {
+        static row_t lr;                /* (the row's own words in the log: "bt: ui: Disconnect") */
+
+        bt_row(i, &lr);
+        log_printf("bt: ui: %s", r->kind == ROW_SCAN ? "Scan" : lr.text);
+    }
     switch (r->kind) {
     case ROW_POWER:
         if (st == BT_OFF || st == BT_NO_MODULE) {
