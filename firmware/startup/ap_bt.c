@@ -89,7 +89,7 @@ static int build(void)
     return s_nrows;
 }
 
-static const char *state_text(bt_state_t st)
+const char *bt_state_text(bt_state_t st)
 {
     static const char *const k[] = { "Off", "Starting\xE2\x80\xA6", "No module", "On", "Scanning\xE2\x80\xA6",
                                      "Connecting\xE2\x80\xA6", "Connected" };
@@ -107,12 +107,12 @@ static void bt_row(int i, row_t *r)
     case ROW_POWER:
         r->icon = ICON_BT;
         snprintf(r->text, sizeof r->text, "Bluetooth");
-        snprintf(r->value, sizeof r->value, "%s", state_text(st));
+        snprintf(r->value, sizeof r->value, "%s", bt_state_text(st));
         break;
     case ROW_PAIRED:
         r->icon = ICON_HEADPHONES;
         dev_label(r->text, sizeof r->text, g_cfg.bt_mac, g_cfg.bt_name);
-        snprintf(r->value, sizeof r->value, "%s", here(g_cfg.bt_mac) ? state_text(st) : "Paired");
+        snprintf(r->value, sizeof r->value, "%s", here(g_cfg.bt_mac) ? bt_state_text(st) : "Paired");
         break;
     case ROW_DEV: {
         const bt_dev_t *d = bt_scan_dev(b->idx);
@@ -121,7 +121,7 @@ static void bt_row(int i, row_t *r)
         if (d) {
             dev_label(r->text, sizeof r->text, d->mac, d->name);
             if (here(d->mac))
-                snprintf(r->value, sizeof r->value, "%s", state_text(st));
+                snprintf(r->value, sizeof r->value, "%s", bt_state_text(st));
         }
         break;
     }

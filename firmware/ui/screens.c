@@ -37,6 +37,7 @@ int ap_diag_count(void);
 void ap_diag_row(int i, row_t *r);
 const char *player_source(void);
 extern const page_t pg_bt;
+const char *bt_state_text(bt_state_t st);   /* ap_bt.c */
 
 #define MINUS "\xE2\x88\x92"
 #define DOT " \xC2\xB7 "
@@ -281,7 +282,7 @@ static void home_row(int i, row_t *r)
         if (bt_state() == BT_CONNECTED)
             snprintf(r->value, sizeof r->value, "%s", bt_peer()->name[0] ? bt_peer()->name : "Connected");
         else
-            snprintf(r->value, sizeof r->value, "%s", bt_state() == BT_OFF || bt_state() == BT_NO_MODULE ? "Off" : "On");
+            snprintf(r->value, sizeof r->value, "%s", bt_state_text(bt_state()));
         break;
     case H_USB:
         snprintf(r->value, sizeof r->value, "%s", audio_output_usb() ? "USB-C earphones" : ap_cable() ? "cable in" :
@@ -698,6 +699,14 @@ static void np_load(const audio_status_t *st)
 #define TW 198
 
 static void np_inval_band(void) { ui_invalidate(0, BAND_Y, DISPLAY_W - 1, DISPLAY_H - 1); }
+
+void np_band_off(void)                    /* (the chord took back the VOL press that showed it) */
+{
+    if (N.band && nav_top() == &pg_np) {
+        N.band = 0;
+        np_inval_band();
+    }
+}
 
 static int head_x(void)
 {
@@ -1510,7 +1519,7 @@ static const char *set_value(const set_t *s, char *b, int cap)
         return b;
     }
     if (s->open == &pg_bt)
-        return bt_state_name(bt_state());
+        return bt_state_text(bt_state());
     return b;
 }
 

@@ -361,7 +361,7 @@ static const keybar_t k_layer = {
 };
 static uint32_t s_layer_at;               /* the shortcut layer: when it began, 0 = off */
 static int s_shot;                        /* a screenshot after the next frame (without the layer) */
-static struct { uint32_t t; const page_t *p; int d, vol; } s_undo;   /* the last VOL press, for the chord */
+static struct { uint32_t t; const page_t *p; int d; } s_undo;   /* the last VOL press, for the chord */
 static int s_menu_shown;                  /* the power menu came up for this press */
 
 int nav_volume_keys(void)
@@ -433,6 +433,7 @@ static const keydef_t *lookup(const page_t *p, const input_event_t *ev)
 }
 
 void np_library(void);                    /* screens.c: the playing track's folder */
+void np_band_off(void);                   /* screens.c: the progress band again */
 
 static void toggle_np(void)
 {
@@ -463,11 +464,6 @@ static void act(int a)
             int n = g_ev->gesture == IG_REPEAT ? g_ev->steps : 1;
 
             list_move(a == A_UP ? -n : n, g_ev->gesture == IG_DOWN);
-            if (g_ev->gesture == IG_DOWN) {
-                s_undo.t = g_ev->t_ms;
-                s_undo.p = p;
-                s_undo.d = a == A_UP ? 1 : -1;
-            }
         } else if (p->act) {
             p->act(a, nav_cursor());
         }
@@ -512,10 +508,17 @@ void nav_key(const input_event_t *ev)
     }
     if (ev->gesture == IG_CHORD) {        /* the shortcut layer; the first key's step undone */
         if (ev->t_ms - s_undo.t < 600u && s_undo.p == nav_top()) {
-            if (is_list(s_undo.p))
+            if (is_list(s_undo.p)) {
                 list_move(s_undo.d, 1);
-            else
-                player_set_volume(s_undo.vol);
+            } else if (s_undo.p->act) {     /* the opposite step (volume, an editor's value) */
+                input_event_t u = *ev;
+
+                u.gesture = IG_DOWN;
+                g_ev = &u;
+                s_undo.p->act(s_undo.d > 0 ? A_VOL_UP : A_VOL_DN, nav_cursor());
+                g_ev = ev;
+                np_band_off();
+            }
         }
         s_undo.p = NULL;
         frame_press(KEY_NONE);
@@ -550,7 +553,7 @@ void nav_key(const input_event_t *ev)
         frame_press(KEY_NONE);
     }
     if (g_locked) {
-        if (ev->gesture == IG_TAP || (ev->gesture == IG_DOWN && (ev->key == KEY_UP || ev->key == KEY_DOWN)))
+        if (ev->gesture == IG_TAP)        /* (on the release: the chord that unlocks starts with a VOL press) */
             nav_toast(ICON_LOCK, TOAST_WARN, "Keys locked: VOL+ & VOL\xE2\x88\x92, then MENU");
         return;
     }
@@ -558,14 +561,16 @@ void nav_key(const input_event_t *ev)
     if (!d || d->act == A_NONE)
         return;
     seq = ui_inval_seq;
-    if ((d->act == A_VOL_UP || d->act == A_VOL_DN) && ev->gesture == IG_DOWN) {
+    s_undo.p = NULL;
+    act(d->act);
+    if (ui_inval_seq == seq)
+        return;
+    display_mark_input(ev->t_ms);         /* key->px: the result (when the key changed something) */
+    if (ev->gesture == IG_DOWN && (ev->key == KEY_UP || ev->key == KEY_DOWN)) {   /* for the chord */
         s_undo.t = ev->t_ms;
         s_undo.p = nav_top();
-        s_undo.vol = player_get_volume();
+        s_undo.d = d->act == A_UP || d->act == A_VOL_UP ? (is_list(s_undo.p) ? 1 : -1) : (is_list(s_undo.p) ? -1 : 1);
     }
-    act(d->act);
-    if (ui_inval_seq != seq)
-        display_mark_input(ev->t_ms);     /* key->px: the result (when the key changed something) */
 }
 
 void np_power_menu(void);                 /* screens.c */
@@ -603,6 +608,14 @@ void nav_tick(void)
     frame_tick(now);
     memset(&h, 0, sizeof h);
     nav_header(&h);
+    {
+        static uint8_t s_out = ICON_SPEAKER;
+
+        if (h.out != s_out) {             /* (the header's output field: a BT link up or down) */
+            s_out = h.out;
+            log_printf("ui: header output %s", h.out == ICON_BT ? "bt" : h.out == ICON_USBC ? "usb-c" : "jack");
+        }
+    }
     frame_status(&h);
     if (p && p->tick)
         p->tick();
