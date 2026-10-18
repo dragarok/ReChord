@@ -1341,8 +1341,10 @@ static void halt(void)
     if (s_b_up) {
         AS->run = 0;
         AS->cmd = AS_CMD_STOP;
+        /* B answers within its track close (~1-3 ms, its FLAC/HIFI lines included): looked at
+         * every 20 us, not at the 10 ms tick, which made a stop cost a whole tick more (m38) */
         for (uint32_t t0 = time_ms(); AS->cmd && time_ms() - t0 < 200u; )
-            cpu_wait_tick();
+            delay_us(20);
     }
     s_playing = 0;
     s_paused = 0;

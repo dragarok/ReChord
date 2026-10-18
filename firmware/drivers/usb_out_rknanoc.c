@@ -103,7 +103,8 @@ typedef struct {
 
 static struct {
     usb_out_status_t st;
-    int supply, started;
+    int supply, started;              /* started: 1 on, 2 switching to host mode since force_us */
+    uint32_t force_us;
     uint32_t budget_ma;
     int force_fs;                     /* this device: full speed after high speed failed */
     volatile int overcurrent;         /* the port said so (interrupt) */
@@ -976,8 +977,6 @@ static void port_power(int on)
 
 int usb_out_start(int supply, uint32_t budget_ma)
 {
-    uint32_t depth;
-
     if (s.started)
         return 0;
     memset(&s, 0, sizeof s);
@@ -997,7 +996,18 @@ int usb_out_start(int supply, uint32_t budget_ma)
         rk_delay_us(1);
     OTG(PCGCCTL) = 0;
     OTG(GUSBCFG) = (OTG(GUSBCFG) & ~(1u << 30)) | 1u << 29;   /* ForceHstMode (25 ms to take effect) */
-    delay_ms(25);
+    s.force_us = (uint32_t)time_us();
+    s.started = 2;                                   /* host_on() from usb_out_poll, 25 ms on */
+    s.st.state = USB_OUT_WAIT;
+    return 0;
+}
+
+/* The rest of the start, once ForceHstMode has taken effect: from usb_out_poll, so the pass that
+ * switched host mode on does not also wait those 25 ms (m38: a 59 ms main-loop pass). */
+static void host_on(void)
+{
+    uint32_t depth;
+
     OTG(HCFG) &= ~7u;                                /* 30/60 MHz PHY clock, high speed allowed */
     depth = OTG(GHWCFG3) >> 16;
     if (depth >= 0x280u) {                           /* RX 1 KiB; non-periodic TX 512 B; periodic TX 1 KiB */
@@ -1028,10 +1038,8 @@ int usb_out_start(int supply, uint32_t budget_ma)
     OTG(GAHBCFG) |= 1u;
     NVIC_ISER0 = 1u << USB_IRQ;
     s.started = 1;
-    s.st.state = USB_OUT_WAIT;
-    log_printf("usbout: host on, VBUS from %s, budget %u mA; FIFO %u words", supply == USB_OUT_SUPPLY_GPIO21 ?
-               "GPIO2.1 + DRVVBUS" : "DRVVBUS + port power", (unsigned)budget_ma, (unsigned)depth);
-    return 0;
+    log_printf("usbout: host on, VBUS from %s, budget %u mA; FIFO %u words", s.supply == USB_OUT_SUPPLY_GPIO21 ?
+               "GPIO2.1 + DRVVBUS" : "DRVVBUS + port power", (unsigned)s.budget_ma, (unsigned)depth);
 }
 
 static void drop(const char *why)
@@ -1051,11 +1059,13 @@ void usb_out_stop(void)
 {
     if (!s.started)
         return;
-    drop("host off");
-    NVIC_ICER0 = 1u << USB_IRQ;
-    OTG(GAHBCFG) &= ~1u;
-    usb_irq_hook = 0;
-    port_power(0);
+    if (s.started == 1) {                            /* (2: host_on() has not run, nothing to undo) */
+        drop("host off");
+        NVIC_ICER0 = 1u << USB_IRQ;
+        OTG(GAHBCFG) &= ~1u;
+        usb_irq_hook = 0;
+        port_power(0);
+    }
     RK_GRF[0xB8 / 4] = 0x00060000u;                  /* pull-downs off */
     RK_GRF[0x9C / 4] = 0x78000000u | 0x6800u;        /* disconnect threshold: the PHY's default code */
     OTG(GUSBCFG) &= ~(1u << 29);
@@ -1092,6 +1102,11 @@ int usb_out_poll(void)
 
     if (!s.started)
         return USB_OUT_OFF;
+    if (s.started == 2) {                            /* host mode switching on (usb_out_start) */
+        if ((uint32_t)time_us() - s.force_us >= 25000u)
+            host_on();
+        return s.st.state;
+    }
     p = OTG(HPRT);
     now = time_ms();
     if (s.overcurrent) {
