@@ -980,19 +980,57 @@ static void dac_volume(void)
 /* ---- the output: the jack (I2S DMA, DAC) or a USB audio device (usb_out.h, which takes
  * the PCM ring's LLI chain as the DMA would) -------------------------------------------- */
 
+/* The DAC's bring-up runs alongside the first play (core B fills the ring meanwhile): its parts are
+ * done from audio_poll() with their waits (80 ms twice) between them, so no pass of the main loop
+ * holds for the whole ~300 ms (device 2026-10-18: "ui: slow pass 401 ms on player ... draw 401" at
+ * every first play after boot). The output starts once it is up. */
+static int s_dac_phase;                    /* next dac_init_step() phase, 0 = none in progress */
+static uint32_t s_dac_due, s_dac_rate, s_dac_t0;
+
+static int dac_step(void)
+{
+    int r = dac_init_step(s_dac_phase - 1, s_dac_rate);
+
+    bootcrumb(BC_LOOP);                      /* (dac_trace() moved the trail into dac_init) */
+    if (r < 0) {
+        log_printf("audio: DAC init %d at step %d", r, dac_last_step());
+        s_dac_phase = 0;
+        return -4;
+    }
+    if (r == 0) {
+        s_dac_phase = 0;
+        s_dac_up = 1;
+        log_printf("audio: DAC up in %u ms", (unsigned)(time_ms() - s_dac_t0));
+        return 0;
+    }
+    s_dac_phase++;
+    s_dac_due = time_ms() + (uint32_t)r;
+    return 1;
+}
+
+/* The rest of a bring-up in progress, waiting (a USB session, an output change). 0, or -4. */
+static int dac_finish(void)
+{
+    while (s_dac_phase) {
+        while ((int32_t)(time_ms() - s_dac_due) < 0)
+            cpu_wait_tick();
+        if (dac_step() < 0)
+            return -4;
+    }
+    return 0;
+}
+
 static int out_rate(uint32_t rate, uint32_t bits)
 {
     if (s_usb)
         return usb_out_set_format(rate, bits) == 0 ? 0 : -5;
-    if (!s_dac_up) {
-        int r = dac_init(rate);
-
-        bootcrumb(BC_LOOP);                  /* (dac_trace() moved the trail into dac_init) */
-        if (r != 0) {
-            log_printf("audio: DAC init %d at step %d", r, dac_last_step());
-            return -4;
-        }
-        s_dac_up = 1;
+    if (s_dac_phase) {                       /* coming up: at the first part's rate, re-clocked once up */
+        return 0;
+    } else if (!s_dac_up) {
+        s_dac_rate = rate;
+        s_dac_t0 = time_ms();
+        s_dac_phase = 1;
+        return dac_step() < 0 ? -4 : 0;
     } else if (dac_set_rate(rate) != 0) {
         return -4;
     }
@@ -1061,6 +1099,8 @@ int audio_ext_start(uint32_t rate)
         s_b_up = 0;
         s_b_image = NULL;
     }
+    if (dac_finish() != 0)
+        return -4;
     if (!s_dac_up) {
         int r = dac_init(rate);
 
@@ -1337,6 +1377,14 @@ static void supervise(void)
 
 void audio_poll(void)
 {
+    if (s_dac_phase && (int32_t)(time_ms() - s_dac_due) >= 0) {   /* (also stopped meanwhile) */
+        if (dac_step() < 0 || (!s_dac_phase && s_playing && s_rate != s_dac_rate && dac_set_rate(s_rate) != 0)) {
+            halt();
+            return;
+        }
+        if (!s_dac_phase)
+            out_volume();                    /* up: the volume before the first sample */
+    }
     if (!s_playing)
         return;
     supervise();
@@ -1346,8 +1394,8 @@ void audio_poll(void)
     audio_tick();                            /* (also from SysTick: audio_tick) */
     if (!emmc_busy())                        /* the card programs a queued write: a read would wait */
         refill();
-    /* start output once B has filled the ring (or the whole stream is shorter) */
-    if (!s_dma_on && !AS->cmd &&
+    /* start output once B has filled the ring (or the whole stream is shorter), the DAC up */
+    if (!s_dma_on && !AS->cmd && !s_dac_phase &&
         (AS->pcm_wr >= AS_PCM_BLOCKS || (AS->pcm_end && AS->pcm_wr >= AS->pcm_end))) {
         out_start();
         log_printf("audio: output on, %u blocks ready, B at %u MHz", (unsigned)AS->pcm_wr,
@@ -1408,6 +1456,7 @@ int audio_set_output(int usb)
         return 0;
     if (s_playing)
         halt();
+    dac_finish();                            /* (a bring-up of the jack's DAC in progress ends first) */
     s_usb = usb;
     if (!usb)
         s_dac_up = 0;                        /* the jack: DAC (and amp) brought up again at the next play */
@@ -1420,6 +1469,7 @@ void usb_dac_rail_cut(void)
 {
     if (s_playing)
         halt();
+    s_dac_phase = 0;                         /* (a bring-up in progress: its supply is gone) */
     if (s_dac_up)
         log_printf("audio: DAC supply cut by USB: it powers up again at the next start");
     s_dac_up = 0;
