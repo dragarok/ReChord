@@ -1,12 +1,13 @@
 /*
- * frame.h -- the frame every screen shares (DESIGN.md 2.1): the key bar under the physical keys
- * (panel rows 0..19), the header (rows 20..37) and the body (rows 38..169), plus the drawing
- * helpers the templates use (text runs, 1-bit icons, fills; all display-list ops, colours only
- * from theme_get()).
+ * frame.h -- the frame every screen shares (DESIGN.md 2.1, revision 2: no key bar): the header line
+ * (panel rows 0..17) with the 2-px hold line under it (rows 18..19, the divider on 19), and the
+ * body (rows 20..169), plus the drawing helpers the templates use (text runs, 1-bit icons, fills;
+ * all display-list ops, colours only from theme_get()). Toasts and the VOL+ & VOL- shortcut layer
+ * take the header line for a moment.
  *
- * Change detection is per field: frame_keys() compares each slot's labels, frame_status() each
- * header field (its text and its x position), and invalidates only what changed (a slot is
- * 64 x 20 px, the volume field about 40 x 18).
+ * Change detection is per field: frame_status() compares each header field (its text and its x
+ * position) and invalidates only what changed (the volume field is about 40 x 18 px). The key
+ * labels (frame_keys) are not drawn; they only say which keys have a hold (the hold line).
  */
 #ifndef RECHORD_UI_FRAME_H
 #define RECHORD_UI_FRAME_H
@@ -18,12 +19,12 @@
 #include "drivers/icons.h"
 #include "../theme/theme.h"
 
-#define KB_H     20               /* key bar: rows 0..19 (divider on 19) */
-#define HDR_Y    20               /* header: rows 20..37 (divider on 37) */
-#define BODY_Y   38               /* body: rows 38..169 */
-#define ROW_H    22
-#define NROWS    6
-#define SLOT_W   64
+#define HDR_Y    0                /* header: rows 0..19 (text 0..17, the hold line 18..19, divider on 19) */
+#define HOLD_Y   18
+#define BODY_Y   20               /* body: rows 20..169 */
+#define LIST_Y   21               /* list rows: 7 of 21 px from row 21 */
+#define ROW_H    21
+#define NROWS    7
 #define NO_ICON  0xFF
 
 #define T        (theme_get())
@@ -37,16 +38,16 @@ void ui_fill(int x, int y, int w, int h, uint16_t c);      /* w x h at (x, y) */
 void ui_frame_rect(int x, int y, int w, int h, uint16_t c); /* 1-px outline */
 uint16_t ui_mix(uint16_t a, uint16_t b, int t256);          /* a..b, t/256 of the way */
 
-/* ---- the key bar ---- */
+/* ---- the keys (not drawn: their labels say which keys have a hold) ---- */
 enum { SLOT_VOLP, SLOT_VOLM, SLOT_PLAY, SLOT_MENU, SLOT_BACK, NSLOTS };
 int key_slot(int key);                                      /* KEY_* -> SLOT_*, -1 */
 typedef struct { const char *tap[NSLOTS], *hold[NSLOTS]; } keybar_t;
-void frame_keys(const keybar_t *k);       /* this screen's labels (compared slot by slot) */
-void frame_press(int key);                /* key-down feedback; KEY_NONE: released */
+void frame_keys(const keybar_t *k);       /* this screen's labels (the Key guide's data) */
+void frame_press(int key);                /* a key down: its hold line while it has a hold; KEY_NONE: up */
 int  frame_pressed(void);
-void frame_layer(const keybar_t *k);      /* the chord's shortcut layer (inverted), NULL: off */
+void frame_layer(const char *text);       /* the shortcut layer: the header line inverted, naming the keys; NULL: off */
 enum { TOAST_TEXT, TOAST_WARN, TOAST_DANGER };
-void frame_toast(int icon, int tone, const char *text);   /* 1.5 s over the key bar */
+void frame_toast(int icon, int tone, const char *text);   /* 1.5 s in place of the header line */
 
 /* ---- the header ---- */
 typedef struct {

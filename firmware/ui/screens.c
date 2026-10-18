@@ -616,7 +616,7 @@ static const uint16_t k_hues[8] = {     /* the monogram tile's hues (content, no
 
 static struct {
     uint32_t seq, pos, dur, until;
-    char title[96], artist[64], album[64], next[64], init[4], codec[8], fmt[12];
+    char title[96], artist[64], album[64], next[64], init[4], codec[8], fmt[12], facts[40];
     uint8_t hue, hires, paused, band, win, err;
     int16_t head;
 } N;
@@ -673,6 +673,16 @@ static void np_load(const audio_status_t *st)
     else
         snprintf(N.fmt, sizeof N.fmt, "%u/%u", (unsigned)st->track.bits, r / 1000u);
     N.hires = st->track.bits > 16u || r > 48000u;
+    {   /* the facts line: bit rate (the file's, or the MP3 frame's) and size */
+        uint32_t sz = st->track.ref.size, kb = st->track.kbps ? st->track.kbps :
+                      N.dur ? (uint32_t)((uint64_t)sz * 8u / 1000u / N.dur) : 0u;
+
+        if (kb)
+            snprintf(N.facts, sizeof N.facts, "%u KBPS \xC2\xB7 %u.%u MB", (unsigned)kb, (unsigned)(sz >> 20),
+                     (unsigned)((sz & 0xFFFFFu) * 10u >> 20));
+        else
+            snprintf(N.facts, sizeof N.facts, "%u.%u MB", (unsigned)(sz >> 20), (unsigned)((sz & 0xFFFFFu) * 10u >> 20));
+    }
     {
         int nx = queue_next_pos();
         char name[FS_NAME_MAX];
@@ -692,11 +702,17 @@ static void np_load(const audio_status_t *st)
     }
 }
 
-#define BAND_Y 140
-#define ART_X 8
-#define ART_Y 42
-#define TX 114
-#define TW 198
+/* DESIGN 2.2 N, revision 2 (no key bar): the tile 112 px at (6, 24), the text column x 126..312,
+ * badges y 108..118, the facts line at baseline 130, the band y 138..169. */
+#define BAND_Y 138
+#define ART_X 6
+#define ART_Y 24
+#define ART_S 112
+#define TX 126
+#define TW 186
+#define BADGE_Y 108
+#define PAUSE_X (ART_X + ART_S - 22)
+#define PAUSE_Y (ART_Y + ART_S - 22)
 
 static void np_inval_band(void) { ui_invalidate(0, BAND_Y, DISPLAY_W - 1, DISPLAY_H - 1); }
 
@@ -735,7 +751,7 @@ static void np_poll(void)
     }
     if (paused != N.paused) {
         N.paused = (uint8_t)paused;
-        ui_invalidate(82, 116, 99, 133);
+        ui_invalidate(PAUSE_X, PAUSE_Y, PAUSE_X + 17, PAUSE_Y + 17);
     }
     if (N.band && (int32_t)(time_ms() - N.until) >= 0) {
         N.band = 0;
@@ -749,9 +765,9 @@ static void np_poll(void)
         if (!N.band) {
             int b = head_x();
 
-            ui_invalidate((a < b ? a : b) - 1, 142, (a > b ? a : b) + 1, 149);
-            ui_invalidate(8, 150, 70, 168);
-            ui_invalidate(232, 150, 312, 168);
+            ui_invalidate((a < b ? a : b) - 1, BAND_Y + 2, (a > b ? a : b) + 1, BAND_Y + 9);
+            ui_invalidate(8, BAND_Y + 11, 70, DISPLAY_H - 1);
+            ui_invalidate(232, BAND_Y + 11, 312, DISPLAY_H - 1);
         }
     }
 }
@@ -761,15 +777,15 @@ static void art(const char *init, int hue, int paused)
     uint16_t c = k_hues[hue & 7], dark = ui_mix(c, 0, 90);
 
     for (int k = 0; k < 4; k++)
-        ui_fill(ART_X, ART_Y + k * 24, 96, 24, ui_mix(c, dark, k * 85));
+        ui_fill(ART_X, ART_Y + k * (ART_S / 4), ART_S, ART_S / 4, ui_mix(c, dark, k * 85));
     if (init[0]) {
         int w = text_width(&font_d28, init, -1);
 
-        ui_text(&font_d28, ART_X + (96 - w) / 2, ART_Y + 58, w, 0, init, 0xFFFF, ART_Y, ART_Y + 95);
+        ui_text(&font_d28, ART_X + (ART_S - w) / 2, ART_Y + ART_S / 2 + 10, w, 0, init, 0xFFFF, ART_Y, ART_Y + ART_S - 1);
     }
     if (paused) {
-        ui_fill(82, 116, 18, 18, ui_mix(T->background, 0, 77));
-        ui_icon(ICON_PAUSE, 85, 119, 0xFFFF);
+        ui_fill(PAUSE_X, PAUSE_Y, 18, 18, ui_mix(T->background, 0, 77));
+        ui_icon(ICON_PAUSE, PAUSE_X + 3, PAUSE_Y + 3, 0xFFFF);
     }
 }
 
@@ -778,13 +794,13 @@ static int badge(int x, const char *s, uint16_t bg, uint16_t fg, int outline)
     int w = text_width(&font_s8, s, -1) + 6;
 
     if (outline) {
-        ui_frame_rect(x, 124, w, 11, bg);
+        ui_frame_rect(x, BADGE_Y, w, 11, bg);
     } else {
-        ui_fill(x + 1, 124, w - 2, 11, bg);
-        ui_fill(x, 125, 1, 9, bg);
-        ui_fill(x + w - 1, 125, 1, 9, bg);
+        ui_fill(x + 1, BADGE_Y, w - 2, 11, bg);
+        ui_fill(x, BADGE_Y + 1, 1, 9, bg);
+        ui_fill(x + w - 1, BADGE_Y + 1, 1, 9, bg);
     }
-    ui_text(&font_s8, x + 3, 133, w - 6, 0, s, fg, 124, 134);
+    ui_text(&font_s8, x + 3, BADGE_Y + 9, w - 6, 0, s, fg, BADGE_Y, BADGE_Y + 10);
     return x + w + 4;
 }
 
@@ -793,16 +809,16 @@ static void text_col(const char *title, const char *artist, const char *album)
 {
     const theme_t *t = T;
     text_line_t ln[2];
-    int n = text_wrap(&font_t17, title, -1, TW, 2, ln), yb = n == 2 ? 58 : 64;
+    int n = text_wrap(&font_t17, title, -1, TW, 2, ln), yb = n == 2 ? 42 : 48;
     char b[100];
 
     for (int i = 0; i < n; i++) {
         cpy(b, sizeof b, title + ln[i].off, ln[i].len);
-        ui_text(&font_t17, TX, yb + 20 * i, TW, 0, b, t->text, BODY_Y + 2, 120);
+        ui_text(&font_t17, TX, yb + 20 * i, TW, 0, b, t->text, BODY_Y + 2, BADGE_Y - 1);
     }
-    yb = n == 2 ? 97 : 90;
-    ui_text(&font_b13, TX, yb, TW, 0, artist, t->text, BODY_Y + 2, 121);
-    ui_text(&font_b13, TX, yb + 18, TW, 0, album, t->text_dim, BODY_Y + 2, 121);
+    yb = n == 2 ? 82 : 70;
+    ui_text(&font_b13, TX, yb, TW, 0, artist, t->text, BODY_Y + 2, BADGE_Y - 1);
+    ui_text(&font_b13, TX, yb + 18, TW, 0, album, t->text_dim, BODY_Y + 2, BADGE_Y - 1);
 }
 
 static void vol_band(int db, int bt)
@@ -812,9 +828,9 @@ static void vol_band(int db, int bt)
     int w = (db + 60) * 220 / 60;
 
     w = w < 0 ? 0 : w > 220 ? 220 : w;
-    ui_icon(bt ? ICON_BT : ICON_SPEAKER, 8, 148, t->accent);
-    ui_fill(26, 151, 220, 6, t->bar_track);
-    ui_fill(26, 151, w, 6, t->bar_fill);
+    ui_icon(bt ? ICON_BT : ICON_SPEAKER, 8, BAND_Y + 9, t->accent);
+    ui_fill(26, BAND_Y + 12, 220, 6, t->bar_track);
+    ui_fill(26, BAND_Y + 12, w, 6, t->bar_fill);
     if (bt) {
         memcpy(v, "BT ", 3);
         fmt_db(v + 3, sizeof v - 3, db);
@@ -822,7 +838,7 @@ static void vol_band(int db, int bt)
         fmt_db(v, sizeof v - 3, db);
         memcpy(v + strlen(v), " dB", 4);
     }
-    ui_text(&font_m13, 250, 161, 62, 2, v, t->text, BAND_Y, DISPLAY_H - 1);
+    ui_text(&font_m13, 250, BAND_Y + 22, 62, 2, v, t->text, BAND_Y, DISPLAY_H - 1);
 }
 
 static void np_draw(void)
@@ -832,7 +848,7 @@ static void np_draw(void)
 
     ui_fill(0, BODY_Y, DISPLAY_W, DISPLAY_H - BODY_Y, t->background);
     if (!N.seq) {
-        ui_text(&font_b13, 0, 92, DISPLAY_W, 1, "Nothing playing", t->text_dim, BODY_Y, 140);
+        ui_text(&font_b13, 0, 92, DISPLAY_W, 1, "Nothing playing", t->text_dim, BODY_Y, BAND_Y);
         return;
     }
     art(N.init, N.hue, N.paused);
@@ -846,6 +862,7 @@ static void np_draw(void)
 
         badge(x, N.fmt, N.hires ? t->hires : t->badge_bg, N.hires ? t->hires : t->text_dim, 1);
     }
+    ui_text(&font_s8, TX, 130, TW, 0, N.facts, t->text_dim, 122, 132);
     if (N.band) {
         vol_band(player_get_volume(), bt_routed());
         return;
@@ -853,23 +870,23 @@ static void np_draw(void)
     {
         int hx = head_x();
 
-        ui_fill(8, 144, 304, 4, t->bar_track);
-        ui_fill(8, 144, hx - 8, 4, t->bar_fill);
-        ui_fill(hx - 1, 142, 2, 8, t->text);
+        ui_fill(8, BAND_Y + 4, 304, 4, t->bar_track);
+        ui_fill(8, BAND_Y + 4, hx - 8, 4, t->bar_fill);
+        ui_fill(hx - 1, BAND_Y + 2, 2, 8, t->text);
     }
     fmt_time(a, sizeof a, N.pos);
-    ui_text(&font_b13, 8, 164, 62, 0, a, t->text, 150, 168);
+    ui_text(&font_b13, 8, BAND_Y + 25, 62, 0, a, t->text, BAND_Y + 11, DISPLAY_H - 1);
     b[0] = 0;
     if (N.dur) {
         memcpy(b, MINUS, 3);
         fmt_time(b + 3, sizeof b - 3, N.dur > N.pos ? N.dur - N.pos : 0);
     }
-    ui_text(&font_b13, 232, 164, 80, 2, b, t->text_dim, 150, 168);
+    ui_text(&font_b13, 232, BAND_Y + 25, 80, 2, b, t->text_dim, BAND_Y + 11, DISPLAY_H - 1);
     if (N.next[0]) {
         char nx[72];
 
         snprintf(nx, sizeof nx, "NEXT  %s", N.next);
-        ui_text(&font_s8, 72, 162, 156, 1, nx, t->text_dim, 150, 168);
+        ui_text(&font_s8, 72, BAND_Y + 23, 156, 1, nx, t->text_dim, BAND_Y + 11, DISPLAY_H - 1);
     }
 }
 
@@ -1004,9 +1021,9 @@ static void dac_tick(void)
         dac_lines(c, d, sizeof c);
         g_uac = now;
         if (strcmp(a, c) || strcmp(b, d))
-            ui_invalidate(TX, BODY_Y, 312, 121);
+            ui_invalidate(TX, BODY_Y, 312, BADGE_Y - 1);
         if (g_uac.bits != s_uac_shown.bits || g_uac.rate != s_uac_shown.rate || g_uac.high_speed != s_uac_shown.high_speed)
-            ui_invalidate(TX, 124, 312, 134);
+            ui_invalidate(TX, BADGE_Y, 312, BADGE_Y + 10);
         s_uac_shown = g_uac;
     }
 }
@@ -1220,18 +1237,20 @@ const page_t pg_queue = {
 
 /* ---- viewers (2.2 V): label / value lines, VOL turns pages -------------------------------------- */
 
-static uint32_t s_view_sig[7];
+#define VIEW_LINES 8                      /* DESIGN 2.2 V rev. 2: 8 lines, baselines 36 + 18 i */
+#define VIEW_Y 36
+static uint32_t s_view_sig[VIEW_LINES];
 
 static void view_draw(void)
 {
     const theme_t *t = T;
     const page_t *p = nav_top();
     static row_t r;
-    int base = nav_arg() * 7, n = p->count();
+    int base = nav_arg() * VIEW_LINES, n = p->count();
 
     ui_fill(0, BODY_Y, DISPLAY_W, DISPLAY_H - BODY_Y, t->background);
-    for (int i = 0; i < 7 && base + i < n; i++) {
-        int y = 54 + 18 * i;
+    for (int i = 0; i < VIEW_LINES && base + i < n; i++) {
+        int y = VIEW_Y + 18 * i;
 
         memset(&r, 0, sizeof r);
         p->row(base + i, &r);
@@ -1245,12 +1264,12 @@ static void view_tick(void)
     static uint32_t last;
     const page_t *p = nav_top();
     static row_t r;
-    int base = nav_arg() * 7, n = p->count();
+    int base = nav_arg() * VIEW_LINES, n = p->count();
 
     if (time_ms() - last < 500u)
         return;
     last = time_ms();
-    for (int i = 0; i < 7; i++) {
+    for (int i = 0; i < VIEW_LINES; i++) {
         uint32_t h = 2166136261u;
 
         memset(&r, 0, sizeof r);
@@ -1262,14 +1281,14 @@ static void view_tick(void)
             h = (h ^ (uint8_t)*s) * 16777619u;
         if (h != s_view_sig[i]) {
             s_view_sig[i] = h;
-            ui_invalidate(10, 54 + 18 * i - 15, 312, 54 + 18 * i + 3);
+            ui_invalidate(10, VIEW_Y + 18 * i - 15, 312, VIEW_Y + 18 * i + 3);
         }
     }
 }
 
 static void view_enter(int first) { memset(s_view_sig, 0, sizeof s_view_sig); }
 
-static int view_pages(void) { return (nav_top()->count() + 6) / 7; }
+static int view_pages(void) { return (nav_top()->count() + VIEW_LINES - 1) / VIEW_LINES; }
 
 static void view_act(int a, int i)
 {
@@ -1671,20 +1690,20 @@ static void sl_draw(void)
     int lo = 1, hi = s_edit->n, x = 16 + 288 * (*s_edit->field - lo) / (hi - lo);
 
     ui_fill(0, BODY_Y, DISPLAY_W, DISPLAY_H - BODY_Y, t->background);
-    ui_text(&font_b13, 16, 62, 288, 0, s_edit->label, t->text_dim, 48, 66);
+    ui_text(&font_b13, 16, 44, 288, 0, s_edit->label, t->text_dim, 30, 48);
     snprintf(v, sizeof v, "%u / %u", *s_edit->field, hi);
-    ui_text(&font_d28, 0, 100, DISPLAY_W, 1, v, t->text, 76, 108);
-    ui_fill(16, 116, 288, 8, t->bar_track);
-    ui_fill(16, 116, x - 16, 8, t->bar_fill);
-    ui_fill(x - 2, 112, 4, 16, t->text);
+    ui_text(&font_d28, 0, 84, DISPLAY_W, 1, v, t->text, 58, 92);
+    ui_fill(16, 100, 288, 8, t->bar_track);
+    ui_fill(16, 100, x - 16, 8, t->bar_fill);
+    ui_fill(x - 2, 96, 4, 16, t->text);
     for (int k = 0; k <= hi - lo; k++)
-        ui_fill(16 + 288 * k / (hi - lo), 126, 1, 3, t->text_dim);
+        ui_fill(16 + 288 * k / (hi - lo), 110, 1, 3, t->text_dim);
     snprintf(v, sizeof v, "%d", lo);
-    ui_text(&font_s8, 16, 140, 40, 0, v, t->text_dim, 132, 142);
+    ui_text(&font_s8, 16, 124, 40, 0, v, t->text_dim, 116, 126);
     snprintf(v, sizeof v, "%d", hi);
-    ui_text(&font_s8, 200, 140, 104, 2, v, t->text_dim, 132, 142);
+    ui_text(&font_s8, 200, 124, 104, 2, v, t->text_dim, 116, 126);
     snprintf(note, sizeof note, "Changes apply as you press. CANCEL restores %u / %u.", s_orig, hi);
-    ui_text(&font_b13, 16, 162, 288, 0, note, t->text_dim, 148, 168);
+    ui_text(&font_b13, 16, 150, 288, 0, note, t->text_dim, 136, 156);
 }
 
 static void sl_enter(int first)
@@ -1723,7 +1742,7 @@ static void sl_act(int a, int i)
         *s_edit->field = (uint8_t)v;
         if (s_edit->fn)
             s_edit->fn();
-        ui_invalidate(0, 76, DISPLAY_W - 1, 129);
+        ui_invalidate(0, 58, DISPLAY_W - 1, 113);
     }
 }
 
@@ -1743,12 +1762,12 @@ static void q_prompt(int icon, uint16_t c, const char *l1, const char *l2)
 
     ui_fill(0, BODY_Y, DISPLAY_W, 43, t->background);
     if (icon != NO_ICON) {
-        ui_icon(icon, 10, 46, c);
+        ui_icon(icon, 10, 28, c);
         x = 28;
     }
-    ui_text(&font_m13, x, 56, 300 - x, 0, l1, c == t->accent ? t->text : c, 42, 60);
-    ui_text(&font_b13, x, 74, 300 - x, 0, l2, t->text_dim, 60, 79);
-    ui_fill(0, 81, DISPLAY_W, 1, t->divider);
+    ui_text(&font_m13, x, 38, 300 - x, 0, l1, c == t->accent ? t->text : c, 24, 42);
+    ui_text(&font_b13, x, 56, 300 - x, 0, l2, t->text_dim, 42, 61);
+    ui_fill(0, 63, DISPLAY_W, 1, t->divider);
 }
 
 /* The cable question (ap_ui.c pushes it on a cable plugged in with usb=ask). */
