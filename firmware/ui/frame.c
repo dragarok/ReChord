@@ -74,10 +74,10 @@ uint16_t ui_mix(uint16_t a, uint16_t b, int t)
     return (uint16_t)(r << 11 | g << 5 | bl);
 }
 
-/* ---- the key bar -------------------------------------------------------------------------------- */
+/* ---- the keys, the hold line, toasts, the shortcut layer ---------------------------------------- */
 
-static keybar_t s_kb;                     /* the screen's labels */
-static const keybar_t *s_layer;           /* the shortcut layer, NULL: off */
+static keybar_t s_kb;                     /* the screen's labels: which keys have a hold */
+static const char *s_layer;               /* the shortcut layer's text, NULL: off */
 static int s_pressed = KEY_NONE, s_prog;
 static struct { uint8_t icon, tone, on; uint32_t until; char text[64]; } s_toast;
 
@@ -93,50 +93,34 @@ int key_slot(int key)
     }
 }
 
-static int same(const char *a, const char *b)
+static void inval_line(void)              /* the header's text line (a toast, the layer) */
 {
-    if (a == b)
-        return 1;
-    return (!a || !*a) ? (!b || !*b) : (b && !strcmp(a, b));
+    ui_invalidate(0, 0, DISPLAY_W - 1, HOLD_Y - 1);
 }
 
-static void inval_slot(int i)
+static void inval_hold(void)
 {
-    if (i >= 0)
-        ui_invalidate(i * SLOT_W, 0, i * SLOT_W + SLOT_W - 1, KB_H - 2);
-}
-
-static void inval_bar(void)
-{
-    ui_invalidate(0, 0, DISPLAY_W - 1, KB_H - 1);
+    ui_invalidate(0, HOLD_Y, DISPLAY_W - 1, HOLD_Y + 1);
 }
 
 void frame_keys(const keybar_t *k)
 {
-    for (int i = 0; i < NSLOTS; i++)
-        if (!same(k->tap[i], s_kb.tap[i]) || !same(k->hold[i], s_kb.hold[i])) {
-            s_kb.tap[i] = k->tap[i];
-            s_kb.hold[i] = k->hold[i];
-            if (!s_layer && !s_toast.on)
-                inval_slot(i);
-        }
+    s_kb = *k;                            /* (not drawn: DESIGN 2.1 rev. 2) */
 }
 
-static int has_hold(int slot)
+static int has_hold(int key)
 {
-    const keybar_t *k = s_layer ? s_layer : &s_kb;
+    int slot = key_slot(key);
 
-    return slot >= 0 && k->hold[slot] && *k->hold[slot];
+    return slot >= 0 && s_kb.hold[slot] && *s_kb.hold[slot];
 }
 
 void frame_press(int key)
 {
     if (key == s_pressed)
         return;
-    if (!s_toast.on) {
-        inval_slot(key_slot(s_pressed));
-        inval_slot(key_slot(key));
-    }
+    if (s_prog)
+        inval_hold();                     /* (the line of the key before goes) */
     s_pressed = key_slot(key) >= 0 ? key : KEY_NONE;
     s_prog = 0;
 }
@@ -146,12 +130,12 @@ int frame_pressed(void)
     return s_pressed;
 }
 
-void frame_layer(const keybar_t *k)
+void frame_layer(const char *text)
 {
-    if (k == s_layer)
+    if (text == s_layer)
         return;
-    s_layer = k;
-    inval_bar();
+    s_layer = text;
+    inval_line();
 }
 
 void frame_toast(int icon, int tone, const char *text)
@@ -161,68 +145,58 @@ void frame_toast(int icon, int tone, const char *text)
     snprintf(s_toast.text, sizeof s_toast.text, "%s", text);
     s_toast.until = time_ms() + 1500u;
     s_toast.on = 1;
-    inval_bar();
+    inval_line();
 }
 
 void frame_tick(uint32_t now)
 {
     if (s_toast.on && (int32_t)(now - s_toast.until) >= 0) {
         s_toast.on = 0;
-        inval_bar();
+        inval_line();
     }
-    if (s_pressed != KEY_NONE && has_hold(key_slot(s_pressed))) {
+    if (s_pressed != KEY_NONE && has_hold(s_pressed)) {
         int p = input_hold_progress(s_pressed);
 
-        if (p != s_prog) {
+        if (p != s_prog) {                /* the hold line: 32 px more every 50 ms */
             s_prog = p;
-            if (!s_toast.on)
-                inval_slot(key_slot(s_pressed));
+            inval_hold();
         }
     }
 }
 
-static void draw_keybar(void)
+/* The header line taken over (a toast, the layer): 1 when drawn. */
+static int draw_overlay(void)
 {
     const theme_t *t = T;
-    const keybar_t *k = s_layer ? s_layer : &s_kb;
-    uint16_t kt = t->key_text, kh = t->key_hold, dv = t->divider;
 
-    ui_fill(0, 0, DISPLAY_W, KB_H - 1, t->keybar_bg);
-    ui_fill(0, KB_H - 1, DISPLAY_W, 1, t->divider);
     if (s_toast.on) {
         uint16_t c = s_toast.tone == TOAST_WARN ? t->warn : s_toast.tone == TOAST_DANGER ? t->danger : t->text;
-        int tx = 8;
+        int tx = 5;
 
+        ui_fill(0, 0, DISPLAY_W, HOLD_Y, t->header_bg);
         if (s_toast.icon != NO_ICON) {
-            ui_icon(s_toast.icon, 8, 4, s_toast.tone == TOAST_TEXT ? t->accent : c);
-            tx = 26;
+            ui_icon(s_toast.icon, 5, 4, s_toast.tone == TOAST_TEXT ? t->accent : c);
+            tx = 22;
         }
-        ui_text(&font_b13, tx, 15, DISPLAY_W - tx - 8, 0, s_toast.text, c, 0, KB_H - 2);
-        return;
+        ui_text(&font_b13, tx, 14, DISPLAY_W - tx - 8, 0, s_toast.text, c, 0, HOLD_Y - 1);
+        return 1;
     }
-    if (s_layer) {                         /* the shortcut layer: the bar inverts */
-        ui_fill(0, 0, DISPLAY_W, KB_H - 1, t->sel_bg);
-        kt = kh = dv = t->sel_text;
+    if (s_layer) {
+        ui_fill(0, 0, DISPLAY_W, HOLD_Y, t->sel_bg);
+        ui_text(&font_s8, 5, 13, DISPLAY_W - 10, 1, s_layer, t->sel_text, 0, HOLD_Y - 1);
+        return 1;
     }
-    for (int i = 0; i < NSLOTS; i++) {
-        int x0 = i * SLOT_W, hold = k->hold[i] && *k->hold[i], pressed = key_slot(s_pressed) == i;
-        const char *tap = k->tap[i] ? k->tap[i] : "";
+    return 0;
+}
 
-        if (i)
-            ui_fill(x0, 3, 1, 13, dv);
-        if (pressed) {
-            int fh = hold ? (19 * s_prog + 5) / 10 : 19;
+static void draw_hold(void)
+{
+    const theme_t *t = T;
 
-            ui_fill(x0 + 1, 0, SLOT_W - 1, 19, t->surface);
-            ui_fill(x0 + 1, 0, SLOT_W - 1, fh < 2 ? 2 : fh, t->key_press);
-        }
-        if (hold) {
-            ui_text(&font_s8, x0 + 2, 9, SLOT_W - 4, 1, tap, *tap ? kt : kh, 0, KB_H - 2);
-            ui_text(&font_s8, x0 + 2, 17, SLOT_W - 4, 1, k->hold[i], pressed ? kt : kh, 0, KB_H - 2);
-        } else {
-            ui_text(&font_s8, x0 + 2, 13, SLOT_W - 4, 1, tap, kt, 0, KB_H - 2);
-        }
-    }
+    ui_fill(0, HOLD_Y, DISPLAY_W, 1, t->header_bg);
+    ui_fill(0, HOLD_Y + 1, DISPLAY_W, 1, t->divider);
+    if (s_prog && s_pressed != KEY_NONE && has_hold(s_pressed))
+        ui_fill(0, HOLD_Y, DISPLAY_W * s_prog / 10, 2, t->key_press);
 }
 
 /* ---- the header --------------------------------------------------------------------------------- */
@@ -250,9 +224,9 @@ static void battery(int x, int y, int pct, int charging)
     ui_fill(x + 2, y + 2, w < 1 ? 1 : w, 5, charging ? t->success : c);
 }
 
-#define HB 33                              /* the header's text baseline */
+#define HB 14                              /* the header's text baseline */
 #define HY0 HDR_Y
-#define HY1 (HDR_Y + 16)
+#define HY1 (HOLD_Y - 1)
 
 /* Lay the header out right to left (and draw it when draw): each field's span and signature. */
 static void hdr_pass(const hdr_t *h, fld_t *f, int draw)
@@ -270,8 +244,8 @@ static void hdr_pass(const hdr_t *h, fld_t *f, int draw)
     f[FD_BATT].x1 = 312;
     f[FD_BATT].sig = h->batt | (uint32_t)h->charging << 8 | 1u << 16;
     if (draw) {
-        battery(x, 24, h->batt, h->charging);
-        ui_text(&font_s8, x - w - 3, 32, w, 0, pct, t->text_dim, HY0, HY1);
+        battery(x, 5, h->batt, h->charging);
+        ui_text(&font_s8, x - w - 3, 13, w, 0, pct, t->text_dim, HY0, HY1);
     }
     x -= w + 3;
     w = text_width(&font_b13, h->vol, -1);
@@ -286,14 +260,14 @@ static void hdr_pass(const hdr_t *h, fld_t *f, int draw)
     f[FD_OUT].x1 = (int16_t)(x + 11);
     f[FD_OUT].sig = h->out | 1u << 8;
     if (draw)
-        ui_icon(h->out, x, 23, h->out != ICON_SPEAKER ? t->accent : t->text_dim);
+        ui_icon(h->out, x, 4, h->out != ICON_SPEAKER ? t->accent : t->text_dim);
     if (h->lock) {
         x -= 15;
         f[FD_LOCK].x0 = (int16_t)x;
         f[FD_LOCK].x1 = (int16_t)(x + 11);
         f[FD_LOCK].sig = 1;
         if (draw)
-            ui_icon(ICON_LOCK, x, 23, t->warn);
+            ui_icon(ICON_LOCK, x, 4, t->warn);
     }
     if (!h->np && h->play) {
         w = text_width(&font_b13, h->elapsed, -1);
@@ -305,7 +279,7 @@ static void hdr_pass(const hdr_t *h, fld_t *f, int draw)
         f[FD_PLAY].x1 = (int16_t)(x + 13 + w);
         f[FD_PLAY].sig = hs(h->play, h->elapsed);
         if (draw)
-            ui_icon(h->play == 1 ? ICON_PLAY : ICON_PAUSE, x, 23, t->text_dim);
+            ui_icon(h->play == 1 ? ICON_PLAY : ICON_PAUSE, x, 4, t->text_dim);
     }
     x -= 6;                                /* the title's right edge */
     f[FD_TITLE].x0 = 0;
@@ -315,14 +289,14 @@ static void hdr_pass(const hdr_t *h, fld_t *f, int draw)
         return;
     tx = 5;
     if (h->np) {
-        ui_icon(ICON_NOTE, 5, 23, t->text_dim);
+        ui_icon(ICON_NOTE, 5, 4, t->text_dim);
         tx = 22 + ui_text(&font_m13, 22, HB, x - 22, 0, h->title, t->text, HY0, HY1) + 6;
         if (h->mode_icon != NO_ICON)
-            ui_icon(h->mode_icon, tx, 23, t->accent);
+            ui_icon(h->mode_icon, tx, 4, t->accent);
         return;
     }
     if (h->icon != NO_ICON) {
-        ui_icon(h->icon, 5, 23, t->text_dim);
+        ui_icon(h->icon, 5, 4, t->text_dim);
         tx = 22;
     }
     ui_text(&font_m13, tx, HB, x - tx, 0, h->title, t->text, HY0, HY1);
@@ -358,9 +332,10 @@ void frame_draw(void)
     const theme_t *t = T;
     fld_t f[NFD];
 
-    draw_keybar();
-    ui_fill(0, HDR_Y, DISPLAY_W, 17, t->header_bg);
-    ui_fill(0, HDR_Y + 17, DISPLAY_W, 1, t->divider);
+    draw_hold();
+    if (draw_overlay())
+        return;
+    ui_fill(0, HDR_Y, DISPLAY_W, HOLD_Y, t->header_bg);
     hdr_pass(&s_h, f, 1);
 }
 

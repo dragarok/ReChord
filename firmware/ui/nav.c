@@ -51,7 +51,7 @@ static void entered(int first)
     const page_t *p = nav_top();
 
     if (is_list(p)) {
-        L.y0 = p->kind == PK_QUESTION ? 82 : BODY_Y;
+        L.y0 = p->kind == PK_QUESTION ? 64 : LIST_Y;
         L.nr = p->kind == PK_QUESTION ? 4 : NROWS;
     }
     s_force = 1;
@@ -269,7 +269,7 @@ static void draw_row(int s, int y, int sel)
         ui_icon(c->icon, 6, y + 5, ic);
     }
     if (c->flags & R_CHEV) {
-        ui_icon(ICON_CHEV, right - 6, y + 6, dim);
+        ui_icon(ICON_CHEV, right - 6, y + 5, dim);
         right -= 10;
     }
     if (c->v[0]) {
@@ -358,9 +358,8 @@ void nav_toast(int icon, int tone, const char *fmt, ...)
 
 /* ---- keys -------------------------------------------------------------------------------------- */
 
-static const keybar_t k_layer = {
-    { "BRIGHT+", "BRIGHT\xE2\x88\x92", "SHOT", "LOCK", "PANEL" }, { 0 }
-};
+/* the shortcut layer, named in the header line (DESIGN 2.1 rev. 2) */
+static const char k_layer[] = "PLAY SHOT \xC2\xB7 MENU LOCK \xC2\xB7 BACK PANEL \xC2\xB7 VOL BRIGHTNESS";
 static uint32_t s_layer_at;               /* the shortcut layer: when it began, 0 = off */
 static int s_shot;                        /* a screenshot after the next frame (without the layer) */
 static struct { uint32_t t; const page_t *p; int d; } s_undo;   /* the last VOL press, for the chord */
@@ -528,7 +527,7 @@ void nav_key(const input_event_t *ev)
         frame_press(KEY_NONE);
         if (on) {
             s_layer_at = time_stamp(time_ms());
-            frame_layer(&k_layer);
+            frame_layer(k_layer);
         }
         log_printf("ui: shortcut layer");
         return;
