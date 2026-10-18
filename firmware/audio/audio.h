@@ -12,6 +12,7 @@ typedef struct {
     uint32_t seq, codec, rate, bits, channels, frames;
     uint32_t kbps;                 /* MP3 bit rate of the first frame, 0 otherwise */
     uint32_t index;                /* its position in the play queue (services/queue.h) */
+    uint32_t base;                 /* frames before where its stream starts (a seek), 0 */
     fs_ref_t ref;                  /* the file */
     char name[64];
 } audio_track_t;
@@ -48,6 +49,12 @@ void audio_ext_stop(void);
 /* +1: next track; -1: previous (or the start of this one if more than 3 s in).
  * Returns audio_play()'s result. */
 int audio_skip(int dir);
+/* Play the current track from ms on (its stream restarted at the coded unit before that time, the
+ * frames before it dropped by core B: playback resumes at that very sample, gapless onwards). 0, or
+ * < 0: -2 the format has no seek here, -3 nothing playing, else audio_play()'s. Paused stays paused. */
+int audio_seek(uint32_t ms);
+/* 1 when audio_seek() works for this codec (AS_CODEC_*). */
+int audio_seekable(uint32_t codec);
 /* The output: 1 = a USB audio device (drivers/usb_out.h, ready), 0 = the jack. Playing
  * stops on a change (1 is returned); the caller plays again. */
 int audio_set_output(int usb);

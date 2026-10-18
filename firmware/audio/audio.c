@@ -20,6 +20,7 @@
 #include "mp3_info.h"
 #include "mp4.h"
 #include "asf.h"
+#include "seek.h"
 #include "drivers/clock.h"
 #include "drivers/emmc.h"
 #include "drivers/dac_cs43131.h"
@@ -238,6 +239,7 @@ static uint32_t mp3_rd(void *u, uint32_t off, void *buf, uint32_t n)
 }
 
 static uint32_t s_kbps;
+static mp3_info_t s_mp3i;                  /* the open MP3's layout (a seek finds its frames by it) */
 
 static int open_mp3(fs_file_t *f, as_track_t *t)
 {
@@ -245,6 +247,7 @@ static int open_mp3(fs_file_t *f, as_track_t *t)
 
     if (mp3_info(mp3_rd, f, (uint32_t)fs_file_size(f), &mi) != 0 || fs_seek(f, (long)mi.data_off) < 0)
         return -1;
+    s_mp3i = mi;
     t->codec = AS_CODEC_MP3;
     t->rate = mi.rate;
     t->channels = mi.channels;
@@ -548,6 +551,146 @@ static int open_wma(fs_file_t *f, as_track_t *t)
     return 0;
 }
 
+/* ---- seeking (seek.h): the track just opened, streamed from the unit before s_seek_ms -------- */
+
+static int s_seek_on;                      /* audio_seek(): the next track opened starts at s_seek_ms */
+static uint32_t s_seek_ms;
+
+int audio_seekable(uint32_t codec)
+{
+    switch (codec) {
+    case AS_CODEC_FLAC: case AS_CODEC_WAV: case AS_CODEC_WAVF: case AS_CODEC_AIFF: case AS_CODEC_AIFF_LE:
+    case AS_CODEC_MP3: case AS_CODEC_AAC: case AS_CODEC_ALAC: case AS_CODEC_WAVPACK: case AS_CODEC_DSD:
+        return 1;
+    default:            /* not yet: Ogg Vorbis/Opus (granule bisection, the decoders' pre-roll), APE
+                         * (frames start mid-word), WMA */
+        return 0;
+    }
+}
+
+/* Move the open track's stream to start at frame *t (or the coded unit holding it, core B dropping
+ * the frames before it: t->drop). 0 (*t: the frame playback resumes at), or < 0 (the stream is as
+ * opened: played from its start). */
+static int seek_open(as_track_t *t, uint64_t *at)
+{
+    uint64_t T = *at;
+    uint32_t off;
+    uint64_t first;
+    int vbr = 0;
+
+    if (t->frames && T >= t->frames)
+        T = t->frames - 1u;
+    *at = 0;
+    if (!T)
+        return 0;
+    switch (t->codec) {
+    case AS_CODEC_WAV: case AS_CODEC_WAVF: case AS_CODEC_AIFF: case AS_CODEC_AIFF_LE: {
+        uint64_t b = T * t->channels * (t->bits / 8u);       /* plain arithmetic: a frame is fsz bytes */
+
+        if (b >= s_left)
+            return -1;
+        s_data_off += (uint32_t)b;
+        s_left -= (uint32_t)b;
+        t->bytes = s_left;
+        break;
+    }
+    case AS_CODEC_FLAC:
+        if (seek_flac(mp3_rd, s_file, s_data_off, s_data_off + s_left, s_hdr + 8, T, &off, &first) || first > T)
+            return -1;
+        s_left -= off - s_data_off;
+        s_data_off = off;
+        t->bytes = s_hdr_len + s_left;
+        t->drop = (uint32_t)(T - first);
+        break;
+    case AS_CODEC_WAVPACK:
+        if (seek_wavpack(mp3_rd, s_file, s_data_off, s_data_off + s_left, t->frames, T, &off, &first) || first > T)
+            return -1;
+        s_left -= off - s_data_off;
+        s_data_off = off;
+        t->bytes = s_left;
+        t->drop = (uint32_t)(T - first);
+        break;
+    case AS_CODEC_MP3: {
+        /* decoded sample D = T + the encoder/decoder delay; start some frames before its frame:
+         * layer III's bit reservoir (511 bytes back, 255 for MPEG-2: up to 5 / 10 small frames) and
+         * the IMDCT overlap and synthesis memory (a frame), so the target's frame decodes as it
+         * does from the start of the file. A frame whose reservoir lies before the start decodes
+         * as silence (b_mp3.c): it is dropped with the rest. */
+        const mp3_info_t *mi = &s_mp3i;
+        uint64_t D = T + mi->skip;
+        uint32_t f = (uint32_t)(D / mi->spf), pre = mi->layer != 3u ? 2u : mi->spf == 1152u ? 7u : 12u, idx;
+
+        if (seek_mp3(mp3_rd, s_file, mi, f > pre ? f - pre : 0u, &off, &idx))
+            return -1;
+        first = (uint64_t)idx * mi->spf;
+        if (first > D) {                       /* (a VBR estimate past the target: start there) */
+            D = first;
+            T = D > mi->skip ? D - mi->skip : 0u;
+        }
+        t->trim = 0;                           /* (the delay is in D) */
+        t->drop = (uint32_t)(D - first);
+        s_left = mi->data_end - off;
+        s_data_off = off;
+        t->bytes = s_left;
+        if (!mi->cbr)
+            vbr = 1;
+        break;
+    }
+    case AS_CODEC_AAC: case AS_CODEC_ALAC: {
+        /* AAC: FAAD2 outputs nothing for the first packet it decodes (its overlap), so packet k0 + 1
+         * is the first heard, at output frame k0 x spp of the whole stream, exact from the packet
+         * after the one whose overlap it needs (SBR: its QMF banks and time-differential envelopes,
+         * four packets). ALAC packets stand alone. */
+        uint32_t spp = t->codec == AS_CODEC_AAC ? (s_mi.sbr ? 2048u : 1024u) :
+                       (uint32_t)s_mi.cfg[0] << 24 | (uint32_t)s_mi.cfg[1] << 16 | (uint32_t)s_mi.cfg[2] << 8 | s_mi.cfg[3];
+        uint32_t pre = t->codec == AS_CODEC_AAC ? (s_mi.sbr ? 4u : 1u) : 0u, k0, before;
+        uint64_t D = T + s_mi.trim;
+
+        if (!spp)
+            return -1;
+        k0 = (uint32_t)(D / spp);
+        k0 = k0 > pre ? k0 - pre : 0u;
+        if (k0 >= s_mi.nsamples || mp4_seek(mp3_rd, s_tab, &s_mi, &s_cur, k0, &before))
+            return -1;
+        t->trim = 0;
+        t->drop = (uint32_t)(D - (uint64_t)k0 * spp);
+        t->bytes = s_hdr_len + 4u * (s_mi.nsamples - k0) + (s_mi.data_bytes - before);
+        s_stream_left = t->bytes;
+        break;
+    }
+    case AS_CODEC_DSD: {
+        /* output frame k comes out after DSD byte (k + 1) x step - 1 of each channel (step = bytes
+         * an output), from the FIR's taps / 8 bytes before it: start at least 1 KiB of bytes early
+         * (more than the taps), on a step (and, DSF, a block) boundary, so the phase is the same */
+        const uint32_t *h = (const uint32_t *)(void *)s_hdr;
+        uint32_t ch = h[2], step = (h[3] == 4u ? 128u : 16u * h[3]) / 8u, unit = h[1] != 2u ? h[4] : step;
+        uint64_t b = (T + 1u) * step;
+
+        b = b > 1024u + step ? b - 1024u - step : 0u;
+        b -= b % unit;
+        if (b * ch >= s_left)
+            return -1;
+        s_data_off += (uint32_t)(b * ch);
+        s_left -= (uint32_t)(b * ch);
+        t->bytes = s_hdr_len + s_left;
+        t->drop = (uint32_t)(T - b / step);
+        break;
+    }
+    default:
+        return -2;
+    }
+    if (!s_mp4 && fs_seek(s_file, (long)s_data_off) < 0)
+        return -1;
+    if (vbr)
+        t->frames = 0;      /* VBR MP3: the frame's index is an estimate (the TOC's, within a frame or
+                             * so), the target as near: play to the last frame rather than cut music by
+                             * a count that may be off (its encoder padding, under 26 ms, then plays) */
+    else if (t->frames)
+        t->frames -= (uint32_t)T;
+    *at = T;
+    return 0;
+}
+
 static void close_track(void)
 {
     if (s_file)
@@ -613,6 +756,30 @@ static int open_next(void)
                     t.frames = 0;            /* the count no longer holds: play what decodes */
             }
         }
+        {
+            uint32_t total = t.frames ? t.frames : s_show_frames;
+            uint64_t at = 0;
+
+            if (s_seek_on) {                 /* audio_seek(): this track from s_seek_ms on */
+                uint32_t t0 = time_ms();
+                int r;
+
+                s_seek_on = 0;
+                at = (uint64_t)s_seek_ms * t.rate / 1000u;
+                r = seek_open(&t, &at);
+                log_printf("audio: seek %s to %u ms: frame %u, from byte %u (+%u frames dropped), %u ms", name,
+                           (unsigned)s_seek_ms, (unsigned)at, (unsigned)(s_mp4 ? s_cur.off : s_data_off),
+                           (unsigned)t.drop, (unsigned)(time_ms() - t0));
+                if (r) {
+                    log_printf("audio: seek failed (%d): from the start", r);
+                    at = 0;
+                    if (!s_mp4)
+                        fs_seek(s_file, (long)s_data_off);   /* (the search moved the handle) */
+                }
+            }
+            s_tracks[(s_seq + 1u) % AS_QUEUE].base = (uint32_t)at;
+            s_tracks[(s_seq + 1u) % AS_QUEUE].frames = total;
+        }
         t.seq = ++s_seq;
         /* file byte p lands at ring offset in_wr + skip + hdr + (p - start): make that
          * congruent to p mod 4, so whole sectors can be read straight into the ring */
@@ -627,8 +794,7 @@ static int open_next(void)
             u->rate = t.rate;
             u->bits = t.bits;
             u->channels = t.channels;
-            u->frames = t.frames ? t.frames : s_show_frames;
-            u->codec = t.codec;
+            u->codec = t.codec;              /* (frames: the whole track's, base: set above) */
             u->kbps = s_kbps;
             u->index = (uint32_t)pos;
             u->ref = ref;
@@ -909,6 +1075,8 @@ static void dma_prepare(void)
     }
 }
 
+static int s_start_paused;                 /* audio_seek() while paused: the output starts paused */
+
 static void dma_start(void)
 {
     DMA_CFGREG = 1;
@@ -921,7 +1089,11 @@ static void dma_start(void)
     DMA_CHR(0x44) = 0x1007u;                 /* dest handshake 2 = I2S1 TX */
     DMA_CHEN = (1u << (DMA_CH + 8u)) | (1u << DMA_CH);
     I2S_DMACR = 0x110u;                      /* TX DMA on, level 16 */
-    dac_i2s_start();
+    if (!s_start_paused)
+        dac_i2s_start();
+    else
+        dac_i2s_stop();                      /* paused: audio_pause(0) starts it (the rate's set-up,
+                                              * i2s1_setup, left the transfer on) */
     s_dma_on = 1;
 }
 
@@ -1173,6 +1345,7 @@ static void halt(void)
     }
     s_playing = 0;
     s_paused = 0;
+    s_start_paused = 0;
 }
 
 int audio_play(int pos)
@@ -1253,11 +1426,34 @@ int audio_skip(int dir)
     return pos < 0 ? -3 : audio_play(pos);
 }
 
+int audio_seek(uint32_t ms)
+{
+    audio_status_t st;
+    int r, paused;
+
+    audio_status(&st);
+    if (!s_playing || !st.seq || !st.track.rate)
+        return -3;
+    if (!audio_seekable(st.track.codec))
+        return -2;
+    s_seek_ms = ms;
+    s_seek_on = 1;
+    paused = s_paused;
+    r = audio_play((int)st.track.index);
+    s_seek_on = 0;
+    s_start_paused = r == 0 && paused;       /* paused before: paused at the target */
+    return r;
+}
+
 /* Pause: stop the I2S transfer; the DMA then stalls on its handshake and keeps
  * its place, core B stops once the ring is full. Resume restarts I2S. */
 
 int audio_pause(int on)
 {
+    if (s_playing && !s_dma_on && s_start_paused && !on) {
+        s_start_paused = 0;                  /* (a seek while paused, resumed before its output began) */
+        return 0;
+    }
     if (!s_playing || !s_dma_on || on == s_paused)
         return s_paused;
     if (!on)
@@ -1277,7 +1473,7 @@ int audio_pause(int on)
 
 int audio_paused(void)
 {
-    return s_playing && s_paused;
+    return s_playing && (s_paused || s_start_paused);
 }
 
 /* Room for a storage write (OURS_AUDIT 1.6 step 2, DESIGN 4.2/4.3): the card cannot be read while
@@ -1398,8 +1594,14 @@ void audio_poll(void)
     if (!s_dma_on && !AS->cmd && !s_dac_phase &&
         (AS->pcm_wr >= AS_PCM_BLOCKS || (AS->pcm_end && AS->pcm_wr >= AS->pcm_end))) {
         out_start();
-        log_printf("audio: output on, %u blocks ready, B at %u MHz", (unsigned)AS->pcm_wr,
-                   (unsigned)(AS->b_hz / 1000000u));
+        if (s_start_paused) {                /* (the jack: its I2S never started; USB: paused now) */
+            s_start_paused = 0;
+            if (s_usb)
+                usb_out_pause(1);
+            s_paused = 1;
+        }
+        log_printf("audio: output on, %u blocks ready, B at %u MHz%s", (unsigned)AS->pcm_wr,
+                   (unsigned)(AS->b_hz / 1000000u), s_paused ? ", paused" : "");
     }
     /* B ended the DMA chain: once the last block has played and been recycled,
      * either the stream is over, or the next track needs another sample rate */
@@ -1498,7 +1700,7 @@ int audio_status(audio_status_t *st)
             uint32_t buffered = (uint32_t)(blocks < 0 ? 0 : blocks > (int32_t)AS_PCM_BLOCKS ?
                                            (int32_t)AS_PCM_BLOCKS : blocks) * AS_BLOCK_FRAMES;
 
-            st->frames = AS->cur_frames > buffered ? AS->cur_frames - buffered : 0;
+            st->frames = t->base + (AS->cur_frames > buffered ? AS->cur_frames - buffered : 0);
         }
     }
     st->b_load_pm = s_b_up ? AS->b_load_pm : 0;

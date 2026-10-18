@@ -112,6 +112,7 @@ void  player_note_track(uint32_t clus);     /* the heard track -> g_cfg.track */
 int   player_pause(void);
 int   player_stop(void);
 int   player_seek(long ms);
+int   player_seekable(void);   /* 1: player_seek() works on the track playing (its format seeks) */
 int   player_next(void);
 int   player_prev(void);   /* previous track, or the start of this one after 3 s */
 int   player_get_state(void);

@@ -115,6 +115,7 @@ int mp3_info(mp3_read_at_t rd, void *u, uint32_t size, mp3_info_t *mi)
     mi->data_off = pos;
 
     /* Xing / Info after the side information, or VBRI at a fixed 32 */
+    mi->cbr = 1;                                     /* (no header: taken as constant, as players do) */
     if (rd(u, pos, b, sizeof b) != sizeof b)
         return 0;
     xo = 4u + ((b[1] & 1u) ? 0u : 2u);
@@ -126,10 +127,24 @@ int mp3_info(mp3_read_at_t rd, void *u, uint32_t size, mp3_info_t *mi)
         uint32_t fl = be32(b + xo + 4), p = xo + 8u, nf = 0;
 
         if (fl & 1u) { nf = be32(b + p); p += 4u; }
-        if (fl & 2u) p += 4u;
-        if (fl & 4u) p += 100u;
+        mi->xing_off = pos;
+        mi->xing_bytes = mi->data_end - pos;
+        if (fl & 2u) {
+            if (be32(b + p) > len && be32(b + p) <= mi->data_end - pos)
+                mi->xing_bytes = be32(b + p);
+            p += 4u;
+        }
+        if (fl & 4u) {
+            if (p + 100u <= sizeof b) {
+                memcpy(mi->toc, b + p, 100);
+                mi->has_toc = 1;
+            }
+            p += 100u;
+        }
         if (fl & 8u) p += 4u;
         mi->data_off = pos + len;                    /* the Info frame carries no audio */
+        mi->cbr = !memcmp(b + xo, "Info", 4);
+        mi->nframes = nf;
         mi->frames = nf * mi->spf;
         if (p + 24u <= sizeof b && (!memcmp(b + p, "LAME", 4) || !memcmp(b + p, "Lavf", 4) || !memcmp(b + p, "Lavc", 4))) {
             uint32_t v = (uint32_t)b[p + 21] << 16 | (uint32_t)b[p + 22] << 8 | b[p + 23];
@@ -139,8 +154,10 @@ int mp3_info(mp3_read_at_t rd, void *u, uint32_t size, mp3_info_t *mi)
             mi->frames = mi->frames > delay + padding ? mi->frames - delay - padding : 0;
         }
     } else if (mi->layer == 3u && !memcmp(b + 36, "VBRI", 4)) {
+        mi->cbr = 0;
         mi->data_off = pos + len;
-        mi->frames = be32(b + 36 + 14) * mi->spf;
+        mi->nframes = be32(b + 36 + 14);
+        mi->frames = mi->nframes * mi->spf;
     }
     if (mi->data_off > mi->data_end)
         mi->data_off = mi->data_end;

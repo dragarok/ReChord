@@ -119,8 +119,8 @@ AP_THEME_SRCS := \
 AP_LIBC_SRCS := \
   firmware/libc/mem.c \
   firmware/libc/str.c \
-  firmware/libc/stdio_min.c \
-  firmware/libc/math_min.c
+  firmware/libc/stdio_min.c
+# (libc/math_min.c: nothing on core A calls it until the EQ is built; core A's code space is full)
 
 # Player module (audio path): linked from milestone 2a. Includes the
 # target IPC backend (ipc_b_target.c) and the codecs — one file per codec
@@ -130,6 +130,7 @@ AP_PLAYER_SRCS := \
   firmware/player/player_audio.c \
   firmware/audio/audio.c \
   firmware/audio/mp3_info.c \
+  firmware/audio/seek.c \
   firmware/audio/mp4.c \
   firmware/audio/ape_info.c \
   firmware/audio/asf.c
