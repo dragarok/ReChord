@@ -11,5 +11,7 @@
  * sector) and checks its sum. Returns its length, or < 0: -1 no table / I/O,
  * -2 not found, -3 too big, -4 bad sum. */
 int module_load(const char *name, void *dst, uint32_t max);
+/* The same from firmware slot `slot` (0 or 1: the second copy, half the firmware area on). */
+int module_load_slot(unsigned slot, const char *name, void *dst, uint32_t max);
 
 #endif

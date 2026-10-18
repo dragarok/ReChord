@@ -54,4 +54,7 @@ int fw_update_install(const fw_image_t *img, fwu_progress_t progress);
 /* Deletes the image (as stock does) so it isn't offered again. */
 int fw_update_retire(const fw_image_t *img);
 
+/* CRC-32 of the update trailer: poly 0x04C10DB7, MSB first, init 0 (crc = 0 to start). */
+uint32_t fwu_crc(uint32_t crc, const uint8_t *p, uint32_t n);
+
 #endif

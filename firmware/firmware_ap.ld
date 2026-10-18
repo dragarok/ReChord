@@ -35,8 +35,17 @@
  * payload (docs/fw1-packing.md section 6).  PowerOn_Reset zeroes the bounded
  * .bss span itself (the reference does the same).
  *
- * Per R-a2d2b19d3577: the vector table is isolated in its own section and
- * --gc-sections is never used on this link (see firmware/ap.mk).
+ * The vector table is isolated in its own section (R-a2d2b19d3577; the rule's text is in no doc
+ * or .dfiu revision: what docs/HANDOVER.md section 4 records is the SDK-era BB link, where
+ * --gc-sections "silently drops nearly everything (stubs look dead)"). This link has every root
+ * explicit -- ENTRY, KEEP for both vector tables, .noinit and the overlay headers -- and uses
+ * --gc-sections (firmware/ap.mk): it drops only sections nothing references (2776 B of dead code
+ * at its introduction, the list in docs/MEMORY_MAP.md).
+ *
+ * Overlays (services/ovl.h, docs/MEMORY_MAP.md): code for modes the user enters and leaves, run
+ * from OVL_WIN, one at a time, loaded on demand from the image's module table. Each is an output
+ * section of this link, so it calls resident code directly; the resident image never refers into
+ * one (NOCROSSREFS_TO below fails the link), only through the overlay's header at OVL_WIN.
  */
 
 ENTRY(PowerOn_Entry)
@@ -57,6 +66,18 @@ MEMORY
        (audio_shared.h AS_IN_RING, written by core A, read by core B) and stays
        clear of the loaded image (0x0304F490+). */
     FW_RAM  (rwx) : ORIGIN = 0x03004000, LENGTH = 0x0002C000   /* to 0x03030000 */
+
+    /* OVL_WIN: the overlay window. Core-A SRAM between the audio input ring (to 0x0303FFFF) and
+       the loaded image (0x0304F490): nothing of ours is there (the loader's data sits there
+       while it boots us, SDK BuildAll.sct LOADER_DATA_BASE 0x0304A000, docs/community.md 4.2,
+       and is dead once our code runs). 32 KiB; 0x03048000..0x0304F000 stays free for a second
+       window. Holds code and read-only data only: an overlay's .data and .bss are resident. */
+    OVL_WIN (rx)  : ORIGIN = 0x03040000, LENGTH = 0x00008000
+
+    /* OVL_STORE: the overlays' load addresses. Only in the full ELF: no such memory, nothing
+       loads from it; the image carries each overlay as a module (Makefile: objcopy -R strips
+       them from what tools/make_fw1.py packs, tools/ovl_pack.py extracts them). */
+    OVL_STORE (r) : ORIGIN = 0x90000000, LENGTH = 0x00100000
 }
 
 /* ---- stacks ----------------------------------------------------------- */
@@ -71,6 +92,51 @@ Image$$AP_MAIN_STACK$$ZI$$Limit = __stack_top;
 
 SECTIONS
 {
+    /* ---- overlays (services/ovl.h, startup/ap_ovl.c) -------------------
+       First in this script, so these input sections are theirs before .text's wildcards take
+       the rest. Each starts with its header (OVL_HEADER). A file partly in an overlay is split by
+       function section (-ffunction-sections): its statics shared with resident code stay in
+       .text (an overlay may call them), and a function inlined into its caller goes with it.
+       NOCROSSREFS: no overlay refers into another. */
+    OVERLAY ORIGIN(OVL_WIN) : NOCROSSREFS AT (ORIGIN(OVL_STORE))
+    {
+        /* the USB DAC (UAC2): the driver and the session (startup/ap_ui.c) */
+        .ovl_usbdac
+        {
+            KEEP(*(.ovl_hdr.usbdac))
+            *(.ovl.usbdac.*)
+            *usb_uac_rknanoc.o(.text* .rodata*)
+            *ap_ui.o(.text.usb_dac_session* .rodata.usb_dac_session.* .text.uac_tick* .rodata.uac_tick.*
+                     .text.uac_status* .text.dac_power_only* .rodata.dac_power_only.*)
+            . = ALIGN(4);
+        }
+        /* USB-C earphones: the player as USB host */
+        .ovl_usbout
+        {
+            KEEP(*(.ovl_hdr.usbout))
+            *(.ovl.usbout.*)
+            *usb_out_rknanoc.o(.text* .rodata*)
+            . = ALIGN(4);
+        }
+        /* the Developer tests (Settings > Developer) */
+        .ovl_dev
+        {
+            KEEP(*(.ovl_hdr.dev))
+            *(.ovl.dev.*)
+            *usb_cdc_rknanoc.o(.text* .rodata*)
+            *bt_jieli.o(.text.bt_listen .rodata.bt_listen.*)
+            /* (.rodata.usb_console_run.str1.1 and .rodata.usb_probe_menu.str1.1 stay resident:
+               strings the compiler shares with resident tables in ap_ui.c) */
+            *ap_ui.o(.text.dac_test_run* .rodata.dac_test_run.* .text.tone_burst* .rodata.sine64*
+                     .text.usb_console_run* .text.cdc_* .rodata.cdc_*
+                     .text.usb_probe_menu* .text.usb_probe_screen*
+                     .rodata.usb_probe_screen.* .text.usb_detect_test* .rodata.usb_detect_test.*
+                     .text.detect_wait* .rodata.detect_wait.* .text.bt_listen_test*
+                     .rodata.bt_listen_test.* .text.listen_save* .rodata.listen_save.*)
+            . = ALIGN(4);
+        }
+    }
+
     /* ---- vector table FIRST at the entry base -------------------------
        ap_vectors (ap_startup.c) must be the first bytes of the image:
        0x03050000 is where the loader lands IMG 0xD68 and where the ROM reads
@@ -132,7 +198,7 @@ SECTIONS
     .noinit (ORIGIN(FW_RAM) + LENGTH(FW_RAM) - 0x40) (NOLOAD) :
     {
         _noinit_start = .;
-        *(.noinit*)
+        KEEP(*(.noinit*))
         . = ALIGN(4);
         _noinit_end = .;
     } > FW_RAM
@@ -168,10 +234,27 @@ SECTIONS
  * ring (audio/audio_shared.h AS_LLI = 0x0308FF00). The ROM's boot-time copies
  * (the row-0 duplicate up by 0xB68 and the 4-byte poke at 0x03078CD0, tools/
  * pack_fw1.py) land here before our code runs; nothing uses the window after. */
+__fw_code_end     = ORIGIN(FW_CODE) + LENGTH(FW_CODE);   /* (tools/ap_size.py) */
 __fonts_ram_start = ALIGN(ORIGIN(FW_CODE) + LENGTH(FW_CODE), 256);
 __fonts_ram_end   = 0x0308FF00;
 ASSERT(__fonts_ram_end - __fonts_ram_start >= 0x17000,
        "the fonts window must hold the fonts module (about 92 KiB)")
+
+/* ---- the overlays (services/ovl.h) ------------------------------------
+ * The resident image never refers into an overlay: only through the header at OVL_WIN, which
+ * services/ovl.c checks before anything in it runs. */
+NOCROSSREFS_TO(.ovl_usbdac .vectors .text .data)
+NOCROSSREFS_TO(.ovl_usbout .vectors .text .data)
+NOCROSSREFS_TO(.ovl_dev .vectors .text .data)
+__ovl_win_start = ORIGIN(OVL_WIN);
+__ovl_win_end   = ORIGIN(OVL_WIN) + LENGTH(OVL_WIN);
+ASSERT(ORIGIN(OVL_WIN) >= 0x03040000, "the overlay window must stay above the audio input ring")
+ASSERT(__ovl_win_end <= 0x0304F000, "the overlay window must stay below the loaded image (0x0304F490)")
+ASSERT(ovl_hdr_usbdac == ORIGIN(OVL_WIN) && ovl_hdr_usbout == ORIGIN(OVL_WIN) && ovl_hdr_dev == ORIGIN(OVL_WIN),
+       "each overlay must start with its header")
+ASSERT(SIZEOF(.ovl_usbdac) <= LENGTH(OVL_WIN), "the usbdac overlay is over the window")
+ASSERT(SIZEOF(.ovl_usbout) <= LENGTH(OVL_WIN), "the usbout overlay is over the window")
+ASSERT(SIZEOF(.ovl_dev) <= LENGTH(OVL_WIN), "the dev overlay is over the window")
 
 /* ---- layout contracts (fail the link loudly on violation) ------------- */
 ASSERT(ap_vectors == 0x03050000,

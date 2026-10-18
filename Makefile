@@ -151,9 +151,26 @@ $(CFW_BUILD_DIR)/objs/%.o: %.c $(CFW_BOARD_STAMP)
 	@$(MKDIR_P) $(dir $@)
 	$(CC) $(AP_CFLAGS) -c $< -o $@
 
-$(CFW_ELF): $(CFW_OBJS) $(AP_LDSCRIPT)
+# Core A: one link with its overlays (firmware/services/ovl.h). __ovl_abi, the ABI every overlay
+# header carries and core A checks, is a hash of everything linked (a resident image and overlays
+# from different links never pair up). Then: the budget (tools/ap_size.py: the build fails when
+# FW_CODE has less than AP_MIN_FREE free; the breakdown in ap_size.txt), the resident image the
+# packer takes (the overlays stripped: they are modules, not part of what the ROM loads), and each
+# overlay as a module blob (tools/ovl_pack.py sets its length and CRC).
+CFW_RES_ELF := $(CFW_BUILD_DIR)/rechord_ap_res.elf
+CFW_MAP := $(CFW_BUILD_DIR)/rechord_ap.map
+ovl_name = $(word 1,$(subst :, ,$(1)))
+ovl_mod = $(word 2,$(subst :, ,$(1)))
+CFW_OVL_MODULES := $(foreach o,$(AP_OVLS),--module $(call ovl_mod,$(o))=$(CFW_BUILD_DIR)/$(call ovl_mod,$(o)).bin)
+
+$(CFW_ELF): $(CFW_OBJS) $(AP_LDSCRIPT) tools/ap_size.py tools/ovl_pack.py
 	@$(MKDIR_P) $(dir $@)
-	$(CC) $(AP_LDFLAGS) $(CFW_OBJS) $(AP_LDLIBS) -o $@
+	$(CC) $(AP_LDFLAGS) -Wl,--defsym=__ovl_abi=$$(cat $(CFW_OBJS) $(AP_LDSCRIPT) | cksum | cut -d' ' -f1) \
+	    -Wl,-Map,$(CFW_MAP) $(CFW_OBJS) $(AP_LDLIBS) -o $@
+	$(PYTHON) tools/ap_size.py $@ --map $(CFW_MAP) --min-free $(AP_MIN_FREE) --fonts $(TEXT_FONTS) \
+	    --out $(CFW_BUILD_DIR)/ap_size.txt || { rm -f $@; exit 1; }
+	$(OBJCOPY) $(foreach o,$(AP_OVLS),-R .ovl_$(call ovl_name,$(o))) $@ $(CFW_RES_ELF)
+	$(PYTHON) tools/ovl_pack.py $@ $(addprefix --ovl ,$(AP_OVLS)) --out $(CFW_BUILD_DIR) || { rm -f $@; exit 1; }
 
 # Our fw1 + stock section_3 (until the BB module milestone), CRC recomputed.
 # HARD GATE in tools/pack_fw1.py: no scatter row below 0x03004000 (ROM-owned
@@ -169,8 +186,8 @@ TEXT_FONTS_MAX := 99840
 cfw-img: $(CFW_ELF) $(COREB_BINS) $(TEXT_FONTS)
 	@test $$(wc -c < $(TEXT_FONTS)) -le $(TEXT_FONTS_MAX) || \
 	    { echo "$(TEXT_FONTS) is over the fonts window ($(TEXT_FONTS_MAX) B, firmware_ap.ld)"; exit 1; }
-	$(PYTHON) tools/make_fw1.py $(CFW_ELF) -o build/ReChord_AP.IMG $(if $(FONT_IMG),--fonts $(FONT_IMG)) $(COREB_MODULES) \
-	    --module fonts=$(TEXT_FONTS)
+	$(PYTHON) tools/make_fw1.py $(CFW_RES_ELF) -o build/ReChord_AP.IMG $(if $(FONT_IMG),--fonts $(FONT_IMG)) $(COREB_MODULES) \
+	    --module fonts=$(TEXT_FONTS) $(CFW_OVL_MODULES)
 	cp build/ReChord_AP5M.IMG build/$(UPDATE_IMG)
 	@echo "  update file for the $(BOARD) board: build/$(UPDATE_IMG)"
 
