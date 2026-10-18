@@ -93,11 +93,22 @@ uint32_t b_mp3_read(int32_t *dst, uint32_t want)
             }
             if (n > want - got)
                 n = want - got;
-            for (uint32_t i = 0; i < n; i++, m->pos++) {
-                dst[(got + i) * ch] = mp3_word(pcm->samples[0][m->pos]);
-                if (ch > 1)
-                    dst[(got + i) * ch + 1] = mp3_word(pcm->samples[r][m->pos]);
+            {                            /* (locals: the stores to dst cannot alias m->pos) */
+                const mad_fixed_t *l = &pcm->samples[0][m->pos], *rr = &pcm->samples[r][m->pos];
+                int32_t *d = dst + got * ch;
+
+                if (ch > 1) {
+                    for (uint32_t i = 0; i < n; i++) {
+                        d[0] = mp3_word(l[i]);
+                        d[1] = mp3_word(rr[i]);
+                        d += 2;
+                    }
+                } else {
+                    for (uint32_t i = 0; i < n; i++)
+                        d[i] = mp3_word(l[i]);
+                }
             }
+            m->pos += n;
             got += n;
             continue;
         }

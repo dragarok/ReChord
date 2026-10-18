@@ -4,6 +4,12 @@
  * the sum of nt lookups. The filter is symmetric, so tap order within the window
  * only has to be consistent: tap 8k + j is bit j of byte k counted from the newest
  * sample (bit 0 of an MSB-first byte is its newest).
+ *
+ * ReChord 2026-10-18 (docs/HIFI_PLAN.md): the same sums in fewer instructions. An LSB-first stream's
+ * tables are built for its own bit order (tab[k][v] = the MSB-first table at rev8(v)), so its bytes
+ * go into the history as they come; and a window starts at a multiple of the step (pos and phase
+ * start at 0 and move together), so it is read 4 bytes a load (DSD128, DSD256) or 2 (DSD64).
+ * Integer sums of the same table entries: every output word is what it was.
  */
 #include <string.h>
 
@@ -13,6 +19,13 @@
 static int32_t tap(const int32_t *half, uint32_t n, uint32_t i)
 {
     return half[i < n / 2 ? i : n - 1 - i];
+}
+
+static uint8_t rev8(uint8_t b)
+{
+    b = (uint8_t)((b & 0xF0u) >> 4 | (b & 0x0Fu) << 4);
+    b = (uint8_t)((b & 0xCCu) >> 2 | (b & 0x33u) << 2);
+    return (uint8_t)((b & 0xAAu) >> 1 | (b & 0x55u) << 1);
 }
 
 int dsd_init(dsd_t *d, uint32_t ch, uint32_t rate_mult, int lsb_first, void *(*alloc)(size_t))
@@ -47,55 +60,157 @@ int dsd_init(dsd_t *d, uint32_t ch, uint32_t rate_mult, int lsb_first, void *(*a
         return -1;
     for (uint32_t k = 0; k < d->nt; k++)
         for (uint32_t v = 0; v < 256; v++) {
+            uint32_t b = lsb_first ? rev8((uint8_t)v) : v;    /* (the byte as an MSB-first one) */
             int32_t s = 0;
 
             for (uint32_t j = 0; j < 8; j++)
-                s += (v >> j & 1u) ? tap(h, n, k * 8 + j) : -tap(h, n, k * 8 + j);
+                s += (b >> j & 1u) ? tap(h, n, k * 8 + j) : -tap(h, n, k * 8 + j);
             d->tab[k][v] = (int16_t)((s + (1 << d->shift >> 1)) >> d->shift);
         }
-    memset(d->hist, 0x69, ch * d->nt * 2u);      /* DSD silence pattern: 0x69 averages to 0 */
+    /* DSD silence pattern: 0x69 averages to 0 (as an MSB-first byte; an LSB-first stream's history
+     * holds its bytes as they come, so its 0x69 is 0x96) */
+    memset(d->hist, lsb_first ? 0x96 : 0x69, ch * d->nt * 2u);
     return 0;
 }
 
-static uint8_t rev8(uint8_t b)
+
+/* The window's sum: nt table lookups, its bytes read 4 (or 2) at a time (little-endian: byte 0 first).
+ * On core B (Cortex-M3), one table pointer per byte of the word, so a lookup is 3 instructions (extract,
+ * load, add); GCC folds the pointers back into one plus an offset add (4, and 5.25 a lookup in all).
+ * The host build (tests) takes the C, which is the same sum. */
+static int32_t sum4(const uint8_t *hb, const int16_t *t, uint32_t nt)
 {
-    b = (uint8_t)((b & 0xF0u) >> 4 | (b & 0x0Fu) << 4);
-    b = (uint8_t)((b & 0xCCu) >> 2 | (b & 0x33u) << 2);
-    return (uint8_t)((b & 0xAAu) >> 1 | (b & 0x55u) << 1);
+#if defined(__arm__) && defined(__thumb2__)
+    int32_t s = 0;
+    uint32_t w, x, n = nt / 4u;
+    const int16_t *t1 = t + 256, *t2 = t + 512, *t3 = t + 768;
+
+    __asm__ volatile (
+        "1: ldr %[w], [%[hb]], #4\n"
+        "   uxtb %[x], %[w]\n"
+        "   ldrsh %[x], [%[t0], %[x], lsl #1]\n"
+        "   add %[s], %[s], %[x]\n"
+        "   ubfx %[x], %[w], #8, #8\n"
+        "   ldrsh %[x], [%[t1], %[x], lsl #1]\n"
+        "   add %[s], %[s], %[x]\n"
+        "   ubfx %[x], %[w], #16, #8\n"
+        "   ldrsh %[x], [%[t2], %[x], lsl #1]\n"
+        "   add %[s], %[s], %[x]\n"
+        "   lsr %[x], %[w], #24\n"
+        "   ldrsh %[x], [%[t3], %[x], lsl #1]\n"
+        "   add %[s], %[s], %[x]\n"
+        "   add %[t0], %[t0], #2048\n"
+        "   add %[t1], %[t1], #2048\n"
+        "   add %[t2], %[t2], #2048\n"
+        "   add %[t3], %[t3], #2048\n"
+        "   subs %[n], %[n], #1\n"
+        "   bne 1b\n"
+        : [s] "+r" (s), [w] "=&r" (w), [x] "=&r" (x), [hb] "+r" (hb), [n] "+r" (n),
+          [t0] "+r" (t), [t1] "+r" (t1), [t2] "+r" (t2), [t3] "+r" (t3)
+        :
+        : "cc", "memory");
+    return s;
+#else
+    const uint32_t *w = (const uint32_t *)hb;
+    int32_t s = 0;
+
+    for (uint32_t k = 0; k < nt; k += 4, t += 4 * 256) {
+        uint32_t v = *w++;
+
+        s += t[v & 255u];
+        s += t[256 + (v >> 8 & 255u)];
+        s += t[512 + (v >> 16 & 255u)];
+        s += t[768 + (v >> 24)];
+    }
+    return s;
+#endif
+}
+
+static int32_t sum2(const uint8_t *hb, const int16_t *t, uint32_t nt)
+{
+#if defined(__arm__) && defined(__thumb2__)
+    int32_t s = 0;
+    uint32_t w, x, n = nt / 4u;                              /* 4 lookups a turn: two halfwords */
+    const int16_t *t1 = t + 256, *t2 = t + 512, *t3 = t + 768;
+
+    __asm__ volatile (
+        "1: ldrh %[w], [%[hb]], #2\n"
+        "   uxtb %[x], %[w]\n"
+        "   ldrsh %[x], [%[t0], %[x], lsl #1]\n"
+        "   add %[s], %[s], %[x]\n"
+        "   lsr %[x], %[w], #8\n"
+        "   ldrsh %[x], [%[t1], %[x], lsl #1]\n"
+        "   add %[s], %[s], %[x]\n"
+        "   ldrh %[w], [%[hb]], #2\n"
+        "   uxtb %[x], %[w]\n"
+        "   ldrsh %[x], [%[t2], %[x], lsl #1]\n"
+        "   add %[s], %[s], %[x]\n"
+        "   lsr %[x], %[w], #8\n"
+        "   ldrsh %[x], [%[t3], %[x], lsl #1]\n"
+        "   add %[s], %[s], %[x]\n"
+        "   add %[t0], %[t0], #2048\n"
+        "   add %[t1], %[t1], #2048\n"
+        "   add %[t2], %[t2], #2048\n"
+        "   add %[t3], %[t3], #2048\n"
+        "   subs %[n], %[n], #1\n"
+        "   bne 1b\n"
+        : [s] "+r" (s), [w] "=&r" (w), [x] "=&r" (x), [hb] "+r" (hb), [n] "+r" (n),
+          [t0] "+r" (t), [t1] "+r" (t1), [t2] "+r" (t2), [t3] "+r" (t3)
+        :
+        : "cc", "memory");
+    return s;
+#else
+    const uint16_t *w = (const uint16_t *)hb;
+    int32_t s = 0;
+
+    for (uint32_t k = 0; k < nt; k += 2, t += 2 * 256) {
+        uint32_t v = *w++;
+
+        s += t[v & 255u];
+        s += t[256 + (v >> 8)];
+    }
+    return s;
+#endif
+}
+
+static int32_t sum1(const uint8_t *hb, const int16_t *t, uint32_t nt)
+{
+    int32_t s = 0;
+
+    for (uint32_t k = 0; k < nt; k++, t += 256)
+        s += t[hb[k]];
+    return s;
 }
 
 uint32_t dsd_run(dsd_t *d, const uint8_t *in, uint32_t cstride, uint32_t istride, uint32_t n, int32_t *out)
 {
-    uint32_t frames = 0, nt = d->nt, sh = 1u + d->shift;   /* sum is Q(30 - shift); word Q31 */
-    int32_t lim = 0x7FFFFFFF >> sh;
+    const uint32_t nt = d->nt, nch = d->ch, step = d->step, sh = 1u + d->shift;   /* sum is Q(30 - shift); word Q31 */
+    const int32_t lim = 0x7FFFFFFF >> sh;
+    const int16_t *tab = &d->tab[0][0];
+    uint8_t *hist = d->hist;
+    uint32_t frames = 0, pos = d->pos, phase = d->phase;
 
     for (uint32_t i = 0; i < n; i++) {
-        d->pos = d->pos ? d->pos - 1u : nt - 1u;            /* newest byte goes to pos (and pos + nt) */
-        for (uint32_t c = 0; c < d->ch; c++) {
-            uint8_t b = in[c * cstride + i * istride], *h = d->hist + c * 2u * nt;
+        pos = pos ? pos - 1u : nt - 1u;                      /* newest byte goes to pos (and pos + nt) */
+        for (uint32_t c = 0; c < nch; c++) {
+            uint8_t b = in[c * cstride + i * istride], *h = hist + c * 2u * nt;
 
-            if (d->lsb_first)
-                b = rev8(b);
-            h[d->pos] = h[d->pos + nt] = b;
+            h[pos] = h[pos + nt] = b;
         }
-        if (++d->phase < d->step)
+        if (++phase < step)
             continue;
-        d->phase = 0;
-        for (uint32_t c = 0; c < d->ch; c++) {
-            const uint8_t *hb = d->hist + c * 2u * nt + d->pos;
-            const int16_t *t = &d->tab[0][0];
-            int32_t s = 0;
+        phase = 0;
+        for (uint32_t c = 0; c < nch; c++) {
+            const uint8_t *hb = hist + c * 2u * nt + pos;
+            int32_t s = ((uintptr_t)hb & 3u) == 0 ? sum4(hb, tab, nt) :
+                        ((uintptr_t)hb & 1u) == 0 ? sum2(hb, tab, nt) : sum1(hb, tab, nt);
 
-            for (uint32_t k = 0; k < nt; k += 4, hb += 4, t += 4 * 256) {   /* nt is a multiple of 32 */
-                s += t[hb[0]];
-                s += t[256 + hb[1]];
-                s += t[512 + hb[2]];
-                s += t[768 + hb[3]];
-            }
             s = s > lim ? lim : s < -lim ? -lim : s;
-            out[frames * d->ch + c] = (int32_t)((uint32_t)s << sh);
+            out[frames * nch + c] = (int32_t)((uint32_t)s << sh);
         }
         frames++;
     }
+    d->pos = pos;
+    d->phase = phase;
     return frames;
 }

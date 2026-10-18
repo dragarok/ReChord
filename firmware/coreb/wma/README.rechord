@@ -43,6 +43,10 @@ of FFmpeg's decode.c (a packet is fed again from where the last call stopped; th
 end of the stream is drained) in firmware/coreb/b_wmall.c. Bit exact against ffmpeg
 on whole files (16 and 24 bit); on a cut file the last frame, read past the data,
 may differ (both decoders then read what follows in their buffers).
+2026-10-18 (docs/HIFI_PLAN.md): lms_update zeroes only the part of lms_updates that can be
+nonzero (FFmpeg clears up to 1 KiB after every sample of every filter: 29 % / 50 % of 16- /
+24-bit files' core-B time), and the LMS dot products run 4 taps a turn, skipping the update
+when the residue is 0. The same array contents and sums: still bit exact.
 
 Output scale (firmware/coreb/b_wma.c, b_wmapro.c, b_wmall.c): libwma gives 2.29 fixed point
 (Rockbox sample depth 29) with inverted polarity, libwmapro 2.25 (depth 25); both are

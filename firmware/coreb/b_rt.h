@@ -48,4 +48,7 @@ void *b_calloc(size_t n);
 void b_free(void *p);
 void *b_realloc(void *p, size_t n);
 
+/* Developer > HIFI probe (b_hifi_probe.c in the main image; elsewhere a stub that says so). */
+void b_probe(void);
+
 #endif

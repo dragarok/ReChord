@@ -41,7 +41,7 @@
 #define AS_LLI            (AS_PCM_RING - 0x100u)   /* 8 x 28 B, just below the ring (SRAM ends at 0x030A0000) */
 
 #define AS_MAGIC          0x4F445541u   /* "AUDO" */
-#define AS_VERSION        11u
+#define AS_VERSION        12u
 #define AS_QUEUE          4u
 
 enum { AS_CODEC_FLAC = 1, AS_CODEC_WAV = 2, AS_CODEC_MP3 = 3, AS_CODEC_AIFF = 4, AS_CODEC_AAC = 5, AS_CODEC_ALAC = 6,
@@ -61,7 +61,8 @@ enum { AS_B_BOOT = 0, AS_B_READY, AS_B_PLAYING, AS_B_ENDED, AS_B_ERROR, AS_B_RAT
 /* A -> B commands (cmd field, B clears it to 0 when done) */
 /* PARK: B stops its SysTick, masks interrupts and idles in thread mode, so core A
  * can hold it in reset with no exception half-handled (before loading another image) */
-enum { AS_CMD_NONE = 0, AS_CMD_STOP = 1, AS_CMD_RESTART = 2, AS_CMD_PARK = 3 };
+/* HIFI_PROBE: Developer > HIFI probe (coreb/b_hifi_probe.c): B runs it with no track open (probe_*) */
+enum { AS_CMD_NONE = 0, AS_CMD_STOP = 1, AS_CMD_RESTART = 2, AS_CMD_PARK = 3, AS_CMD_HIFI_PROBE = 4 };
 
 typedef struct {
     uint32_t seq;            /* A: track sequence number (1, 2, ...) */
@@ -142,6 +143,14 @@ typedef struct {
      * self-test or a check: software until power-off), k = level / 1000 - 2 (+ 4 from version 3980) */
     volatile uint32_t hifi_ape;      /* B */
     volatile uint32_t hifi_alac;     /* B: AS_HIFI_UNTESTED, AS_HIFI_OK or AS_HIFI_FAILED */
+    /* Developer > HIFI probe (coreb/b_hifi_probe.c, audio/hifi_probe.c, docs/HIFI_PLAN.md): A sets
+     * probe_arg, then cmd = AS_CMD_HIFI_PROBE; B writes its lines into its own heap and answers in
+     * probe_state. A logs them and loads a fresh core B after. probe_step names a stalled step. */
+    volatile uint32_t probe_arg;     /* A: 0 = the whole probe, 1 = the timing jobs only */
+    volatile uint32_t probe_state;   /* B: AS_PROBE_* */
+    volatile uint32_t probe_step;    /* B: the step it is in (b_hifi_probe.c) */
+    volatile uint32_t probe_text;    /* B: system address of its text ("hfp: ..." lines, '\n' each) */
+    volatile uint32_t probe_len;     /* B: bytes of it */
 } audio_shared_t;
 
 /* hifi_mode: auto = the HIFI block for FLAC LPC, APE's NN filters and ALAC's LPC, each once its
@@ -152,6 +161,10 @@ enum { AS_HIFI_AUTO = 0, AS_HIFI_OFF = 1, AS_HIFI_VERIFY = 2 };
 enum { AS_HIFI_UNTESTED = 0, AS_HIFI_OK = 1 /* narrow and wide */, AS_HIFI_NARROW = 2 /* wide failed */,
        AS_HIFI_FAILED = 3 /* self-test or a check failed: software */, AS_HIFI_DEAD = 4 /* timed out or
        stalled B's bus: never touched again this boot */ };
+
+/* probe_state */
+enum { AS_PROBE_NONE = 0, AS_PROBE_RUNNING = 1, AS_PROBE_DONE = 2, AS_PROBE_NOIMAGE = 3 /* not in this
+       core-B image */, AS_PROBE_NOMEM = 4 };
 
 #define AS ((audio_shared_t *)AS_SHARED)
 

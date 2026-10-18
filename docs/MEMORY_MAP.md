@@ -58,7 +58,7 @@ go in an overlay (or free code) first, before the space is gone rather than afte
 |---|---|---|---|
 | usbdac | ov_dac | the USB DAC (UAC2): `drivers/usb_uac_rknanoc.c`, the session in `startup/ap_ui.c` | the cable's mode, Home > USB > USB DAC |
 | usbout | ov_uout | USB-C earphones, the player as USB host: `drivers/usb_out_rknanoc.c` | Settings (usb_out=on), every pass while no cable |
-| dev | ov_dev | the Developer tests: DAC test, USB console (`drivers/usb_cdc_rknanoc.c`), USB-C probe screen, USB detect, BT listen (`bt_jieli.c` bt_listen) | Settings > System > Developer |
+| dev | ov_dev | the Developer tests: DAC test, USB console (`drivers/usb_cdc_rknanoc.c`), USB-C probe screen, USB detect, BT listen (`bt_jieli.c` bt_listen), HIFI probe (`audio/hifi_probe.c`; core B's side `coreb/b_hifi_probe.c`, docs/HIFI_PLAN.md) | Settings > System > Developer |
 
 How it works:
 

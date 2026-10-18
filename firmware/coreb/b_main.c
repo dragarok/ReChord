@@ -565,6 +565,12 @@ static int produce(void)
     return 1;
 }
 
+/* Developer > HIFI probe: coreb/b_hifi_probe.c in the main image; the others answer "not here". */
+__attribute__((weak)) void b_probe(void)
+{
+    AS->probe_state = AS_PROBE_NOIMAGE;
+}
+
 static void stop_all(void)
 {
     if (s_dec)
@@ -595,6 +601,10 @@ int b_main(void)
             AS->cmd = AS_CMD_NONE;
             for (;;)
                 __asm__ volatile ("wfi");            /* until core A resets us */
+        } else if (AS->cmd == AS_CMD_HIFI_PROBE) {   /* (A stopped the player first) */
+            if (!s_dec)
+                b_probe();
+            AS->cmd = AS_CMD_NONE;
         } else if (AS->cmd == AS_CMD_RESTART) {        /* A re-clocked / swapped images, DMA re-armed */
             AS->pcm_wr = AS->pcm_played = AS->pcm_end = 0;
             s_fill = s_resync = 0;
