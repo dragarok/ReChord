@@ -40,7 +40,9 @@ the panel is 320×170).*
   - VOL+/VOL− move in lists and set the volume on Now Playing.
   - PLAY opens or plays.
     - On Now Playing: tap to pause, 2× for next, 3× for previous, hold for next.
-  - BACK goes up; hold BACK for Home.
+  - On Now Playing (also with the screen off): VOL+ twice then hold seeks forward, VOL− twice
+    then hold seeks back.
+  - BACK goes up; hold BACK for Home. PLAY held on a menu goes to Now Playing.
   - MENU switches between Now Playing and the library; hold MENU for Options.
 - **Text and themes:** Noto Sans in five sizes, with Latin, curly quotes and Devanagari, and
   four themes: Classic, Paper, Night and Contrast.
@@ -77,15 +79,16 @@ covered by the emulator test suite. The full table is in [docs/ROADMAP.md](docs/
 | New UI, fonts, gestures, themes | device (2026-10-18) |
 | USB disk, USB DAC, power, battery | device |
 | Bluetooth earphones, reconnect, routing | device |
-| USB-C earphones, VOP + DMA display path | QEMU |
+| VOP + DMA display path (display=dma), seek (VOL 2x + hold), fast boot | device (2026-10-18) |
+| USB-C earphones | QEMU |
 
 **512 MB board only, so far.** The differences from the 8 GB board come from comparing the stock
 firmware of both. They're documented in [docs/BOARD_DIFF_512M.md](docs/BOARD_DIFF_512M.md) and
 selected at build time (`BOARD=512m | 8g`). The 8 GB build has not been tested on hardware.
 
 **Next:**
-- the DMA display path on the device (~8 ms a screen instead of ~90 ms)
-- seek
+- make the DMA display path the default and find why a full screen still takes ~75 ms on the device
+- boot: the first folder listing (~0.5 s) and the USB wake (~0.9 s)
 - a library index
 - EQ and ReplayGain on core B
 - an on-device self-test mode
