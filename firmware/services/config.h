@@ -52,6 +52,7 @@ extern config_t g_cfg;
 void config_defaults(void);      /* RECHO's defaults; browse/track/volume kept unless all */
 void config_reset(void);         /* everything to defaults */
 int config_load(void);           /* 0, or < 0 (defaults stay) */
+int config_reload_if_changed(void);   /* after a USB disk session: 1 = the PC changed the file, read again */
 /* Writes the file when its text changed since the last load/save. 0, or < 0. */
 int config_save(void);
 /* Ask for a save in 5 s (coalesces bursts); config_poll() does it. config_save_idle(): the same

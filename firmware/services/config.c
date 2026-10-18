@@ -204,6 +204,33 @@ int config_load(void)
     return 0;
 }
 
+/* 1 when the file's text is not what we last read or wrote (its own frame: config_load's 1 KiB
+ * buffer is not on the stack at the same time) */
+static int file_changed(void)
+{
+    char text[1024];
+    fs_file_t *f = fs_open_read(CONFIG_PATH);
+    long n;
+
+    if (!f)
+        return s_hash != 0;               /* (deleted on the PC: the defaults, as at a boot) */
+    n = fs_read(f, text, sizeof text - 1);
+    fs_close(f);
+    return n >= 0 && fnv(text, (unsigned long)n) != s_hash;
+}
+
+/* After a USB disk session the PC may have edited the file; our copy in RAM would overwrite that
+ * edit at the next save (device 2026-10-18: a hifi= line added on the PC was gone at power-off,
+ * "cfg: saved (448 B)"). So the file wins: read it again. */
+int config_reload_if_changed(void)
+{
+    if (!s_ready || !file_changed())
+        return 0;
+    config_load();
+    s_save_at = 0;                        /* (a save asked for before the session: the file is newer) */
+    return 1;
+}
+
 static int text_of(char *t, unsigned long cap)
 {
     char so[8], ao[8], vol[8], bt[96];

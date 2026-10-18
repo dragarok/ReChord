@@ -47,6 +47,7 @@ void ap_usb_dac(void);                /* ap_ovl.c: the USB DAC overlay's gate */
 static int s_adc = 1023, s_adc2 = 1023, s_power, s_cable, s_phy_parked;
 static int s_power_press_ok;    /* the power key's current press began after boot's was released */
 static int s_ui_up;             /* the new UI runs (before it: recovery's screens) */
+static int s_pass_held;         /* this pass held a USB disk session: not timed as a slow pass */
 static uint32_t s_power_down_ms;     /* time_ms() when the power key went down */
 static int s_power_armed;    /* power key seen released since boot */
 static uint32_t s_user;              /* user volume start, 0 = unknown */
@@ -508,6 +509,14 @@ static void usb_session(void)
     snprintf(s_usb, sizeof s_usb, "x%d r%uM w%uM", r, (unsigned)(rd >> 11), (unsigned)(wr >> 11));
     log_printf("usb: disk session ended: exit %d, read %u MB, written %u MB, cable %d", r,
                (unsigned)(rd >> 11), (unsigned)(wr >> 11), usb_cable());
+    if (config_reload_if_changed()) {    /* the PC's edit wins over our copy (services/config.c) */
+        queue_set_mode(g_cfg.play);
+        audio_set_volume_db(g_cfg.volume == CFG_VOLUME_MUTE ? -90 : g_cfg.volume);
+        theme_load_index(g_cfg.theme);
+        log_printf("cfg: changed on the PC, read again: play %s, volume %d (bt=, display=: at the next start)",
+                   queue_mode_name(g_cfg.play), g_cfg.volume);
+    }
+    s_pass_held = 1;                     /* (the session's time is not a slow pass of the loop) */
     while (keys_power())                 /* don't leak the exit press */
         cpu_wait_tick();
     /* Scan for an update on ANY session exit the screen advertises:
@@ -1537,6 +1546,11 @@ void ap_ui_loop(void)
             uint32_t now = time_ms();
 
             static uint32_t s_slowest;
+
+            if (s_pass_held) {           /* (device 2026-10-18: "slow pass 126424 ms" was the disk session) */
+                s_pass_held = 0;
+                t_pass = t_keys = t_play = t_draw = t_start = now;
+            }
 
             if (now - t_pass > s_slowest && now - t_pass >= 300u) {
                 s_slowest = now - t_pass;
