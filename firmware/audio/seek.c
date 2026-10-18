@@ -285,7 +285,8 @@ int seek_mp3(seek_read_at_t rd, void *u, const mp3_info_t *mi, uint32_t want, ui
         uint32_t i = (uint32_t)(pq >> 8), fr = (uint32_t)(pq & 255u);
         uint32_t a = mi->toc[i < 100u ? i : 99u], z = i + 1u < 100u ? mi->toc[i + 1u] : 256u;
 
-        est = mi->xing_off + (uint32_t)(((uint64_t)a * 256u + (uint64_t)(z - a) * fr) * mi->xing_bytes >> 16);
+        /* (+ half a TOC step: its points are rounded down, which put the estimate 1-2 frames early) */
+        est = mi->xing_off + (uint32_t)(((uint64_t)a * 256u + (uint64_t)(z - a) * fr + 128u) * mi->xing_bytes >> 16);
     } else {
         est = mi->data_off + (uint32_t)(((uint64_t)want * avg) >> 16);
     }
