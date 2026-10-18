@@ -272,11 +272,13 @@ int b_hifi_flac(const int32_t *in, int32_t *out, uint32_t n, uint32_t order, uin
     while (!(REG(DMA2_RAW_TFR) & (1u << CH_RX)) || !(REG(HIFI_INTSR) & INT_DONE)) {
         b_hifi_stats.polls++;
         if (b_cycles() - t0 > lim) {
+            uint32_t rx = REG(DMA2_RAW_TFR) & (1u << CH_RX);     /* (before its clock goes off) */
+
             t = b_cycles() - t0;
             hifi_down(AS_HIFI_DEAD);
             b_msg("hifi: job %u (order %u, %u samples) not done after %u us (RX %s): FLAC LPC in "
                   "software until power-off", (unsigned)s_jobs, (unsigned)order, (unsigned)n,
-                  (unsigned)b_us(t), REG(DMA2_RAW_TFR) & 1u ? "done" : "not done");
+                  (unsigned)b_us(t), rx ? "done" : "not done");
             return -1;
         }
     }
