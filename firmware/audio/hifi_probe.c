@@ -23,7 +23,7 @@
 #include "services/log.h"
 #include "services/watchdog.h"
 
-#define PASS_MS 60000u
+#define PASS_MS 20000u                           /* (the whole probe takes about a second) */
 
 static void row(int r, const char *s)
 {
@@ -119,7 +119,7 @@ void hifi_probe_test(void)
                 break;
             }
             if (now - t0 > PASS_MS) {
-                why = "took over 60 s";
+                why = "took over 20 s";
                 break;
             }
             if (now - shown >= 500u) {

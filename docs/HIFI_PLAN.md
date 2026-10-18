@@ -231,7 +231,7 @@ MAC.
 Safety: every wait is bounded (10 ms + 32 cycles a butterfly-point or tap). On a timeout the block is
 reset and gated (stock's close) and opened again for the next job. Core B sets `hifi_busy` while it
 touches the block, so a stalled bus turns FLAC-on-HIFI off until power-off (HIFI.md §4). Core A ends
-a pass on a fault, on a core B with no heartbeat for 1 s, or after 60 s, and names the step
+a pass on a fault, on a core B with no heartbeat for 1 s, or after 20 s, and names the step
 (`AS->probe_step`). Nothing touches boot, the maskrom path or any storage but ECHOLOG.TXT. FFT and
 MAC never run in a decode path: the QEMU checker raises a VIOLATION for them unless the machine runs
 with `hifi-probe=on`, which only m39 and the mutants use.
@@ -252,7 +252,7 @@ hfp: fft n <N> f|i v <vec> var A|B st done|timeout sr <intsr x4> in <c> run <c> 
 hfp: d f<N><f|i><vec><r|i> <first index>: <hex words, w*k = k repeats>
 hfp: mac o <order> set <0|1|2> var A|B st done by intsr|cfg|both|timeout sr <a,b> cfg <a,b> run <c> rsh <x> rsl <x>
 hfp: end jobs <n> timeouts <n> us <total> lost <bytes> block gated
-hfp: core B <faulted|stopped (no heartbeat)|took over 60 s> in step <step> (...)      (only on a stall)
+hfp: core B <faulted|stopped (no heartbeat)|took over 20 s> in step <step> (...)      (only on a stall)
 hfp: done|stopped, <n> lines
 ```
 `tools/hifi_probe_decode.py ECHOLOG.TXT` (project repo) regenerates every input from the probe's
