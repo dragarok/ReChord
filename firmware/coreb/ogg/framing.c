@@ -605,6 +605,16 @@ char *ogg_sync_buffer(ogg_sync_state *oy, long size){
       return NULL;
     }
     newsize=size+oy->fill+4096; /* an extra page to be nice */
+    /* ReChord: core B's first-fit arena (b_main.c). When the page waiting at the buffer's start has
+     * its header in, the buffer grows once to that page's whole length; growing by one read at a time
+     * left a hole per step, and a 256k Opus file's ~64 KiB pages (ffmpeg's ~1 s) ran the arena out at
+     * 3.99 s with 163 of 225 KB in use (docs/HIFI_PLAN.md section 6) */
+    if(oy->fill>=27 && !memcmp(oy->data,"OggS",4) && oy->fill>=27+oy->data[26]){
+      long page=27+oy->data[26];
+      int i;
+      for(i=0;i<oy->data[26];i++)page+=oy->data[27+i];
+      if(newsize<page+size+4096)newsize=page+size+4096;
+    }
     if(oy->data)
       ret=_ogg_realloc(oy->data,newsize);
     else

@@ -59,7 +59,7 @@ branch's build and is bit-exact against the same reference as "before" (`exact=T
 | Vorbis (OGGGAP) | 376, 16.6, 48 | — | mdct_backward 36 %, floor1 8 %, codebook 8 %, window 7 %, ov_read 7 % |
 | Vorbis q10, dense | 445, 19.6, 48 | — | mdct_backward 30 %, codebook 20 %, floor1 7 % |
 | Opus 128k (OPUSGAP) | 651, 31.2, 96 | — | opus_fft_impl 27 %, comb_filter 14 %, clt_mdct_backward 13 %, deemphasis 6 % |
-| Opus 256k, dense | 709, 34.0, 96 | — | the same. **Not bit-exact: the arena runs out at 3.99 s and the track ends** (section 6) |
+| Opus 256k, dense | 709, 34.0, 96 | — | the same. Bit-exact since the libogg fix on round3 (section 6); before it the arena ran out at 3.99 s |
 | WMA v2 128k | 260, 11.5, 24 | — | FFT pass 23 %, decode_block 20 %, imdct_half 16 %, window 13 %, fft16/fft8 7 % |
 | WMA Pro 44.1 | 243, 10.7, 24 | — | decode_frame 27 %, FFT pass 24 %, imdct_half 17 %, fft16/8 8 % |
 | WMA Pro 24/96 | 207, 19.9, 48 | — | decode_frame 27 %, pass 25 %, imdct_half 19 %, fft16/8 9 % |
@@ -378,8 +378,12 @@ are ordered by how common the format is on a DAP, then by the size of the step.
   at 256 kbit/s is up to ~64 KiB (255 lacing values). libogg keeps such a page twice (the sync
   buffer, then the stream's body) and grows each by realloc (allocate new, copy, free old). Growing
   in place in `b_realloc` was tried here and is not enough: the same abort at the same frame.
-  The fix belongs with the Opus/Ogg glue, not the HIFI work: a smaller stack (0x5000 is enough by the
-  low-water mark), and a bounded `ogg_sync_buffer` chunk or an arena-aware page buffer.
+  **Fixed on `round3`** [measured]: the arena is first-fit, and libogg's sync buffer grew by one read
+  at a time, each step leaving a hole. `ogg_sync_buffer` now grows once to the length of the page
+  waiting at the buffer's start, read from that page's header (`ogg/framing.c`). Opus 256k plays all
+  576 000 frames bit-exact (core-B heap peak 166 KB); Vorbis q10, OPUSGAP and OGGGAP stay bit-exact.
+  Growing straight to the largest page (65 307 B) was tried first and is wrong: Vorbis q10's arena
+  ran out at its first page.
 - **DSD256 underran even in QEMU** before this branch (227 M insn/s at a 250 MIPS virtual core); it
   no longer does (177.6 M). On the device it stays over 96 MHz.
 - WMA Lossless 16/44.1 and APE extra high are over 96 M insn/s at CPI 1: neither plays in real time
