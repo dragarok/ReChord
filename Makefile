@@ -70,7 +70,7 @@ COREB_WMA  := $(patsubst %,wma/%,wmadeci wmafixed mdct fft-ffmpeg mdct_lookup ff
 COREB_WMAPRO := $(patsubst %,wma/pro/%,wmaprodec wma mdct_tables) $(patsubst %,wma/%,mdct fft-ffmpeg mdct_lookup ffmpeg_bitstream)
 COREB_WMALL := wma/lossless/wmalldec wma/pro/wma wma/ffmpeg_bitstream
 COREB_FAMILIES := main aac ogg opus wv dsd ape wma wmapro wmall
-COREB_FAM_main := b_codecs_main b_flac b_hifi b_pcm b_mp3 b_alac $(COREB_MAD) $(COREB_ALAC)
+COREB_FAM_main := b_codecs_main b_flac b_hifi b_hifi_probe b_pcm b_mp3 b_alac $(COREB_MAD) $(COREB_ALAC)
 COREB_FAM_aac  := b_codecs_aac b_aac $(COREB_FAAD)
 COREB_FAM_ogg  := b_codecs_ogg b_vorbis $(COREB_TREMOR) $(COREB_OGG)
 COREB_FAM_opus := b_codecs_opus b_opus $(COREB_OPUS) $(COREB_OGG)
@@ -98,6 +98,11 @@ COREB_FAAD_DEFS := -DFIXED_POINT -DLC_ONLY_DECODER -DHAVE_STRING_H=1 -DHAVE_STDI
                    -DPACKAGE_VERSION='"2.11.4"' -Ifirmware/coreb/faad -w
 $(COREB_DIR)/faad/%.o: COREB_CFLAGS += $(COREB_FAAD_DEFS) -Os
 $(COREB_DIR)/faad/common.o: COREB_CFLAGS += -Dfaad_malloc=faad_malloc_unused -Dfaad_free=faad_free_unused
+# the hot files (docs/HIFI_PLAN.md: the FFT/IMDCT, the filter bank, the output, SBR's DCT-IV, QMF,
+# HF generation and adjustment, PS) at -O2: the same integer code, fewer instructions; the rest stays -Os
+# (core B's 128 KiB image)
+COREB_FAAD_O2 := cfft mdct filtbank specrec output sbr_dct sbr_qmf sbr_hfgen sbr_hfadj ps_dec
+$(patsubst %,$(COREB_DIR)/faad/%.o,$(COREB_FAAD_O2)): COREB_CFLAGS += -O2
 $(COREB_DIR)/b_aac.o: COREB_CFLAGS += $(COREB_FAAD_DEFS)
 $(COREB_DIR)/alac/%.o: COREB_CFLAGS += -Ifirmware/coreb/alac -w
 COREB_OPUS_DEFS := -DOPUS_BUILD -DFIXED_POINT -DDISABLE_FLOAT_API -DVAR_ARRAYS -DOP_FIXED_POINT \

@@ -135,7 +135,8 @@ AP_PLAYER_SRCS := \
   firmware/audio/seek.c \
   firmware/audio/mp4.c \
   firmware/audio/ape_info.c \
-  firmware/audio/asf.c
+  firmware/audio/asf.c \
+  firmware/audio/hifi_probe.c
 
 # Every AP link input, milestone 2a (includes clean-road player).
 AP_SRCS := \

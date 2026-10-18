@@ -70,30 +70,65 @@ static inline unsigned get_bitsz(GetBitContext *s, int n)
 }
 
 /* libavcodec/lossless_audiodsp.c, C versions */
+/* ReChord: 4 taps a turn (order is a multiple of 16 here), and with mul == 0 (a zero residue) the
+ * coefficients are left as they are rather than added 0 to: the same result and coefficients. */
 static int32_t scalarproduct_and_madd_int16(int16_t *v1, const int16_t *v2, const int16_t *v3, int order, int mul)
 {
     unsigned res = 0;
 
+    if (!mul) {
+        do {
+            res += (unsigned)(v1[0] * v2[0]) + (unsigned)(v1[1] * v2[1]) + (unsigned)(v1[2] * v2[2]) +
+                   (unsigned)(v1[3] * v2[3]);
+            v1 += 4;
+            v2 += 4;
+        } while (order -= 4);
+        return res;
+    }
     do {
-        res   += *v1 * *v2++;
-        *v1++ += mul * *v3++;
-        res   += *v1 * *v2++;
-        *v1++ += mul * *v3++;
-    } while (order-=2);
+        res   += v1[0] * v2[0];
+        v1[0] += mul * v3[0];
+        res   += v1[1] * v2[1];
+        v1[1] += mul * v3[1];
+        res   += v1[2] * v2[2];
+        v1[2] += mul * v3[2];
+        res   += v1[3] * v2[3];
+        v1[3] += mul * v3[3];
+        v1 += 4;
+        v2 += 4;
+        v3 += 4;
+    } while (order -= 4);
     return res;
 }
 
+/* ReChord: as the int16 one (order is a multiple of 8 here). */
 static int32_t scalarproduct_and_madd_int32(int16_t *v1, const int32_t *v2, const int16_t *v3, int order, int mul)
 {
-    int res = 0;
+    uint32_t res = 0;
 
+    if (!mul) {
+        do {
+            res += v1[0] * (uint32_t)v2[0] + v1[1] * (uint32_t)v2[1] + v1[2] * (uint32_t)v2[2] +
+                   v1[3] * (uint32_t)v2[3];
+            v1 += 4;
+            v2 += 4;
+        } while (order -= 4);
+        return (int32_t)res;
+    }
     do {
-        res   += *v1 * (uint32_t)*v2++;
-        *v1++ += mul * *v3++;
-        res   += *v1 * (uint32_t)*v2++;
-        *v1++ += mul * *v3++;
-    } while (order-=2);
-    return res;
+        res   += v1[0] * (uint32_t)v2[0];
+        v1[0] += mul * v3[0];
+        res   += v1[1] * (uint32_t)v2[1];
+        v1[1] += mul * v3[1];
+        res   += v1[2] * (uint32_t)v2[2];
+        v1[2] += mul * v3[2];
+        res   += v1[3] * (uint32_t)v2[3];
+        v1[3] += mul * v3[3];
+        v1 += 4;
+        v2 += 4;
+        v3 += 4;
+    } while (order -= 4);
+    return (int32_t)res;
 }
 
 /** current decoder limitations */
@@ -212,6 +247,7 @@ typedef struct WmallDecodeCtx {
         DECLARE_ALIGNED(16, int32_t, lms_prevvalues)[MAX_ORDER * 2 + WMALL_COEFF_PAD_SIZE/sizeof(int16_t)];
         DECLARE_ALIGNED(16, int16_t, lms_updates)[MAX_ORDER * 2 + WMALL_COEFF_PAD_SIZE/sizeof(int16_t)];
         int recent;
+        int top;                    ///< ReChord: lms_updates[top..] are all 0 (lms_update)
     } cdlms[WMALL_MAX_CHANNELS][9];
 
     int cdlms_ttl[WMALL_MAX_CHANNELS];
@@ -798,9 +834,20 @@ static void lms_update ## bits (WmallDecodeCtx *s, int ich, int ilms, int input)
     s->cdlms[ich][ilms].lms_updates[recent + (order >> 4)] >>= 2; \
     s->cdlms[ich][ilms].lms_updates[recent + (order >> 3)] >>= 1; \
     s->cdlms[ich][ilms].recent = recent; \
-    memset(s->cdlms[ich][ilms].lms_updates + recent + order, 0, \
-           sizeof(s->cdlms[ich][ilms].lms_updates) - \
-           sizeof(*s->cdlms[ich][ilms].lms_updates)*(recent+order)); \
+    /* ReChord: FFmpeg zeroes lms_updates from recent + order to its end (up to 1 KiB) at every \
+     * sample of every filter: 29 % of a 16-bit file's core-B time, 50 % of a 24-bit one's. Only \
+     * [recent + order, top) can hold anything but 0 (top: the bound of every nonzero entry: \
+     * the writes since the last update are below max(top, 2 * order), the memcpy above), so \
+     * that span is zeroed and the array is what FFmpeg's is after every update. */ \
+    { \
+        int z = recent + order, t = s->cdlms[ich][ilms].top; \
+        if (t < 2 * order) \
+            t = 2 * order; \
+        if (t > z) \
+            memset(s->cdlms[ich][ilms].lms_updates + z, 0, \
+                   sizeof(*s->cdlms[ich][ilms].lms_updates) * (t - z)); \
+        s->cdlms[ich][ilms].top = z; \
+    } \
 } \
  \
 static void revert_cdlms ## bits (WmallDecodeCtx *s, int ch, \

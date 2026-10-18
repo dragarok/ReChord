@@ -124,6 +124,7 @@ SECTIONS
             KEEP(*(.ovl_hdr.dev))
             *(.ovl.dev.*)
             *usb_cdc_rknanoc.o(.text* .rodata*)
+            *hifi_probe.o(.text* .rodata*)
             *bt_jieli.o(.text.bt_listen .rodata.bt_listen.*)
             *panel_io_rknanoc.o(.text.panel_te_probe .text.te_watch .rodata.panel_te_probe.*)
             /* (.rodata.usb_console_run.str1.1 and .rodata.usb_probe_menu.str1.1 stay resident:

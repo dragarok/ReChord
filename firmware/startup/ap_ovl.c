@@ -213,14 +213,16 @@ int __wrap_usb_out_set_volume(int db)
 
 /* ---- dev: the Developer tests (Settings > Developer, ui/screens.c) ------------------------------ */
 
-enum { DEV_DAC_TEST, DEV_USB_CONSOLE, DEV_USB_PROBE, DEV_USB_DETECT, DEV_BT_LISTEN, DEV_TE_PROBE };
+enum { DEV_DAC_TEST, DEV_USB_CONSOLE, DEV_USB_PROBE, DEV_USB_DETECT, DEV_BT_LISTEN, DEV_TE_PROBE, DEV_HIFI_PROBE };
 
 void dac_test_run(void), usb_console_run(void), usb_probe_menu(void), usb_detect_test(void),
      bt_listen_test(void), te_probe_test(void);   /* startup/ap_ui.c */
+void hifi_probe_test(void);                       /* audio/hifi_probe.c */
 
 static void (*const k_dev[])(void) OVL_API(dev) = {
     [DEV_DAC_TEST] = dac_test_run, [DEV_USB_CONSOLE] = usb_console_run, [DEV_USB_PROBE] = usb_probe_menu,
     [DEV_USB_DETECT] = usb_detect_test, [DEV_BT_LISTEN] = bt_listen_test, [DEV_TE_PROBE] = te_probe_test,
+    [DEV_HIFI_PROBE] = hifi_probe_test,
 };
 OVL_HEADER(dev, OVL_DEV, k_dev);
 
@@ -239,3 +241,4 @@ void ap_usb_probe(void) { dev_run(DEV_USB_PROBE); }
 void ap_usb_detect(void) { dev_run(DEV_USB_DETECT); }
 void ap_bt_listen(void) { dev_run(DEV_BT_LISTEN); }
 void ap_te_probe(void) { dev_run(DEV_TE_PROBE); }
+void ap_hifi_probe(void) { dev_run(DEV_HIFI_PROBE); }

@@ -1351,12 +1351,10 @@ static void halt(void)
     s_start_paused = 0;
 }
 
-int audio_play(int pos)
+static void as_init(void)
 {
     static int s_as_init;
-    const char *image;
 
-    halt();
     if (!s_as_init) {
         memset((void *)AS_SHARED, 0, sizeof(audio_shared_t));
         AS->magic = AS_MAGIC;
@@ -1364,6 +1362,32 @@ int audio_play(int pos)
         s_as_init = 1;
     }
     AS->hifi_mode = g_cfg.hifi;              /* (core B reads it at its first FLAC LPC subframe) */
+}
+
+/* Developer > HIFI probe (audio/hifi_probe.c, in the dev overlay): the player stopped and a fresh
+ * core B (the main image: coreb/b_hifi_probe.c) running at PLL / div, its SysTick on that clock. */
+int audio_b_fresh(unsigned div)
+{
+    uint32_t t0;
+
+    halt();
+    as_init();
+    if (b_load("bmain") != 0)
+        return -1;
+    b_clock(div);
+    for (t0 = time_ms(); AS->b_div_ack != AS->b_div; cpu_wait_tick())
+        if (time_ms() - t0 > 200u)
+            return -2;
+    clock_core_b_settled();
+    return 0;
+}
+
+int audio_play(int pos)
+{
+    const char *image;
+
+    halt();
+    as_init();
     queue_seek(pos);
     s_rate = 0;
     AS->in_wr = AS->in_rd = 0;

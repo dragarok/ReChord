@@ -29,6 +29,8 @@ typedef struct {
  * 0, or < 0: -1/-2 core B did not start, -3 nothing playable, -4 DAC init failed. */
 int audio_play(int pos);
 void audio_stop(void);
+/* Developer > HIFI probe: the player stopped, a fresh core-B main image at PLL / div (1, 2, 4, 8). */
+int audio_b_fresh(unsigned div);
 /* Call once per tick (10 ms): file -> input ring, output start/stop, B clock. */
 void audio_poll(void);
 int audio_status(audio_status_t *st);
