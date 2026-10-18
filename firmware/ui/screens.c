@@ -423,7 +423,7 @@ static void vols_enter(int first)
 
 /* PLAY on a track or a folder: Now Playing at once, named from the row (DESIGN 4.1: within 100 ms);
  * the queue and the decoder start after that frame (nav_after()), as tags and format fill in. */
-static struct { uint8_t kind; uint32_t old_seq; char path[300]; } s_pend;
+static struct { uint8_t kind, later; uint32_t old_seq; char path[300]; } s_pend;
 enum { PEND_FILE = 1, PEND_TREE };
 
 static void np_pending(const char *name);
@@ -435,6 +435,7 @@ static void play_later(int kind, const char *path, const char *name)
     audio_status(&st);
     snprintf(s_pend.path, sizeof s_pend.path, "%s", path);
     s_pend.kind = (uint8_t)kind;
+    s_pend.later = 0;
     s_pend.old_seq = st.seq;
     if (nav_find(&pg_np) < 0)
         nav_push(&pg_np, 0);
@@ -457,6 +458,13 @@ void nav_after(void)
 
     if (!k)
         return;
+    if (!s_pend.later) {                      /* the pass that put Now Playing on the panel ends there; the
+                                               * track starts in the next: frame and start in one pass were
+                                               * 13 + 90 ms on the device ("worst pass 103 ms on player: draw
+                                               * 13, start 90", round 1), 8 + 47 in QEMU on the DMA path */
+        s_pend.later = 1;
+        return;
+    }
     s_pend.kind = 0;
     rc = k == PEND_FILE ? player_open(s_pend.path) : player_open_tree(s_pend.path);
     if (rc == PLAYER_OK)
