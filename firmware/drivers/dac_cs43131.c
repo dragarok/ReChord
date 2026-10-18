@@ -704,11 +704,36 @@ static int i2c0_scan(void)
 
 /* ---- bring-up ---------------------------------------------------------------- */
 
+static const dac_rate_t *rate_of(uint32_t rate_hz)
+{
+    for (int i = 0; i < 13; i++)
+        if (dac_rates[i].rate == rate_hz)
+            return &dac_rates[i];
+    return 0;
+}
+
 int dac_init(uint32_t rate_hz)
 {
-    const dac_rate_t *rt = 0;
+    for (int phase = 0; ; phase++) {
+        int r = dac_init_step(phase, rate_hz);
+
+        if (r <= 0)
+            return r;
+        dac_delay_ms((unsigned)r);
+    }
+}
+
+/* The bring-up, cut at its two 80 ms waits (the register writes and their order are dac_init's,
+ * unchanged; a caller may only wait longer between the parts). */
+int dac_init_step(int phase, uint32_t rate_hz)
+{
+    const dac_rate_t *rt = rate_of(rate_hz);
     int i, cand;
 
+    if (phase == 1)
+        goto phase1;
+    if (phase == 2)
+        goto phase2;
     /* Ref order (FUN_03056550): power/reset GPIOs FIRST, then gates,
      * then the I2C0 soft reset, and only then touch I2C0. */
     STEP(DAC_STEP_POWER);
@@ -739,12 +764,6 @@ int dac_init(uint32_t rate_hz)
         return DAC_ERR_NOCHIP;
 
     STEP(DAC_STEP_RATE);
-    for (i = 0; i < 13; i++) {
-        if (dac_rates[i].rate == rate_hz) {
-            rt = &dac_rates[i];
-            break;
-        }
-    }
     if (!rt)
         return DAC_ERR_ARG;
 
@@ -756,7 +775,10 @@ int dac_init(uint32_t rate_hz)
 
     STEP(DAC_STEP_DAC_REGS);
     dac_map_write(0x000B0000, 0x1F);
-    dac_delay_ms(80);
+    return 80;                        /* (dac_delay_ms(80): the caller's) */
+phase1:
+    if (!rt)
+        return DAC_ERR_ARG;
     dac_gpio_out(1, 4, 1);            /* amp/HP enable (ref FUN_03051478)  */
     dac_map_write(0x00020052, 0x02);
 
@@ -806,7 +828,10 @@ int dac_init(uint32_t rate_hz)
 
     STEP(DAC_STEP_DAC_REGS3);
     dac_map_write(0x000B0000, 0x1F);
-    dac_delay_ms(80);
+    return 80;                        /* (dac_delay_ms(80): the caller's) */
+phase2:
+    if (!rt)
+        return DAC_ERR_ARG;
     dac_map_write(0x00080000, 0x10);
     dac_map_write(0x000D0000, 0x04);
     dac_map_write(0x000D0001, 0x00);
@@ -863,11 +888,8 @@ int dac_init(uint32_t rate_hz)
  * ACODEC PLL and the I2S1 divider, set the per-rate speed byte, unmute. */
 int dac_set_rate(uint32_t rate_hz)
 {
-    const dac_rate_t *rt = 0;
+    const dac_rate_t *rt = rate_of(rate_hz);
 
-    for (int i = 0; i < 13; i++)
-        if (dac_rates[i].rate == rate_hz)
-            rt = &dac_rates[i];
     if (!rt)
         return DAC_ERR_ARG;
     dac_map_write(0x00010009, 0xFF);

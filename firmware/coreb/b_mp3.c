@@ -18,6 +18,7 @@ typedef struct {
     struct mad_synth sy;
     uint32_t pos;                        /* next sample of sy.pcm to hand out */
     uint32_t trim;                       /* decoded samples still to drop */
+    uint32_t frames;                     /* frames decoded */
     int final;                           /* the buffer holds the end of the track (+ guard) */
     uint8_t buf[MP3_BUF + MAD_BUFFER_GUARD];
 } mp3_t;
@@ -34,6 +35,7 @@ int b_mp3_open(void)
     mad_synth_init(&s_mp3->sy);
     s_mp3->pos = s_mp3->sy.pcm.length = 0;
     s_mp3->trim = b_trk.trim;
+    s_mp3->frames = 0;
     s_mp3->final = 0;
     b_in_need = MP3_BUF;                     /* one refill of the frame buffer */
     return 0;
@@ -106,6 +108,16 @@ uint32_t b_mp3_read(int32_t *dst, uint32_t want)
             m->st.error = MAD_ERROR_NONE;
         }
         if (mad_frame_decode(&m->fr, &m->st)) {
+            if (m->st.error == MAD_ERROR_BADDATAPTR && b_trk.drop && m->frames < 16u) {
+                /* a seek's pre-roll: this frame's bit reservoir lies before where the stream
+                 * starts. Silence in its place keeps every later frame at its own sample
+                 * (core B drops the pre-roll; audio.c seek_open) */
+                mad_frame_mute(&m->fr);
+                mad_synth_frame(&m->sy, &m->fr);
+                m->pos = 0;
+                m->frames++;
+                continue;
+            }
             if (MAD_RECOVERABLE(m->st.error) || m->st.error == MAD_ERROR_BUFLEN)
                 continue;
             m->final = 1;                /* unrecoverable: end the track */
@@ -114,6 +126,7 @@ uint32_t b_mp3_read(int32_t *dst, uint32_t want)
         }
         mad_synth_frame(&m->sy, &m->fr);
         m->pos = 0;
+        m->frames++;
     }
     return got;
 }

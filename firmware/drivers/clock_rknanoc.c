@@ -125,8 +125,10 @@ uint64_t time_us(void)
     r = s_base_us + (uint64_t)t * TICK_US + (uint32_t)(((uint64_t)el * s_us_frac) >> 32);
     if (r + TICK_US / 2u < s_last_us)
         r += TICK_US;
-    if (r > s_last_us)
-        s_last_us = r;
+    if (r < s_last_us)
+        r = s_last_us;                        /* never backwards, as time_ms(): a frame's duration
+                                               * read 4294960 ms on the device (2026-10-18) */
+    s_last_us = r;
     return r;
 }
 
@@ -149,6 +151,18 @@ uint32_t time_ms(void)
     if ((int32_t)(r - s_last_ms) < 0)
         r = s_last_ms;                        /* never backwards */
     s_last_ms = r;
+    return r;
+}
+
+static uint32_t s_last_cyc;
+
+uint32_t time_cycles(void)
+{
+    uint32_t el, t = now_parts(&el), r = t * (s_reload + 1u) + el;
+
+    if ((int32_t)(r - s_last_cyc) < -(int32_t)(s_reload / 2u))
+        r += s_reload + 1u;                   /* the reload race (time_us): count the tick */
+    s_last_cyc = r;
     return r;
 }
 

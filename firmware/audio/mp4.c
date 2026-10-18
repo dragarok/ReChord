@@ -506,3 +506,85 @@ int mp4_next(mp4_read_at_t rd, void *u, const mp4_info_t *mi, mp4_cur_t *c, uint
     c->sample++;
     return 1;
 }
+
+/* Sizes of samples [a, b) added up (stsz read 256 entries at a time). */
+static int sizes(const io_t *io, const mp4_info_t *mi, uint32_t a, uint32_t b, uint32_t *sum)
+{
+    static uint8_t buf[1024];
+
+    *sum = 0;
+    if (mi->stsz_fixed) {
+        *sum = mi->stsz_fixed * (b - a);
+        return 0;
+    }
+    while (a < b) {
+        uint32_t k = b - a > 256u ? 256u : b - a;
+
+        if (rd_at(io, mi->stsz_off + a * 4u, buf, k * 4u))
+            return -1;
+        for (uint32_t j = 0; j < k; j++)
+            *sum += be32(buf + j * 4);
+        a += k;
+    }
+    return 0;
+}
+
+int mp4_seek(mp4_read_at_t rd, void *u, const mp4_info_t *mi, mp4_cur_t *c, uint32_t k, uint32_t *before)
+{
+    io_t io = { rd, u };
+    uint8_t b[12];
+    uint32_t acc = 0, in_chunk;
+
+    if (k >= mi->nsamples)
+        return -1;
+    mp4_cursor(c);
+    if (sizes(&io, mi, 0, k, before))
+        return -1;
+    for (uint32_t i = 0; i < mi->stsc_n; i++) {
+        uint32_t first, per, next, run;
+
+        if (rd_at(&io, mi->stsc_off + i * 12u, b, 12))
+            return -1;
+        first = be32(b);
+        per = be32(b + 4);
+        next = mi->stco_n + 1u;
+        if (i + 1u < mi->stsc_n) {
+            if (rd_at(&io, mi->stsc_off + (i + 1u) * 12u, b, 4))
+                return -1;
+            next = be32(b);
+        }
+        if (!first || next < first || !per)
+            return -3;
+        run = (next - first) * per;
+        if (k - acc >= run) {
+            acc += run;
+            continue;
+        }
+        {   /* chunk (0-based) first - 1 + (k - acc) / per, the sample's place in it */
+            uint32_t ch = first - 1u + (k - acc) / per, j = (k - acc) % per;
+
+            if (ch >= mi->stco_n)
+                return -3;
+            if (mi->co64) {
+                if (rd_at(&io, mi->stco_off + ch * 8u, b, 8) || be32(b))
+                    return -1;
+                c->off = be32(b + 4);
+            } else {
+                if (rd_at(&io, mi->stco_off + ch * 4u, b, 4))
+                    return -1;
+                c->off = be32(b);
+            }
+            if (sizes(&io, mi, k - j, k, &in_chunk))
+                return -1;
+            c->off += in_chunk;
+            c->sample = k;
+            c->chunk = ch + 1u;              /* (the next chunk mp4_next loads) */
+            c->left_in_chunk = per - j;
+            c->stsc_i = i;
+            c->per_chunk = per;
+            c->next_first = next == mi->stco_n + 1u && i + 1u >= mi->stsc_n ? 0xFFFFFFFFu : next;
+            return 0;
+        }
+    }
+    return -3;
+}

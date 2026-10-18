@@ -41,7 +41,7 @@
 #define AS_LLI            (AS_PCM_RING - 0x100u)   /* 8 x 28 B, just below the ring (SRAM ends at 0x030A0000) */
 
 #define AS_MAGIC          0x4F445541u   /* "AUDO" */
-#define AS_VERSION        8u
+#define AS_VERSION        9u
 #define AS_QUEUE          4u
 
 enum { AS_CODEC_FLAC = 1, AS_CODEC_WAV = 2, AS_CODEC_MP3 = 3, AS_CODEC_AIFF = 4, AS_CODEC_AAC = 5, AS_CODEC_ALAC = 6,
@@ -71,6 +71,8 @@ typedef struct {
     uint32_t bytes;          /* bytes this track occupies in the input stream, skip included */
     uint32_t skip;           /* filler bytes before the stream (alignment for direct reads) */
     uint32_t trim;           /* decoded frames to drop at the start (MP3: encoder + decoder delay) */
+    uint32_t drop;           /* frames the runtime drops after the decoder's own trim: a seek's way
+                              * from the frame (or block, packet) the stream starts at to the target */
 } as_track_t;
 
 typedef struct {

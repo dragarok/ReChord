@@ -109,4 +109,21 @@ void bt_event(int ev, const bt_dev_t *dev);
 /* Counters for the log/screen: frames in, bytes dropped by the framer, TX timeouts. */
 void bt_stats(uint32_t *rx_frames, uint32_t *rx_dropped, uint32_t *tx_fail);
 
+/* [ours] Developer > BT listen (test): what the module says on its own, sending it nothing.
+ * Powers it up twice the stock way (off, pins low, 100 ms, UART open, GPIO2.7 = 1), listening
+ * ms each time, then leaves it off (state BT_OFF; a powered module is switched off first):
+ *   1  UART1 at 115200 8N1 (as stock), polled: each byte with its time and line status
+ *   2  GPIO2.17 (the module's TX) as a GPIO input: the time of every edge, any baud rate
+ * Our TX (GPIO2.16) stays on the UART, idle-high, throughout; THR is never written. buf/words:
+ * the store (a quarter for the bytes, two words each; the rest for the edges). Blocks for
+ * 2 x ms + 0.7 s, feeding the watchdog. Decode on a computer: tools/bt_listen_decode.py. */
+typedef struct {
+    uint32_t core_hz;                  /* edge times are in cycles of this clock */
+    uint32_t *bytes;                   /* nbytes x { us since power-on, lsr << 8 | byte } */
+    uint32_t *edges;                   /* nedges x cycles since power-on; the first leaves level0 */
+    uint16_t nbytes, nedges, lsr_errs;
+    uint8_t level0, full;              /* full: bit 0 the bytes, bit 1 the edges ran out of room */
+} bt_listen_t;
+int bt_listen(bt_listen_t *r, uint32_t *buf, unsigned words, uint32_t ms);
+
 #endif

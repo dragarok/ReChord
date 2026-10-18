@@ -42,6 +42,9 @@ enum {
 /* Full bring-up for `rate_hz` (one of the 13 table rates).
  * Returns DAC_OK or the failure code; dac_last_step() gives the breadcrumb. */
 int dac_init(uint32_t rate_hz);
+/* dac_init() in parts that do not wait: phase 0, 1, 2 in turn; > 0 = ms to wait (at least) before
+ * the next phase, 0 = up, < 0 = DAC_ERR_*. dac_init() is these with its waits. */
+int dac_init_step(int phase, uint32_t rate_hz);
 
 /* Re-clock for another sample rate (DAC already up, I2S stopped). */
 int dac_set_rate(uint32_t rate_hz);

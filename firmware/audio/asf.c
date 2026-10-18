@@ -224,6 +224,7 @@ int asf_info(asf_read_at_t rd, void *u, uint32_t size, asf_info_t *ai)
 
 /* ---- data packets ------------------------------------------------------- */
 
+#ifndef RECHORD_AP_BUILD                /* the packet walk is core B's (b_asf.c): not in core A's image */
 /* A field of length type t (0: none, 1: byte, 2: word, 3: dword); NULL past `end`. */
 static const uint8_t *field(const uint8_t *p, const uint8_t *end, unsigned t, uint32_t *v)
 {
@@ -334,3 +335,4 @@ int asf_pkt_next(asf_pkt_t *it, asf_payload_t *pl)
         pl->obj_size = moff + len;
     return 1;
 }
+#endif

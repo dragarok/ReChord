@@ -20,6 +20,10 @@ typedef struct {
     uint32_t frames;               /* samples to play after trimming, 0 = unknown (no Xing/VBRI) */
     uint32_t skip;                 /* samples to drop at the start: LAME encoder delay + 529 */
     uint32_t tag_end;              /* end of the leading ID3v2 tag(s) (where the tags are), 0 = none */
+    uint32_t nframes;              /* MPEG frames of audio (Xing/VBRI count), 0 = unknown */
+    uint32_t xing_off, xing_bytes; /* the Xing/Info frame's offset, the bytes its TOC spans (0: none) */
+    uint8_t has_toc, toc[100];     /* Xing TOC: byte position / 256 of each 1 % of the time (seek.c) */
+    uint8_t cbr;                   /* constant bit rate: a LAME "Info" tag, or no Xing/VBRI header */
 } mp3_info_t;
 
 #define MP3_DECODER_DELAY 529u     /* synthesis filterbank + IMDCT overlap of a libmad/mpg123 decoder */

@@ -4,6 +4,7 @@
  * are debounced by input_scan() and dispatched to the screen stack.
  */
 #include "drivers/board.h"
+#include "drivers/bt_jieli.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -31,6 +32,8 @@
 #include "player.h"
 #include "services/bootcrumb.h"
 #include "services/watchdog.h"
+#include "services/fs.h"
+#include "services/scratch.h"
 #include "ui/ui.h"
 #include "ui/nav.h"
 
@@ -136,6 +139,19 @@ static void update_progress(const char *what, uint32_t done, uint32_t total)
     snprintf(buf, sizeof buf, "%-10s %3u%%", what, pct);
     line(2, buf);
     display_flush_rows(8 + 2 * 14, 8 + 2 * 14 + 7);
+}
+
+/* The boot's slot check is silent; only a slot that needs rebuilding (an update cut short)
+ * gets a screen, at its first progress step. */
+static void repair_progress(const char *what, uint32_t done, uint32_t total)
+{
+    static int shown;
+
+    if (!shown) {
+        shown = 1;
+        screen("Repairing the firmware slots");
+    }
+    update_progress(what, done, total);
 }
 
 /* A screen that runs its own loop keeps what the main loop serves going: the music, the storage
@@ -365,6 +381,80 @@ static void usb_detect_test(void)
     line(2, buf);
     display_flush_rows(0, DISPLAY_H - 1);
     panel_io_delay_ms(1500);
+    ui_invalidate_all();
+}
+
+/* Developer > BT listen (test): the module's own output, sending it nothing (bt_listen() in
+ * drivers/bt_jieli.h), kept in /BTLISTEN.TXT for tools/bt_listen_decode.py. */
+#define LISTEN_MS   4000u
+#define LISTEN_PATH "/Internal/BTLISTEN.TXT"
+
+static int listen_save(const bt_listen_t *r)
+{
+    fs_file_t *f = fs_open_write(LISTEN_PATH);
+    char b[100];
+    int n, ok;
+
+    if (!f)
+        return -1;
+    n = snprintf(b, sizeof b, "ReChord BT listen 1\ncore_hz %u\nuart 115200 ms %u bytes %u lsr_errors %u full %u\n",
+                 (unsigned)r->core_hz, LISTEN_MS, r->nbytes, r->lsr_errs, r->full & 1u);
+    ok = fs_write(f, b, (unsigned long)n) == n;
+    for (unsigned i = 0; ok && i < r->nbytes; i++) {
+        n = snprintf(b, sizeof b, "u %u %02x %02x\n", (unsigned)r->bytes[2 * i],
+                     (unsigned)(r->bytes[2 * i + 1] & 0xFFu), (unsigned)(r->bytes[2 * i + 1] >> 8));
+        ok = fs_write(f, b, (unsigned long)n) == n;
+    }
+    n = snprintf(b, sizeof b, "gpio ms %u level0 %u edges %u full %u\n", LISTEN_MS, r->level0, r->nedges,
+                 r->full >> 1 & 1u);
+    ok = ok && fs_write(f, b, (unsigned long)n) == n;
+    for (unsigned i = 0; ok && i < r->nedges; i += 8) {
+        n = snprintf(b, sizeof b, "e");
+        for (unsigned k = i; k < i + 8 && k < r->nedges; k++)
+            n += snprintf(b + n, sizeof b - (unsigned)n, " %x", (unsigned)r->edges[k]);
+        b[n++] = '\n';
+        ok = fs_write(f, b, (unsigned long)n) == n;
+    }
+    ok = ok && fs_write(f, "end\n", 4) == 4;
+    return fs_close(f) || !ok ? -1 : 0;
+}
+
+static void bt_listen_test(void)
+{
+    bt_listen_t r;
+    char txt[48], buf[48];
+    unsigned k = 0;
+    int saved;
+
+    usb_out_off();
+    player_stop();
+    screen("BT listen (test)");
+    line(1, "listening, nothing sent (9 s)");
+    display_flush_rows(0, DISPLAY_H - 1);
+    bt_listen(&r, g_scratch, SCRATCH_WORDS, LISTEN_MS);
+    saved = listen_save(&r);
+    while (k < r.nbytes && k < sizeof txt - 1u) {
+        uint8_t c = (uint8_t)r.bytes[2 * k + 1];
+
+        txt[k++] = c >= 0x20 && c < 0x7F ? (char)c : '.';   /* (one log line) */
+    }
+    txt[k] = 0;
+    log_printf("btlisten: uart %u bytes (%u line errors), the first at %u ms: '%.40s'%s", r.nbytes, r.lsr_errs,
+               r.nbytes ? (unsigned)(r.bytes[0] / 1000u) : 0u, txt, r.full & 1u ? " (full)" : "");
+    log_printf("btlisten: gpio %u edges, the first at %u us, level %u at power-on%s; " LISTEN_PATH " %s", r.nedges,
+               r.nedges ? (unsigned)(r.edges[0] / (r.core_hz / 1000000u)) : 0u, r.level0,
+               r.full & 2u ? " (full)" : "", saved ? "NOT saved" : "saved");
+    log_flush("btlisten");
+    snprintf(buf, sizeof buf, "UART: %u bytes, %u errors", r.nbytes, r.lsr_errs);
+    line(2, buf);
+    snprintf(buf, sizeof buf, "%.40s", txt);
+    line(3, buf);
+    snprintf(buf, sizeof buf, "GPIO: %u edges", r.nedges);
+    line(4, buf);
+    line(5, saved ? "BTLISTEN.TXT NOT saved" : "saved BTLISTEN.TXT");
+    line(7, "the module is off; any key");
+    display_flush_rows(0, DISPLAY_H - 1);
+    ask(1);
     ui_invalidate_all();
 }
 
@@ -1029,11 +1119,15 @@ static void boot_key_sample(void)
     uint32_t t0 = time_ms(), up = 0, down = 0;
     int lo = 1023, hi = 0;
 
-    while (time_ms() - t0 < 400u) {              /* (the ADC's first readings, then 300 ms of one key) */
+    for (uint32_t idle = 0; time_ms() - t0 < 400u;) {   /* (the ADC's first readings, then 300 ms of one key) */
         int a = keys_adc();
 
         lo = a < lo ? a : lo;
         hi = a > hi ? a : hi;
+        /* nothing held: a finger on VOL+/VOL- at power-on reads low from the first sample, so
+         * 50 ms of an idle ladder ends the window (it held the first frame 400 ms on every boot) */
+        if (a > 600 && ++idle >= 5u && !up && !down)
+            break;
         up = a >= 70 && a <= 183 ? up + 1u : 0u;
         down = a >= 0 && a <= 69 ? down + 1u : 0u;
         if (up >= 30u || down >= 30u) {
@@ -1154,6 +1248,7 @@ void ap_dac_test(void) { dac_test_run(); }
 void ap_usb_console(void) { usb_console_run(); }
 void ap_usb_probe(void) { usb_probe_menu(); }
 void ap_usb_detect(void) { usb_detect_test(); }
+void ap_bt_listen(void) { bt_listen_test(); }
 void ap_power_off(void) { power_off(NULL); }
 
 void ap_update(void)
@@ -1239,8 +1334,7 @@ void ap_ui_loop(void)
     if (s_user) {         /* a slot left invalid (an update cut short): copied from the good one */
         int r;
 
-        screen("Checking the firmware slots");
-        r = fw_update_repair(update_progress);
+        r = fw_update_repair(repair_progress);   /* silent unless a slot needs it (rare) */
         if (r)
             log_printf("fw: slot repair %d (%s)", r, r == 1 ? "slot 1 rebuilt from slot 2" :
                        r == 2 ? "slot 2 rebuilt from slot 1" : "failed");
@@ -1250,8 +1344,9 @@ void ap_ui_loop(void)
     bootcrumb(BC_RECOVERY);
     recovery_menu();      /* a fault last time, or VOL+ held: before anything else */
     bootcrumb(BC_UPDATE);
-    if (s_user)
-        update_prompt();  /* at boot too, as stock and RECHO check */
+    /* No update check at boot (the user, 2026-10-18: boot straight to where you were): an image
+     * on the disk is offered when a USB disk session ends, and in Settings > System > Firmware
+     * update. Recovery (VOL+ at power-on) still installs one. */
     bootcrumb(BC_PLAYER);
     player_init();       /* register wav/mp3/flac codecs (registry) */
     bootcrumb(BC_CONFIG);
@@ -1276,6 +1371,9 @@ void ap_ui_loop(void)
         player_resume(g_cfg.track) == 0 && player_play() == PLAYER_OK) {
         nav_push(&pg_np, 0);
         log_printf("ui: resumed %s", g_cfg.track);
+    } else if (s_user && g_cfg.resume == CFG_RESUME_FOLDER && g_cfg.browse[0] == '/' && g_cfg.browse[1]) {
+        nav_push(&pg_vols, 0);           /* straight into the folder you were in (it reopens there) */
+        log_printf("ui: resumed in %s", g_cfg.browse);
     }
     {   /* the USB block as the ROM left it, before the park (USB DAC audit D6, SoC report 6.1) */
         uint32_t r[10];
@@ -1294,7 +1392,7 @@ void ap_ui_loop(void)
     (void)panel_io_select(g_cfg.display);   /* the panel's pixel path: the VOP as a trial, now the
                                              * watchdog ends a hang (drivers/panel_io.h) */
     for (;;) {
-        uint32_t t_pass = time_ms(), t_keys, t_play, t_draw;
+        uint32_t t_pass = time_ms(), t_keys, t_play, t_draw, t_start;
         int adc = keys_adc(), power = keys_power(), cable = usb_cable();
         int adc2 = board_adc_ch2();
         static int s_adc_logged;
@@ -1436,6 +1534,7 @@ void ap_ui_loop(void)
             nav_tick();
             ui_render();
         }
+        t_start = time_ms();
         nav_after();                     /* (a track to start: after Now Playing is on the panel) */
         {   /* a pass that held the UI (the device froze 23 s in Files, 2026-10-16): where */
             static unsigned s_slow;
@@ -1447,7 +1546,7 @@ void ap_ui_loop(void)
                 s_slowest = now - t_pass;
                 bootcrumb_set(BCK_SLOW_PASS, s_slowest | (uint32_t)nav_depth() << 24);
             }
-            static uint32_t s_worst, s_worst_at, s_worst_parts[4];
+            static uint32_t s_worst, s_worst_at, s_worst_parts[5];
             static const char *s_worst_on;
 
             if (!t_first) {
@@ -1461,24 +1560,25 @@ void ap_ui_loop(void)
                 s_worst_parts[0] = t_keys - t_pass;
                 s_worst_parts[1] = t_play - t_keys;
                 s_worst_parts[2] = t_draw - t_play;
-                s_worst_parts[3] = now - t_draw;
+                s_worst_parts[3] = t_start - t_draw;
+                s_worst_parts[4] = now - t_start;
                 s_worst_on = nav_top() ? nav_top()->name : "-";
             }
             if (now - s_worst_at >= 10000u) {
                 if (s_worst >= 50u && s_worst < 300u)
-                    log_printf("ui: worst pass %u ms on %s: keys+events %u, player %u, rest %u, draw %u",
+                    log_printf("ui: worst pass %u ms on %s: keys+events %u, player %u, rest %u, draw %u, start %u",
                                (unsigned)s_worst, s_worst_on, (unsigned)s_worst_parts[0],
                                (unsigned)s_worst_parts[1], (unsigned)s_worst_parts[2],
-                               (unsigned)s_worst_parts[3]);
+                               (unsigned)s_worst_parts[3], (unsigned)s_worst_parts[4]);
                 s_worst_at = time_stamp(now);
                 s_worst = 0;
             }
             if (now - t_pass >= 300u && s_slow < 30u) {
                 s_slow++;
-                log_printf("ui: slow pass %u ms on %s: keys+events %u, player %u, rest %u, draw %u",
+                log_printf("ui: slow pass %u ms on %s: keys+events %u, player %u, rest %u, draw %u, start %u",
                            (unsigned)(now - t_pass), nav_top() ? nav_top()->name : "-",
                            (unsigned)(t_keys - t_pass), (unsigned)(t_play - t_keys),
-                           (unsigned)(t_draw - t_play), (unsigned)(now - t_draw));
+                           (unsigned)(t_draw - t_play), (unsigned)(t_start - t_draw), (unsigned)(now - t_start));
             }
         }
         cpu_wait_tick();                 /* sleep (WFI) until the next 10 ms tick */

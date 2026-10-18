@@ -31,7 +31,9 @@ enum {
     A_CANCEL, A_DONE, A_DEFAULT,  /* editors */
     A_SAFE,                       /* a question's BACK: the safe answer */
     A_END,                        /* end a USB session */
-    A_NOP                         /* a key that does nothing here (slot flash only) */
+    A_NOP,                        /* a key that does nothing here (slot flash only) */
+    A_GO_NP,                      /* a menu's PLAY hold: Now Playing when a track is loaded (else A_OPEN_HOLD) */
+    A_SEEK, A_SEEK_GO             /* Now Playing's VOL 2x+hold: seek while held, release = go */
 };
 
 typedef struct {
@@ -103,8 +105,9 @@ extern const input_event_t *g_ev;         /* the event being handled */
 extern int g_locked;
 void nav_toast(int icon, int tone, const char *fmt, ...);
 void nav_header(hdr_t *h);                /* the services' state into the header (screens.c) */
-extern const page_t pg_np, pg_home, pg_opts, pg_dac;
+extern const page_t pg_np, pg_home, pg_opts, pg_dac, pg_vols;
 void np_act(int act, int i);              /* Now Playing's keys (also with the screen off) */
+void np_seek_cancel(void);                /* a seek being held ends without going (the chord) */
 int np_loaded(void);
 
 #endif
