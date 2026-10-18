@@ -21,7 +21,7 @@
 
 static char s_name[FS_NAME_MAX];
 static tag_info_t s_tags;                    /* of the heard track, when cfg tags=on */
-static uint32_t s_tags_seq;
+static uint32_t s_tags_seq, s_tags_clus;     /* (a seek restarts the same file: its tags stay) */
 static int s_open;
 static char s_src[150];                      /* where the queue came from (for resume) */
 static int s_tree;
@@ -137,7 +137,24 @@ int player_stop(void)
     return PLAYER_OK;
 }
 
-int player_seek(long ms) { return PLAYER_ERR_STATE; }
+/* The playing track from ms on (audio_seek: the stream restarts at the coded unit before it). */
+int player_seek(long ms)
+{
+    int r = audio_seek(ms < 0 ? 0u : (uint32_t)ms);
+
+    if (r == 0)
+        return PLAYER_OK;
+    log_printf("player: seek to %ld ms failed (%d)", ms, r);
+    return r == -2 ? PLAYER_ERR_UNSUPPORTED : PLAYER_ERR_STATE;
+}
+
+int player_seekable(void)
+{
+    audio_status_t st;
+
+    audio_status(&st);
+    return st.seq && audio_seekable(st.track.codec);
+}
 int player_next(void) { return audio_skip(1) == 0 ? PLAYER_OK : PLAYER_ERR_EMPTY; }
 int player_prev(void) { return audio_skip(-1) == 0 ? PLAYER_OK : PLAYER_ERR_EMPTY; }
 
@@ -226,7 +243,9 @@ int player_get_track(track_info_t *out)
     audio_status(&st);
     if (st.seq && g_cfg.tags && st.seq != s_tags_seq) {
         s_tags_seq = st.seq;
-        load_tags(&st.track);
+        if (st.track.ref.clus != s_tags_clus || !st.track.ref.clus)
+            load_tags(&st.track);
+        s_tags_clus = st.track.ref.clus;
     }
     if (st.seq && g_cfg.tags && s_tags.title[0]) {
         strncpy(out->title, s_tags.title, sizeof out->title - 1);

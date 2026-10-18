@@ -127,6 +127,7 @@ as_track_t b_trk;
 uint32_t b_trk_start, b_trk_end;
 uint32_t b_in_need;
 static const b_codec_t *s_dec;           /* NULL: no track open */
+static uint32_t s_drop;                  /* frames still to drop at the track's start (b_trk.drop) */
 
 uint32_t b_in_avail(void)
 {
@@ -343,6 +344,7 @@ static int track_open(void)
     b_trk_start = AS->in_rd;
     AS->cur_seq = b_trk.seq;
     AS->cur_frames = 0;
+    s_drop = b_trk.drop;
     heap_reset();
     s_dec = codec_find(b_trk.codec);
     b_in_need = 0x8000u;
@@ -460,7 +462,7 @@ static int input_ready(void)
 /* One step of work; 0 = nothing to do now. */
 static int produce(void)
 {
-    uint32_t want, got;
+    uint32_t want, got, raw;
     int32_t *dst;
 
     if (!AS->run)
@@ -524,12 +526,20 @@ static int produce(void)
         track_close();
         return 1;
     }
+    raw = got;
+    if (s_drop && got) {                             /* a seek: the frames before its target */
+        uint32_t k = got < s_drop ? got : s_drop;
+
+        memmove(dst, dst + k * b_trk.channels, (got - k) * b_trk.channels * 4u);
+        s_drop -= k;
+        got -= k;
+    }
     if (b_trk.channels == 1) {                       /* mono: L = R, expand in place */
         for (uint32_t i = got; i-- > 0; )
             dst[2 * i] = dst[2 * i + 1] = dst[i];
     }
     AS->cur_frames += got;
-    if (got == 0 || (b_trk.frames && AS->cur_frames >= b_trk.frames))
+    if (raw == 0 || (b_trk.frames && AS->cur_frames >= b_trk.frames))
         track_close();                               /* the next track fills the same block */
     __asm__ volatile ("cpsid i" ::: "memory");
     if (s_resync) {                                  /* the DMA passed this block meanwhile */

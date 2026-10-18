@@ -1392,7 +1392,7 @@ void ap_ui_loop(void)
     (void)panel_io_select(g_cfg.display);   /* the panel's pixel path: the VOP as a trial, now the
                                              * watchdog ends a hang (drivers/panel_io.h) */
     for (;;) {
-        uint32_t t_pass = time_ms(), t_keys, t_play, t_draw;
+        uint32_t t_pass = time_ms(), t_keys, t_play, t_draw, t_start;
         int adc = keys_adc(), power = keys_power(), cable = usb_cable();
         int adc2 = board_adc_ch2();
         static int s_adc_logged;
@@ -1534,6 +1534,7 @@ void ap_ui_loop(void)
             nav_tick();
             ui_render();
         }
+        t_start = time_ms();
         nav_after();                     /* (a track to start: after Now Playing is on the panel) */
         {   /* a pass that held the UI (the device froze 23 s in Files, 2026-10-16): where */
             static unsigned s_slow;
@@ -1545,7 +1546,7 @@ void ap_ui_loop(void)
                 s_slowest = now - t_pass;
                 bootcrumb_set(BCK_SLOW_PASS, s_slowest | (uint32_t)nav_depth() << 24);
             }
-            static uint32_t s_worst, s_worst_at, s_worst_parts[4];
+            static uint32_t s_worst, s_worst_at, s_worst_parts[5];
             static const char *s_worst_on;
 
             if (!t_first) {
@@ -1559,24 +1560,25 @@ void ap_ui_loop(void)
                 s_worst_parts[0] = t_keys - t_pass;
                 s_worst_parts[1] = t_play - t_keys;
                 s_worst_parts[2] = t_draw - t_play;
-                s_worst_parts[3] = now - t_draw;
+                s_worst_parts[3] = t_start - t_draw;
+                s_worst_parts[4] = now - t_start;
                 s_worst_on = nav_top() ? nav_top()->name : "-";
             }
             if (now - s_worst_at >= 10000u) {
                 if (s_worst >= 50u && s_worst < 300u)
-                    log_printf("ui: worst pass %u ms on %s: keys+events %u, player %u, rest %u, draw %u",
+                    log_printf("ui: worst pass %u ms on %s: keys+events %u, player %u, rest %u, draw %u, start %u",
                                (unsigned)s_worst, s_worst_on, (unsigned)s_worst_parts[0],
                                (unsigned)s_worst_parts[1], (unsigned)s_worst_parts[2],
-                               (unsigned)s_worst_parts[3]);
+                               (unsigned)s_worst_parts[3], (unsigned)s_worst_parts[4]);
                 s_worst_at = time_stamp(now);
                 s_worst = 0;
             }
             if (now - t_pass >= 300u && s_slow < 30u) {
                 s_slow++;
-                log_printf("ui: slow pass %u ms on %s: keys+events %u, player %u, rest %u, draw %u",
+                log_printf("ui: slow pass %u ms on %s: keys+events %u, player %u, rest %u, draw %u, start %u",
                            (unsigned)(now - t_pass), nav_top() ? nav_top()->name : "-",
                            (unsigned)(t_keys - t_pass), (unsigned)(t_play - t_keys),
-                           (unsigned)(t_draw - t_play), (unsigned)(now - t_draw));
+                           (unsigned)(t_draw - t_play), (unsigned)(t_start - t_draw), (unsigned)(now - t_start));
             }
         }
         cpu_wait_tick();                 /* sleep (WFI) until the next 10 ms tick */

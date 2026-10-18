@@ -233,7 +233,7 @@ static const char *bt_verb(int i, int hold)
 static const keydef_t k_bt[] = {
     { KEY_UP, IG_DOWN, A_UP, "UP" }, { KEY_UP, IG_REPEAT, A_UP, NULL },
     { KEY_DOWN, IG_DOWN, A_DOWN, "DOWN" }, { KEY_DOWN, IG_REPEAT, A_DOWN, NULL },
-    { KEY_SELECT, IG_TAP, A_OPEN, VERB },
+    { KEY_SELECT, IG_TAP, A_OPEN, VERB }, { KEY_SELECT, IG_HOLD, A_GO_NP, "PLAYING" },
     { KEY_MENU, IG_TAP, A_NP, "PLAYING" }, { KEY_MENU, IG_HOLD, A_OPTIONS, "OPTIONS" },
     { KEY_BACK, IG_TAP, A_BACK, "BACK" }, { KEY_BACK, IG_HOLD, A_HOME, "HOME" },
     { 0 }

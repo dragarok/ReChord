@@ -6,8 +6,7 @@
  * the USB disk session). Bluetooth's screen is startup/ap_bt.c.
  *
  * Not built yet, so not in the tree (no dead rows): Library (needs the tag index), EQ,
- * ReplayGain, volume limit, sleep timer, clock, Visualizer, seek (player_seek() is not there),
- * Key guide, letter jumps.
+ * ReplayGain, volume limit, sleep timer, clock, Visualizer, Key guide, letter jumps.
  */
 #include <stdio.h>
 #include <string.h>
@@ -53,9 +52,17 @@ static const keydef_t k_list[] = {
     { KEY_BACK, IG_TAP, A_BACK, "BACK" }, { KEY_BACK, IG_HOLD, A_HOME, "HOME" },
     { 0 }
 };
+static const keydef_t k_menu[] = {       /* lists that are not music (Settings and its pages): PLAY held =
+                                          * Now Playing (user request 2026-10-18; DEFAULT when nothing plays) */
+    LIST_MOVE,
+    { KEY_SELECT, IG_TAP, A_OPEN, VERB }, { KEY_SELECT, IG_HOLD, A_GO_NP, VERB },
+    { KEY_MENU, IG_TAP, A_NP, "PLAYING" }, { KEY_MENU, IG_HOLD, A_OPTIONS, "OPTIONS" },
+    { KEY_BACK, IG_TAP, A_BACK, "BACK" }, { KEY_BACK, IG_HOLD, A_HOME, "HOME" },
+    { 0 }
+};
 static const keydef_t k_home[] = {
     LIST_MOVE,
-    { KEY_SELECT, IG_TAP, A_OPEN, VERB }, { KEY_SELECT, IG_HOLD, A_OPEN_HOLD, VERB },
+    { KEY_SELECT, IG_TAP, A_OPEN, VERB }, { KEY_SELECT, IG_HOLD, A_GO_NP, VERB },
     { KEY_MENU, IG_TAP, A_NP, "PLAYING" }, { KEY_MENU, IG_HOLD, A_OPTIONS, "OPTIONS" },
     { 0 }
 };
@@ -82,6 +89,8 @@ static const keydef_t k_question[] = {
 static const keydef_t k_np[] = {
     { KEY_UP, IG_DOWN, A_VOL_UP, "VOL+" }, { KEY_UP, IG_REPEAT, A_VOL_UP, NULL },
     { KEY_DOWN, IG_DOWN, A_VOL_DN, "VOL" MINUS }, { KEY_DOWN, IG_REPEAT, A_VOL_DN, NULL },
+    { KEY_UP, IG_HOLD, A_SEEK, NULL }, { KEY_DOWN, IG_HOLD, A_SEEK, NULL },     /* 2x+hold: seek */
+    { KEY_UP, IG_RELEASE, A_SEEK_GO, NULL }, { KEY_DOWN, IG_RELEASE, A_SEEK_GO, NULL },
     { KEY_SELECT, IG_TAP, A_PLAY, VERB }, { KEY_SELECT, IG_HOLD, A_PLAY_HOLD, VERB },
     { KEY_SELECT, IG_END, A_PLAY_END, NULL },
     { KEY_MENU, IG_TAP, A_NP, "LIBRARY" }, { KEY_MENU, IG_HOLD, A_OPTIONS, "OPTIONS" },
@@ -313,7 +322,7 @@ static void home_enter(int first)
         nav_set_cursor(np_loaded() ? 0 : 0);   /* Now Playing when loaded, else Folders: both row 0 */
 }
 
-static const char *home_verb(int i, int hold) { return hold ? "" : "OPEN"; }
+static const char *home_verb(int i, int hold) { return hold ? (np_loaded() ? "PLAYING" : "") : "OPEN"; }
 
 const page_t pg_home = {
     .name = "home", .kind = PK_LIST, .icon = ICON_HOME, .live = 1, .keys = k_home, .title = "ReChord",
@@ -434,9 +443,17 @@ static void play_later(int kind, const char *path, const char *name)
     np_pending(name);
 }
 
+static long s_seek_go = -1;                /* a seek to start after the frame (np_act A_SEEK_GO), ms */
+
 void nav_after(void)
 {
     int k = s_pend.kind, rc;
+
+    if (s_seek_go >= 0) {                     /* (after the band's frame: key->px stays the band's) */
+        if (player_seek(s_seek_go) != PLAYER_OK)
+            nav_toast(ICON_WARN, TOAST_WARN, "Seek failed");
+        s_seek_go = -1;
+    }
 
     if (!k)
         return;
@@ -615,11 +632,21 @@ static const uint16_t k_hues[8] = {     /* the monogram tile's hues (content, no
 };
 
 static struct {
-    uint32_t seq, pos, dur, until;
+    uint32_t seq, pos, dur, until, clus;
     char title[96], artist[64], album[64], next[64], init[4], codec[8], fmt[12], facts[40];
-    uint8_t hue, hires, paused, band, win, err;
+    uint8_t hue, hires, paused, band, win, err;   /* band: 0 progress, 1 volume, 2 seek */
     int16_t head;
 } N;
+
+/* The seek (VOL+ 2x+hold forward, VOL- 2x+hold back; DESIGN 2.2 N's Seek band): the target moves
+ * 2 s every 100 ms held, 10 s after 2 s; the release goes there. Not part of N: a seek outlives
+ * np_load(), and the volume before the presses is kept across them. */
+static struct {
+    uint8_t on, key;
+    int8_t dir;
+    uint32_t t0, from, to;           /* the hold's time, the position then, the target (ms) */
+} K;
+static int s_vol0;                   /* the volume before a VOL multi-press (its first press) */
 
 static void np_title(char *o, int cap)
 {
@@ -657,6 +684,7 @@ static void np_load(const audio_status_t *st)
     N.seq = st->seq;
     if (!st->seq)
         return;
+    N.clus = st->track.ref.clus;
     player_get_track(&ti);
     split_name(ti.title, !ti.artist[0], N.title, sizeof N.title);
     snprintf(N.artist, sizeof N.artist, "%s", ti.artist);
@@ -718,7 +746,7 @@ static void np_inval_band(void) { ui_invalidate(0, BAND_Y, DISPLAY_W - 1, DISPLA
 
 void np_band_off(void)                    /* (the chord took back the VOL press that showed it) */
 {
-    if (N.band && nav_top() == &pg_np) {
+    if (N.band == 1 && nav_top() == &pg_np) {
         N.band = 0;
         np_inval_band();
     }
@@ -738,6 +766,58 @@ static void np_pending(const char *name)
     ui_invalidate(0, BODY_Y, DISPLAY_W - 1, DISPLAY_H - 1);
 }
 
+/* The seek's target after `held` ms of the hold: 2 s at once and every 100 ms, 10 s a step after
+ * 2 s; within the track (to 1 s before its end). Stock MINIV390 also moves only the shown time while
+ * the key is held and seeks once at the release (seg27 0x307e15e/0x307e21c, the release 0x307e2aa ->
+ * 0x03088390: mailbox ch 1 cmd 0xB DECODE_SEEK, ms), in flat 8 s steps a repeat (~80 ms, mov r1,#8000
+ * at 0x307e19a); here finer first, faster later (the user's ask). */
+static uint32_t seek_target(uint32_t held)
+{
+    uint32_t d = held < 2000u ? 2000u * (1u + held / 100u) : 40000u + 10000u * (1u + (held - 2000u) / 100u);
+    int64_t to = (int64_t)K.from + (K.dir > 0 ? (int64_t)d : -(int64_t)d);
+    int64_t end = N.dur ? (int64_t)N.dur * 1000 - 1000 : to;
+
+    if (to > end)
+        to = end;
+    return to < 0 ? 0u : (uint32_t)to;
+}
+
+/* DESIGN 2.2 N, Seek: the target marker (3 x 12) and the fill in accent, the target time (M13), the
+ * delta centred, the total on the right. */
+static void seek_band(void)
+{
+    const theme_t *t = T;
+    char a[12], d[16];
+    uint32_t to = K.to / 1000u, from = K.from / 1000u, dd = to > from ? to - from : from - to;
+    int x = N.dur ? 8 + (int)(304u * (to < N.dur ? to : N.dur) / N.dur) : 8;
+
+    ui_fill(8, BAND_Y + 4, 304, 4, t->bar_track);
+    ui_fill(8, BAND_Y + 4, x - 8, 4, t->accent);
+    ui_fill(x - 1, BAND_Y, 3, 12, t->accent);
+    fmt_time(a, sizeof a, to);
+    ui_text(&font_m13, 8, BAND_Y + 25, 62, 0, a, t->text, BAND_Y + 12, DISPLAY_H - 1);
+    memcpy(d, to >= from ? "+" : MINUS, to >= from ? 2 : 4);
+    fmt_time(d + strlen(d), (int)(sizeof d - strlen(d)), dd);
+    ui_text(&font_b13, 72, BAND_Y + 25, 156, 1, d, t->accent, BAND_Y + 12, DISPLAY_H - 1);
+    if (N.dur) {
+        fmt_time(a, sizeof a, N.dur);
+        ui_text(&font_b13, 232, BAND_Y + 25, 80, 2, a, t->text_dim, BAND_Y + 12, DISPLAY_H - 1);
+    }
+}
+
+void np_seek_cancel(void)
+{
+    if (K.on) {
+        K.on = 0;
+        log_printf("ui: seek cancelled");
+        if (N.band == 2) {
+            N.band = 0;
+            if (nav_top() == &pg_np)
+                np_inval_band();
+        }
+    }
+}
+
 static void np_poll(void)
 {
     audio_status_t st;
@@ -746,18 +826,43 @@ static void np_poll(void)
 
     audio_status(&st);
     if (st.seq != N.seq && !(N.seq == 0xFFFFFFFFu && (s_pend.kind || st.seq == s_pend.old_seq))) {
-        np_load(&st);
-        ui_invalidate(0, BODY_Y, DISPLAY_W - 1, DISPLAY_H - 1);
+        if (N.seq && N.seq != 0xFFFFFFFFu && st.seq && st.track.ref.clus == N.clus) {
+            N.seq = st.seq;                   /* the same file again (a seek): nothing to redraw */
+        } else {
+            uint8_t band = N.band;
+            uint32_t until = N.until;
+
+            np_load(&st);
+            N.band = band;                    /* (the volume band stays its 1.5 s) */
+            N.until = until;
+            ui_invalidate(0, BODY_Y, DISPLAY_W - 1, DISPLAY_H - 1);
+        }
+    }
+    if (K.on) {                               /* the seek's target follows the time held */
+        if (!input_held_ms(K.key)) {          /* (its release never came: another key took the ladder) */
+            const input_event_t *e = g_ev;
+
+            g_ev = NULL;
+            np_act(A_SEEK_GO, 0);
+            g_ev = e;
+        } else {
+            uint32_t to = seek_target(time_ms() - K.t0);
+
+            if (to != K.to) {
+                K.to = to;
+                np_inval_band();
+            }
+        }
     }
     if (paused != N.paused) {
         N.paused = (uint8_t)paused;
         ui_invalidate(PAUSE_X, PAUSE_Y, PAUSE_X + 17, PAUSE_Y + 17);
     }
-    if (N.band && (int32_t)(time_ms() - N.until) >= 0) {
+    if (N.band == 1 && (int32_t)(time_ms() - N.until) >= 0) {
         N.band = 0;
         np_inval_band();
     }
-    pos = (uint32_t)(player_get_position_ms() / 1000);
+    pos = s_seek_go >= 0 ? N.pos : (uint32_t)(player_get_position_ms() / 1000);   /* (a seek about to go: its target) */
     if (pos != N.pos) {
         int a = head_x();
 
@@ -863,8 +968,12 @@ static void np_draw(void)
         badge(x, N.fmt, N.hires ? t->hires : t->badge_bg, N.hires ? t->hires : t->text_dim, 1);
     }
     ui_text(&font_s8, TX, 130, TW, 0, N.facts, t->text_dim, 122, 132);
-    if (N.band) {
+    if (N.band == 1) {
         vol_band(player_get_volume(), bt_routed());
+        return;
+    }
+    if (N.band == 2) {
+        seek_band();
         return;
     }
     {
@@ -902,10 +1011,19 @@ void np_act(int a, int i)
 {
     const input_event_t *ev = g_ev;
 
+    if (K.on && ev && ev->key != K.key && a != A_SEEK_GO)
+        np_act(A_SEEK_GO, 0);                /* another key: the seek held so far goes first */
     switch (a) {
     case A_VOL_UP:
     case A_VOL_DN: {
         int n = ev && ev->gesture == IG_REPEAT ? ev->steps : 1, v = player_get_volume() + (a == A_VOL_UP ? n : -n);
+
+        /* single presses stay instant; a second press held becomes the seek at its hold (no
+         * repeat first), and the seek then takes the presses' steps back (s_vol0) */
+        if (K.on || (ev && ev->gesture == IG_REPEAT && ev->taps >= 2))
+            break;
+        if (!ev || ev->taps <= 1)
+            s_vol0 = player_get_volume();
 
         player_set_volume(v < -90 ? -90 : v > 0 ? 0 : v);
         N.band = 1;
@@ -935,6 +1053,45 @@ void np_act(int a, int i)
     case A_PLAY_HOLD:
         if (ev->taps <= 1)
             ensure_playing(player_next());
+        break;
+    case A_SEEK:                              /* VOL 2x (or 3x) + hold */
+        if (!ev || ev->taps < 2 || K.on || !np_loaded())
+            break;
+        if (player_get_volume() != s_vol0) {
+            log_printf("ui: volume back to %d dB (the seek's presses)", s_vol0);
+            player_set_volume(s_vol0);
+            N.band = 0;
+        }
+        if (!player_seekable()) {
+            nav_toast(ICON_WARN, TOAST_WARN, "Can't seek in %s", N.codec[0] ? N.codec : "this format");
+            if (nav_top() == &pg_np)
+                np_inval_band();
+            break;
+        }
+        K.on = 1;
+        K.key = ev->key;
+        K.dir = ev->key == KEY_UP ? 1 : -1;
+        K.t0 = ev->t_ms;
+        K.from = (uint32_t)player_get_position_ms();
+        K.to = seek_target(0);
+        N.band = 2;
+        log_printf("ui: seek %s from %u ms", K.dir > 0 ? "forward" : "back", (unsigned)K.from);
+        if (nav_top() == &pg_np)
+            np_inval_band();
+        break;
+    case A_SEEK_GO:
+        if (!K.on)
+            break;
+        if (ev && ev->key == K.key && ev->gesture == IG_RELEASE)
+            K.to = seek_target(ev->t_ms - K.t0);     /* (the release's own time: exact, screen off too) */
+        K.on = 0;
+        N.band = 0;
+        log_printf("ui: seek to %u ms (%c%u s)", (unsigned)K.to, K.to >= K.from ? '+' : '-',
+                   (unsigned)((K.to >= K.from ? K.to - K.from : K.from - K.to) / 1000u));
+        s_seek_go = (long)K.to;               /* (nav_after: once the band is gone from the panel) */
+        N.pos = K.to / 1000u;
+        if (nav_top() == &pg_np)
+            np_inval_band();
         break;
     }
 }
@@ -1621,13 +1778,13 @@ static const char *set_verb(int i, int hold)
     const set_t *s = &GRP.rows[i < GRP.n ? i : 0];
 
     if (hold)
-        return s->field ? "DEFAULT" : "";
+        return np_loaded() ? "PLAYING" : s->field ? "DEFAULT" : "";
     return s->kind == S_OPEN || s->kind == S_DO ? "OPEN" : s->kind == S_INFO ? "" : "CHANGE";
 }
 
 
 const page_t pg_set = {
-    .name = "settings", .kind = PK_LIST, .icon = ICON_GEAR, .live = 1, .keys = k_list, .title_fn = set_title,
+    .name = "settings", .kind = PK_LIST, .icon = ICON_GEAR, .live = 1, .keys = k_menu, .title_fn = set_title,
     .count = set_count, .row = set_row, .act = set_act, .verb = set_verb,
 };
 

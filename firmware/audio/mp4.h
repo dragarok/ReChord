@@ -44,5 +44,8 @@ typedef struct {
 void mp4_cursor(mp4_cur_t *c);
 /* Next sample: 1 (off, size set), 0 at the end, < 0 on a read error. */
 int mp4_next(mp4_read_at_t rd, void *u, const mp4_info_t *mi, mp4_cur_t *c, uint32_t *off, uint32_t *size);
+/* The cursor at sample k (< nsamples), as if mp4_next had walked there; *before = the bytes of the
+ * samples before it (a seek: what the stream no longer carries). 0, or < 0 (bad tables, I/O). */
+int mp4_seek(mp4_read_at_t rd, void *u, const mp4_info_t *mi, mp4_cur_t *c, uint32_t k, uint32_t *before);
 
 #endif
