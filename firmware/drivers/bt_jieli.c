@@ -141,6 +141,11 @@ static void uart_close(void)
 #define T_RETRY_MS        10000u        /* after stock's two tries: 10 s, 20 s, then every 30 s. A CLER
                                          * there came 5-8 s after a CL06 (earphones in their case) */
 #define T_RETRY_MAX_MS    30000u
+/* [ours], from the device log of 2026-10-18 (log/ECHOLOG_20261018_round3.txt): earphones in their case
+ * refuse every try (CLER), and while music plays on the jack the run never ends, a try and its lines
+ * every 30 s. After 12 tries (about 4 min) every 2 min; the tries' lines from then on every 5th. */
+#define T_RETRY_SLOW_MS   120000u
+#define RC_SLOW_AFTER     12u
 #define T_LOST_MS         2000u         /* a lost link: the first try 2 s later */
 #define T_CL_ECHO_MS      5000u         /* a CLOK this soon after our CL06 answers it, even linked */
 #define T_STOP_MS         300u          /* a stop reaches the module once it lasted 300 ms: a USB host
@@ -296,7 +301,15 @@ static uint32_t rc_gap(void)
 {
     if (s_rc_n < 2)
         return T_RECONNECT_MS;          /* stock's two tries, 3 s apart (ram:03067692) */
+    if (s_rc_n >= RC_SLOW_AFTER)
+        return T_RETRY_SLOW_MS;
     return s_rc_n == 2 ? T_RETRY_MS : s_rc_n == 3 ? 2u * T_RETRY_MS : T_RETRY_MAX_MS;
+}
+
+/* A reconnect try worth a line: the first ones, then every 5th of the slow ones */
+static int rc_logged(void)
+{
+    return s_rc_n <= RC_SLOW_AFTER || s_rc_n % 5u == 0;
 }
 
 /* Reconnect to s_peer, the first try (first_ms) after the module is up; why = NULL: not logged. */
@@ -537,7 +550,8 @@ static void frame(const bt_frame_t *f, uint32_t now)
     case BT_RX_ERR:                     /* CLER / CHER */
         if (s_state == BT_ON && s_rc) {
             s_paired_wait = 0;
-            log_printf("bt: reconnect refused (C%cER), try %u", f->cmd, s_rc_n);
+            if (rc_logged())
+                log_printf("bt: reconnect refused (C%cER), try %u", f->cmd, s_rc_n);
         } else if (s_state == BT_CONNECTING) {
             log_printf("bt: connect failed (C%cER)", f->cmd);
             go(BT_ON);
@@ -667,8 +681,8 @@ void bt_poll(void)
     if (s_state == BT_ON && s_rc && now - s_rc_t >= rc_gap() && !(s_rc_n >= 2 && s_paired_wait)) {
         s_rc_n++;
         s_rc_t = now;
-        if (s_rc_n > 2)
-            log_printf("bt: reconnect try %u", s_rc_n);
+        if (s_rc_n > 2 && rc_logged())
+            log_printf("bt: reconnect try %u%s", s_rc_n, s_rc_n == RC_SLOW_AFTER ? " (every 2 min from now)" : "");
         s_cl_t = time_stamp(now);
         tx_mac('L', s_peer.mac);
     }
