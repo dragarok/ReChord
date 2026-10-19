@@ -594,6 +594,9 @@ static void wq_drop_sd(void)
  * read and write refused); services/sdcard.c unmounts it (emmc_wq_stats()->sd_fail). */
 static void __attribute__((noinline)) sd_fail(int code)
 {
+    if (Q.st.sd_fail)                        /* (the first reason stays: a big write that found the
+                                              * card failed must not make it "removed") */
+        return;
     Q.st.errors++;
     Q.st.last_error = code;
     Q.st.sd_fail = code;
@@ -1113,12 +1116,12 @@ int sd_write(uint32_t lba, uint32_t count, const void *buf)
     watchdog_feed();
     if (count == 0u)
         return 0;
+    emmc_sync();                             /* (first: a card that fails in it has 0 sectors then) */
     if ((r = sd_check(lba, count)))
         return r;
-    emmc_sync();
     select_mmc(1);
     for (int i = 0; ; i++) {
-        if (sd_out() || Q.st.sd_fail)
+        if (sd_out())
             return SD_ERR_NOCARD;
         r = block_write_once(card_arg(1, lba), count, buf);
         if (!r || i == 2)
