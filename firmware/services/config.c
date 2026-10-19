@@ -29,6 +29,7 @@ static const char *const k_cpu[] = { "auto", "max" };
 static const char *const k_display[] = { "pio", "vop", "dma", "gpio", "auto" };
 static const char *const k_hifi[] = { "auto", "off", "verify" };      /* AS_HIFI_* */
 static const char *const k_cpu_b[] = { "96", "auto", "stock" };       /* CFG_CPU_B_* */
+const char *const g_eq_names[8] = { "Off", "Retro", "Bass", "Heavy", "Pop", "Jazz", "Unique", "Custom" };
 
 static uint32_t s_hash, s_save_at;
 static int s_idle_only;              /* the save waiting is the volume's alone: not while playing */
@@ -57,6 +58,8 @@ void config_defaults(void)
     g_cfg.hifi = 0;                          /* auto */
     g_cfg.cpu_b = CFG_CPU_B_96;              /* the FLAC point off until asked for (services/cpuclk.h) */
     g_cfg.theme = 0;                         /* Classic */
+    g_cfg.eq = 0;                            /* Off, Custom flat */
+    memset(g_cfg.eq_gain, 0, sizeof g_cfg.eq_gain);
 }
 
 void config_reset(void)
@@ -121,6 +124,16 @@ static void set(const char *k, const char *v)
         g_cfg.hifi = (uint8_t)i;
     else if (!strcmp(k, "cpu_b") && (i = pick(v, k_cpu_b, 3)) >= 0)
         g_cfg.cpu_b = (uint8_t)i;
+    else if (!strcmp(k, "eq") && (i = pick(v, g_eq_names, 8)) >= 0)
+        g_cfg.eq = (uint8_t)i;
+    else if (!strcmp(k, "eq_gains")) {     /* up to 10, comma-separated (core B and the editor take
+                                            * -12..12 only: coreb/eq_design.c, ui/eq_page.c) */
+        for (i = 0; i < 10 && *v; i++) {
+            g_cfg.eq_gain[i] = (int8_t)atoi(v);
+            while (*v && *v++ != ',')
+                ;
+        }
+    }
     else if (!strcmp(k, "usb_out") && (i = pick(v, k_off_on, 2)) >= 0)
         g_cfg.usb_out = (uint8_t)i;
     else if (!strcmp(k, "usb_out_ma") && (i = atoi(v)) >= 100 && i <= 500)
@@ -291,6 +304,10 @@ static int text_of(char *t, unsigned long cap)
             return n + d;
         n += d;
     }
+    n += snprintf(t + n, cap - (unsigned long)n, "eq=%s\neq_gains=", g_eq_names[g_cfg.eq & 7u]);
+    for (int k = 0; k < 10; k++)                    /* (40 B at most: the text stays far below cap) */
+        n += snprintf(t + n, cap - (unsigned long)n, "%d,", g_cfg.eq_gain[k]);
+    t[n - 1] = '\n';                                /* (the last comma) */
     if (g_cfg.theme && theme_name(g_cfg.theme)) {   /* (written only when not Classic) */
         int d = snprintf(t + n, cap - (unsigned long)n, "theme=%s\n", theme_name(g_cfg.theme));
 

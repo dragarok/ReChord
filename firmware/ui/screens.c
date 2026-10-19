@@ -5,7 +5,7 @@
  * questions (cable, power menu, restore defaults) and the viewers (About, Diagnostics, Battery,
  * the USB disk session). Bluetooth's screen is startup/ap_bt.c.
  *
- * Not built yet, so not in the tree (no dead rows): Library (needs the tag index), EQ,
+ * Not built yet, so not in the tree (no dead rows): Library (needs the tag index),
  * ReplayGain, volume limit, sleep timer, clock, Visualizer, Key guide, letter jumps.
  */
 #include <stdio.h>
@@ -1603,7 +1603,15 @@ typedef struct {
     uint8_t arg, cable;                   /* S_OPEN's argument; cable: greyed without the cable */
 } set_t;
 
+extern const page_t pg_eq;
 static void apply_play(void) { queue_set_mode(g_cfg.play); }
+static void open_eq(void) { nav_push(&pg_eq, 0); }
+static void apply_eq(void)
+{
+    audio_eq();
+    if (g_cfg.eq == 7)                     /* Custom: its bands, once the list has closed */
+        ap_later(open_eq);
+}
 static void apply_bright(void) { power_brightness_changed(); }
 static void restore_q(void);
 extern const page_t pg_restore;
@@ -1630,6 +1638,9 @@ static const set_t g_playback[] = {
     { ICON_REPEAT, S_CYCLE, 4, Q_NORMAL, "Play mode", &g_cfg.play, k_modes, apply_play },
     { ICON_PLAY, S_CYCLE, 3, CFG_RESUME_FOLDER, "Resume at power-on", &g_cfg.resume, n_resume },
     { ICON_NOTE, S_CYCLE, 2, 1, "Show", &g_cfg.tags, n_show },
+    /* the EQ (coreb/eq.h): stock's list, applied as it is picked (crossfaded on core B); Custom opens
+     * its bands */
+    { ICON_EQ, S_CHOICE, 8, 0, "EQ", &g_cfg.eq, g_eq_names, apply_eq },
 };
 static const set_t g_display[] = {
     { ICON_SUN, S_THEME, 0, 0, "Theme", &g_cfg.theme },
@@ -1670,7 +1681,7 @@ static const set_t g_dev[] = {
     { ICON_SUN, S_DO, 0, 0, "Panel TE (test)", 0, 0, ap_te_probe },
 };
 static const struct { const char *title; uint8_t icon, n; const set_t *rows; } k_groups[] = {
-    { "Settings", ICON_GEAR, 6, g_root }, { "Playback", ICON_PLAY, 3, g_playback },
+    { "Settings", ICON_GEAR, 6, g_root }, { "Playback", ICON_PLAY, 4, g_playback },
     { "Display", ICON_SUN, 3, g_display }, { "Power", ICON_POWER, 3, g_power },
     { "USB", ICON_USB, 6, g_usb }, { "System", ICON_INFO, 4, g_system }, { "Developer", ICON_BUG, 11, g_dev },
 };
@@ -1923,6 +1934,25 @@ const page_t pg_slider = {
     .act = sl_act, .enter = sl_enter, .draw = sl_draw,
 };
 
+/* Settings > Playback > EQ > Custom: ten bands, a bar each; VOL+/VOL- the band's gain (-12..+12 dB),
+ * PLAY the next band, PLAY held the band to 0 dB. Each change is heard at once. Its code is
+ * ui/eq_page.c, in an overlay (startup/ap_ovl.c ap_eq). */
+static const keydef_t k_eqed[] = {
+    { KEY_UP, IG_DOWN, A_VOL_UP, "+" }, { KEY_UP, IG_REPEAT, A_VOL_UP, NULL },
+    { KEY_DOWN, IG_DOWN, A_VOL_DN, MINUS }, { KEY_DOWN, IG_REPEAT, A_VOL_DN, NULL },
+    { KEY_SELECT, IG_TAP, A_DONE, "NEXT" }, { KEY_SELECT, IG_HOLD, A_DEFAULT, "0 dB" },
+    { KEY_MENU, IG_TAP, A_NP, "PLAYING" },
+    { KEY_BACK, IG_TAP, A_CANCEL, "BACK" }, { KEY_BACK, IG_HOLD, A_HOME, "HOME" },
+    { 0 }
+};
+void ap_eq(int a, int i);
+static void eq_draw(void) { ap_eq(-1, 0); }
+
+const page_t pg_eq = {
+    .name = "eq", .kind = PK_CUSTOM, .icon = ICON_EQ, .keys = k_eqed, .title = "Custom EQ",
+    .act = ap_eq, .draw = eq_draw,
+};
+
 /* ---- questions (2.2 Q): a prompt, up to four choices; audio keeps playing ---------------------- */
 
 static void q_prompt(int icon, uint16_t c, const char *l1, const char *l2)
@@ -2072,6 +2102,7 @@ static void rq_act(int a, int i)
         queue_set_mode(g_cfg.play);
         theme_load_index(g_cfg.theme);
         power_brightness_changed();
+        audio_eq();                       /* (EQ off now, not at the next play) */
         config_save_later();
         ui_invalidate_all();
         nav_toast(ICON_CHECK, TOAST_TEXT, "Settings restored");

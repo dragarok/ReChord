@@ -56,7 +56,7 @@ CFW_ELF := $(CFW_BUILD_DIR)/rechord_ap.elf
 # ---- core B (decoder) images: one per codec family, linked at 0. They live in the
 # firmware slot (make_fw1 --module), core A loads the one a track needs. ----
 COREB_DIR  := build/coreb
-COREB_RT   := b_startup b_main b_libc b_selftest
+COREB_RT   := b_startup b_main b_libc b_selftest b_msg b_eq eq eq_design
 COREB_MAD  := $(patsubst %,libmad/%,bit fixed frame huffman layer12 layer3 stream synth timer)
 COREB_ALAC := $(patsubst %,alac/%,ag_dec dp_dec ALACBitUtilities alac_dec)
 COREB_FAAD := $(patsubst firmware/coreb/%.c,%,$(wildcard firmware/coreb/faad/*.c))
@@ -116,6 +116,8 @@ $(COREB_DIR)/wavpack/%.o $(COREB_DIR)/b_wavpack.o: COREB_CFLAGS += $(COREB_WV_DE
 $(COREB_DIR)/tremor/%.o $(COREB_DIR)/ogg/%.o $(COREB_DIR)/b_vorbis.o: COREB_CFLAGS += -Ifirmware/coreb/tremor -Ifirmware/coreb/ogg -w -Dalloca=__builtin_alloca
 $(COREB_DIR)/b_alac.o: COREB_CFLAGS += -Ifirmware/coreb/alac
 $(COREB_DIR)/dsd/%.o: COREB_CFLAGS += -O3
+# the EQ (coreb/eq.h): its filters (eq.c) at -O2, the design and the glue, run once a curve, at -Os
+$(COREB_DIR)/eq_design.o $(COREB_DIR)/b_eq.o $(COREB_DIR)/b_msg.o: COREB_CFLAGS += -Os
 $(COREB_DIR)/demac/%.o: COREB_CFLAGS += -Wno-unused-variable
 $(COREB_DIR)/demac/decoder.o: COREB_CFLAGS += -DDEMAC_RECHORD_HIFI   # (coreb/b_hifi_ape.c)
 # Rockbox libwma / libwmapro (fixed point, C paths: Rockbox's ARM asm is ARM-mode), FFmpeg's

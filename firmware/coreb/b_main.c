@@ -19,6 +19,9 @@
 #include <string.h>
 
 #include "b_rt.h"
+#include "eq.h"
+
+extern eq_t b_eq;                        /* b_eq.c */
 
 #define SYST_CSR  (*(volatile uint32_t *)0xE000E010u)
 #define SYST_RVR  (*(volatile uint32_t *)0xE000E014u)
@@ -395,6 +398,7 @@ static int track_open(void)
         s_dec = NULL;
         return -1;
     }
+    b_eq_open();                                /* (b_eq.c: a stream at another rate starts from zero) */
     return 0;
 }
 
@@ -442,6 +446,7 @@ static void track_close(void)
     AS->trk_cyc_hi = (uint32_t)(s_trk_cyc >> 32);
     __asm__ volatile ("dmb" ::: "memory");
     AS->trk_seq = b_trk.seq;
+    b_eq_close(AS->b_hz);
     s_dec = NULL;
     discard_rest();
     AS->done_seq = b_trk.seq;
@@ -649,6 +654,13 @@ static int produce(void)
         for (uint32_t i = got; i-- > 0; )
             dst[2 * i] = dst[2 * i + 1] = dst[i];
     }
+    /* the EQ (b_eq.c), in place: in bypass only this test runs */
+    if (got && (b_eq.on || AS->eq_seq != b_eq_seq || b_eq_dirty)) {
+        uint32_t c0 = rt_cycles();
+
+        b_eq_step(dst, got);
+        b_eq_cyc += rt_since(c0);
+    }
     AS->cur_frames += got;
     if (raw == 0 || (b_trk.frames && AS->cur_frames >= b_trk.frames))
         track_close();                               /* the next track fills the same block */
@@ -679,6 +691,7 @@ static void stop_all(void)
     AS->in_rd = AS->in_wr;
     s_fill = s_resync = 0;
     s_discard_seq = 0;
+    b_eq_stop();
     AS->state = AS_B_READY;
 }
 

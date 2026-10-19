@@ -45,12 +45,17 @@ typedef struct {
                                   * (audio_shared.h AS_HIFI_*, docs/HIFI.md); written when not auto */
     uint8_t cpu_b;               /* cpu_b=96|auto|stock: core B's clock while playing (services/cpuclk.h,
                                   * docs/CPU_CLOCK.md); written when not 96 */
+    /* the EQ (coreb/eq.h; core B runs it): eq=Off|Retro|Bass|Heavy|Pop|Jazz|Unique|Custom, stock's names
+     * and order; eq_gains=g1,..,g10: Custom's bands 31.25 Hz .. 16 kHz in dB, -12..12 (RECHO's format) */
+    uint8_t eq;
+    int8_t eq_gain[10];          /* (right after eq: core B reads the 11 bytes, audio_shared.h eq_src) */
 } config_t;
 enum { CFG_CPU_B_96 = 0, CFG_CPU_B_AUTO = 1, CFG_CPU_B_STOCK = 2 };
 #define CFG_DISPLAY_AUTO 4       /* = PANEL_PATH_AUTO (drivers/panel_io.h): the build's default path */
 #define CFG_BT_VOLUME_UNSET 127
 
 extern config_t g_cfg;
+extern const char *const g_eq_names[8];   /* eq= values, as the Settings list shows them */
 
 void config_defaults(void);      /* RECHO's defaults; browse/track/volume kept unless all */
 void config_reset(void);         /* everything to defaults */

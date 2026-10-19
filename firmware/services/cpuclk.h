@@ -24,9 +24,11 @@
  * high at 284 M cycles/s for 105 M QEMU instructions/s; the task brief, FINDINGS.md). */
 #define CPUCLK_DEVICE_CPI_X100 260u
 
-/* The point for a track about to be queued (CLOCK_POINT_*): cpu_b, the estimate, the record.
- * extra: APE compression level (1000..5000), DSD rate multiple (1, 2, 4); 0 otherwise. */
-unsigned cpuclk_point_for(const as_track_t *t, uint32_t extra, int usb_out);
+/* The point for a track about to be queued (CLOCK_POINT_*): cpu_b, the estimate (with the EQ as set),
+ * the record. extra: APE compression level (1000..5000), DSD rate multiple (1, 2, 4); 0 otherwise.
+ * Also sets t->eq: the estimate's core-B instructions a frame, from which core B works out the EQ
+ * sections that fit (coreb/b_eq.c). */
+unsigned cpuclk_point_for(as_track_t *t, uint32_t extra, int usb_out);
 /* Main loop, before the first FLAC track of the boot is queued: the record marked "in flight" on
  * the eMMC (a boot that dies in the switch or the self-test leaves it). 0 = the point may be used. */
 int cpuclk_arm(void);

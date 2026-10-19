@@ -54,4 +54,15 @@ void b_probe(void);
 /* Core B's half of the clock self-test (b_selftest.c), run while it holds (b_main.c b_hold). */
 void b_selftest(void);
 
+/* A line for core A's log (b_msg.c: %u %d %x %s, %0Nu %0Nx), dropped when core A has 4 unread. */
+void b_msg(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+
+/* The EQ (b_eq.c, eq.h): at a track's open and close, a decode step's frames, a stop. */
+void b_eq_open(void);
+void b_eq_step(int32_t *dst, uint32_t frames);
+void b_eq_close(uint32_t hz);
+void b_eq_stop(void);
+extern uint32_t b_eq_seq, b_eq_dirty;
+extern uint64_t b_eq_cyc;
+
 #endif

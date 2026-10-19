@@ -36,6 +36,7 @@ void audio_poll(void);
 int audio_status(audio_status_t *st);
 /* DAC volume in dB, clamped to -60..0 (default -40); returns the value set. */
 int audio_set_volume_db(int db);
+void audio_eq(void);                 /* g_cfg.eq / eq_gain to core B (coreb/b_eq.c): crossfaded in */
 int audio_get_volume_db(void);
 
 /* External PCM source (the USB DAC): the player stops, core B is held in reset,

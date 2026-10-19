@@ -3,7 +3,8 @@
  * which firmware_ap.ld places in the overlay, and the resident gates in front of them.
  *
  *   usbdac  the USB DAC (UAC2): drivers/usb_uac_rknanoc.c and the session (startup/ap_ui.c)
- *   usbout  USB-C earphones, the player as USB host: drivers/usb_out_rknanoc.c
+ *   usbout  USB-C earphones, the player as USB host: drivers/usb_out_rknanoc.c; and the Custom EQ
+ *           editor (ui/eq_page.c), which must never evict them
  *   dev     the Developer tests: DAC test, USB console (drivers/usb_cdc_rknanoc.c), USB-C probe,
  *           USB detect, BT listen (drivers/bt_jieli.c bt_listen), Panel TE (drivers/panel_io_rknanoc.c
  *           panel_te_probe), SD card test (services/sd_selftest.c) -- startup/ap_ui.c
@@ -108,6 +109,7 @@ typedef struct {
     int (*streaming)(void);
     void (*pause)(int on);
     int (*set_volume)(int db);
+    void (*eq)(int a, int i);        /* Settings > Playback > EQ > Custom (ui/eq_page.c), here as well */
 } usbout_api_t;
 
 int __real_usb_out_active(void);
@@ -122,12 +124,13 @@ void __real_usb_out_release(void);
 int __real_usb_out_streaming(void);
 void __real_usb_out_pause(int on);
 int __real_usb_out_set_volume(int db);
+void eq_page(int a, int i);          /* ui/eq_page.c */
 
 static const usbout_api_t k_usbout OVL_API(usbout) = {
     __real_usb_out_active, __real_usb_out_status, __real_usb_out_start, __real_usb_out_stop,
     __real_usb_out_poll, __real_usb_out_set_format, __real_usb_out_stream_start,
     __real_usb_out_stream_stop, __real_usb_out_release, __real_usb_out_streaming, __real_usb_out_pause,
-    __real_usb_out_set_volume,
+    __real_usb_out_set_volume, eq_page,
 };
 OVL_HEADER(usbout, OVL_USBOUT, &k_usbout);
 
@@ -213,6 +216,14 @@ void __wrap_usb_out_pause(int on)
 int __wrap_usb_out_set_volume(int db)
 {
     return GATE(ovl_if, OVL_USBOUT, usbout_api_t, -1, set_volume(db));
+}
+
+/* The Custom EQ editor (ui/screens.c pg_eq, ui/eq_page.c) is in the usbout overlay: USB-C earphones
+ * keep it in the window while they are on, so the editor never evicts them (any other overlay would,
+ * at every main-loop pass). Refused (damaged: ovl.c logs why): the page stays blank; BACK held leaves it. */
+void ap_eq(int a, int i)             /* the page's act; its draw with a = -1 */
+{
+    GATE_V(ovl_get, OVL_USBOUT, usbout_api_t, eq(a, i));
 }
 
 /* ---- dev: the Developer tests (Settings > Developer, ui/screens.c) ------------------------------ */

@@ -1488,6 +1488,14 @@ static void as_init(void)
         s_as_init = 1;
     }
     AS->hifi_mode = g_cfg.hifi;              /* (core B reads it at its first FLAC LPC subframe) */
+    AS->eq_src = (uint32_t)&g_cfg.eq;        /* (core B reads the EQ there: audio_shared.h) */
+    audio_eq();
+}
+
+void audio_eq(void)                          /* g_cfg's EQ changed: core B takes it (coreb/b_eq.c) */
+{
+    __asm__ volatile ("dmb" ::: "memory");   /* (the curve before the count that publishes it) */
+    AS->eq_seq++;
 }
 
 /* Developer > HIFI probe (audio/hifi_probe.c, in the dev overlay): the player stopped and a fresh
@@ -1808,8 +1816,12 @@ void audio_poll(void)
         return;
     }
     /* B ended the DMA chain: once the last block has played and been recycled,
-     * either the stream is over, or the next track needs another sample rate */
-    if (s_dma_on && !out_running() && AS->pcm_played == AS->pcm_wr) {
+     * either the stream is over, or the next track needs another sample rate. Or past that block:
+     * B ended the chain while underrunning with the DMA already beyond it, the DMA went one more lap
+     * of silence, and the underrun recycle_blocks then counted moved pcm_wr on, so the two never meet
+     * (QEMU, ReChord eq branch: APE 24/96 extra high at 96 MHz then ALAC 16/44.1, m43's d_rateswitch,
+     * hung in 5 of 8 runs: pcm_wr 0x1c4e, pcm_played 0x1c4d, pcm_end 0x1c46, state RATE) */
+    if (s_dma_on && !out_running() && (int32_t)(AS->pcm_played - (AS->pcm_end ? AS->pcm_end : AS->pcm_wr)) >= 0) {
         if (AS->state == AS_B_RATE)
             stream_switch();
         else if (AS->state == AS_B_ENDED) {
