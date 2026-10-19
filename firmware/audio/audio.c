@@ -1480,6 +1480,14 @@ static void as_init(void)
         s_as_init = 1;
     }
     AS->hifi_mode = g_cfg.hifi;              /* (core B reads it at its first FLAC LPC subframe) */
+    AS->eq_src = (uint32_t)&g_cfg.eq;        /* (core B reads the EQ there: audio_shared.h) */
+    audio_eq();
+}
+
+void audio_eq(void)                          /* g_cfg's EQ changed: core B takes it (coreb/b_eq.c) */
+{
+    __asm__ volatile ("dmb" ::: "memory");   /* (the curve before the count that publishes it) */
+    AS->eq_seq++;
 }
 
 /* Developer > HIFI probe (audio/hifi_probe.c, in the dev overlay): the player stopped and a fresh

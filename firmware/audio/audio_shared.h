@@ -41,7 +41,7 @@
 #define AS_LLI            (AS_PCM_RING - 0x100u)   /* 8 x 28 B, just below the ring (SRAM ends at 0x030A0000) */
 
 #define AS_MAGIC          0x4F445541u   /* "AUDO" */
-#define AS_VERSION        13u
+#define AS_VERSION        14u
 #define AS_QUEUE          4u
 
 enum { AS_CODEC_FLAC = 1, AS_CODEC_WAV = 2, AS_CODEC_MP3 = 3, AS_CODEC_AIFF = 4, AS_CODEC_AAC = 5, AS_CODEC_ALAC = 6,
@@ -82,6 +82,8 @@ typedef struct {
                               * from the frame (or block, packet) the stream starts at to the target */
     uint32_t clk;            /* the CPU point the track plays at (drivers/clock.h CLOCK_POINT_*): A's
                               * choice at queue time (services/cpuclk.c); B asks for it at its open */
+    uint32_t eq;             /* A: the format's core-B instructions a frame (services/cpuclk.c, its
+                              * estimate): B fits the EQ in what is left at the point (coreb/b_eq.c room) */
 } as_track_t;
 
 typedef struct {
@@ -186,6 +188,12 @@ typedef struct {
      * per-track line (audio.c "clock: track") */
     volatile uint32_t trk_seq, trk_frames, trk_rate, trk_hz, trk_point;
     volatile uint32_t trk_cyc_lo, trk_cyc_hi;
+    /* The EQ (coreb/eq.h, coreb/b_eq.c): the curve stays in core A's settings (services/config.h:
+     * g_cfg.eq, then eq_gain[10], RECHORD.CFG eq= and eq_gains=); A changes it, then bumps eq_seq; B
+     * reads it at its next decode step (a ~21 ms crossfade), on a track with room for it, and acks. */
+    volatile uint32_t eq_src;        /* A: the system address of g_cfg.eq (11 bytes: mode, 10 gains) */
+    volatile uint32_t eq_seq;        /* A */
+    volatile uint32_t eq_ack;        /* B: the eq_seq in effect */
 } audio_shared_t;
 
 /* hifi_mode: auto = the HIFI block for FLAC LPC, APE's NN filters and ALAC's LPC, each once its

@@ -110,12 +110,14 @@ SECTIONS
                      .text.uac_status* .text.dac_power_only* .rodata.dac_power_only.*)
             . = ALIGN(4);
         }
-        /* USB-C earphones: the player as USB host */
+        /* USB-C earphones: the player as USB host; and the Custom EQ editor (startup/ap_ovl.c: it
+           must never evict them) */
         .ovl_usbout
         {
             KEEP(*(.ovl_hdr.usbout))
             *(.ovl.usbout.*)
             *usb_out_rknanoc.o(.text* .rodata*)
+            *eq_page.o(.text* .rodata*)
             . = ALIGN(4);
         }
         /* the Developer tests (Settings > Developer) */

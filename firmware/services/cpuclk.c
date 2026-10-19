@@ -16,6 +16,7 @@
 #include "log.h"
 #include "watchdog.h"
 #include "audio/selftest_kernel.h"
+#include "coreb/eq.h"
 #include "drivers/clock.h"
 #include "drivers/panel_io.h"
 
@@ -105,17 +106,22 @@ static uint32_t insn_per_frame(const as_track_t *t, uint32_t extra)
     }
 }
 
-unsigned cpuclk_point_for(const as_track_t *t, uint32_t extra, int usb_out)
+unsigned cpuclk_point_for(as_track_t *t, uint32_t extra, int usb_out)
 {
-    uint64_t cyc;
+    /* the EQ's sections (coreb/eq.h: the presets' counts; Custom as all ten, its edits come later) */
+    static const uint8_t k_n[EQ_MODES] = EQ_PRESET_SECTIONS;
+    uint32_t n = k_n[g_cfg.eq & 7u];
 
+    /* core B works out from this how many EQ sections fit at the point it plays at (b_eq.c room) */
+    t->eq = insn_per_frame(t, extra);
     if (g_cfg.cpu_b == CFG_CPU_B_96 || s_failed || usb_out)
         return CLOCK_POINT_UI;
     if (g_cfg.cpu_b == CFG_CPU_B_STOCK)
         return CLOCK_POINT_FLAC;
-    /* device cycles a second at the UI point, against 60 % of 96 MHz (b_main.c choose_clock's line) */
-    cyc = (uint64_t)insn_per_frame(t, extra) * t->rate * CPUCLK_DEVICE_CPI_X100 / 100u;
-    return cyc > 96000000ull * 60u / 100u ? CLOCK_POINT_FLAC : CLOCK_POINT_UI;
+    /* device cycles a second at the UI point (the format, and the EQ as set but on DSD), against 60 %
+     * of 96 MHz (b_main.c choose_clock's line) */
+    return (uint64_t)(t->eq + (n && t->codec != AS_CODEC_DSD ? EQ_INSN_FRAME + n * EQ_INSN_SECTION : 0u)) *
+           t->rate * CPUCLK_DEVICE_CPI_X100 / 100u > 96000000ull * 60u / 100u ? CLOCK_POINT_FLAC : CLOCK_POINT_UI;
 }
 
 /* ---- the record --------------------------------------------------------------- */
