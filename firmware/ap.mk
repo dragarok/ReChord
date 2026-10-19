@@ -100,6 +100,7 @@ AP_SERVICE_SRCS := \
   firmware/services/scratch.c \
   firmware/services/fs_target.c \
   firmware/services/fs_write_ext.c \
+  firmware/services/sdcard.c \
   firmware/services/screenshot.c \
   firmware/services/tags.c \
   firmware/services/modules.c \

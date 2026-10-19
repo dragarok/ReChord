@@ -28,6 +28,7 @@
 #include "drivers/usb_out.h"
 #include "drivers/usb_msc.h"
 #include "services/fs.h"
+#include "services/fs_target.h"
 #include "services/log.h"
 #include "services/modules.h"
 #include "services/dirlist.h"
@@ -723,6 +724,8 @@ static int open_next(void)
 
         if (queue_take(&ref, &kind, &pos) != 0)
             return -1;
+        if (fs_target_gone(ref.vol))
+            return -2;                       /* the SD card is being pulled: services/sdcard.c stops us */
         if (fs_ref_name(&ref, name, sizeof name) != 0)
             strcpy(name, "?");
         s_file = fs_open_ref(&ref);
@@ -847,7 +850,11 @@ static void refill(void)
         if (!s_file) {
             if (AS->in_closed || AS->q_wr - AS->q_rd >= AS_QUEUE - 1u)
                 return;
-            if (open_next() != 0) {
+            int r = open_next();
+
+            if (r == -2)
+                return;
+            if (r) {
                 log_printf("audio: end of the playlist after %u tracks", (unsigned)s_seq);
                 AS->in_closed = 1;           /* end of the playlist */
                 return;
@@ -930,6 +937,8 @@ static void refill(void)
             if (k > 16384u)
                 k = 16384u;                 /* bound the time spent per tick */
             n = fs_read(s_file, ring + off, k);
+            if (n == FS_ERR_GONE)           /* the card is out: wait (a glitch) or be stopped */
+                return;
             if (n <= 0) {                   /* read error: B was promised the bytes, */
                 static uint32_t logged;     /* (once per track: a bad card would flood the log) */
 
