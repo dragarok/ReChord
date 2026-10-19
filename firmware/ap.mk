@@ -201,7 +201,7 @@ AP_CFLAGS := $(AP_ARCH_FLAGS) -Os -Wall \
 # holds: firmware_ap.ld (its OVERLAY list). AP_OVLS: output section -> module name in the image.
 # AP_OVL_WRAP: the overlays' functions resident code calls by name; each call from another object
 # reaches a gate (__wrap_<name>, firmware/startup/ap_ovl.c) that loads or checks the overlay.
-AP_OVLS := usbdac:ov_dac usbout:ov_uout dev:ov_dev fsw:ov_fsw lib:ov_lib libtag:ov_ltag
+AP_OVLS := usbdac:ov_dac usbout:ov_uout dev:ov_dev fsw:ov_fsw lib:ov_lib libtag:ov_ltag lwalk:ov_lwalk lbuild:ov_lbld
 comma := ,
 AP_OVL_WRAP := $(addprefix -Wl$(comma)--wrap=,usb_uac_key \
   usb_out_active usb_out_status usb_out_start usb_out_stop usb_out_poll usb_out_set_format \

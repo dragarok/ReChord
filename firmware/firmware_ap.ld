@@ -72,11 +72,14 @@ MEMORY
        (the loader's data sits there while it boots us, SDK BuildAll.sct LOADER_DATA_BASE
        0x0304A000, docs/community.md 4.2, and is dead once our code runs). OVL_WIN 14 KiB (its
        largest overlay is under 11 KiB), then OVL_FS, 8 KiB (the file system's writer), then
-       OVL_LIB, 38 KiB to 0x0304F000: the music library alone, so it never takes a window from
-       the USB DAC or USB-C earphones. Code and read-only data only: an overlay's .data and .bss
-       are resident. */
+       the music library's 38 KiB to 0x0304F000, so it never takes a window from the USB DAC or
+       USB-C earphones: OVL_LIB (26 KiB: the job's dispatcher, the views, the lists, the screens)
+       and OVL_LPH (12 KiB at 0x0304C000: the job's walk or its build, by turns; one job phase at a
+       time, services/lib_job.c). Code and read-only data only: an overlay's .data and .bss are
+       resident. */
     OVL_WIN (rx)  : ORIGIN = 0x03040000, LENGTH = 0x00003800
-    OVL_LIB (rx)  : ORIGIN = 0x03045800, LENGTH = 0x00009800
+    OVL_LIB (rx)  : ORIGIN = 0x03045800, LENGTH = 0x00006800
+    OVL_LPH (rx)  : ORIGIN = 0x0304C000, LENGTH = 0x00003000
 
     /* OVL_FS: the 8 KiB between them: the file-system writer's overlay (fsw) alone, loaded at its
        first use and never evicted, so it runs while any overlay is in OVL_WIN or OVL_LIB
@@ -170,6 +173,30 @@ SECTIONS
         *(.ovl.fsw.*)
         *fs_write_ext.o(.text* .rodata*)
         . = ALIGN(4);
+    }
+
+    /* the library job's phases (services/lib.h lib_phase_api_t), by turns in the phase window:
+       before .ovl_lib, whose lib_*.o takes the rest */
+    OVERLAY ORIGIN(OVL_LPH) : NOCROSSREFS AT (ORIGIN(OVL_STORE) + 0xD0000)
+    {
+        /* the walk: folders, signatures, tags into the RAW (lib_scan.c, lib_dir.c) */
+        .ovl_lwalk
+        {
+            KEEP(*(.ovl_hdr.lwalk))
+            *(.ovl.lwalk.*)
+            *lib_scan.o(.text* .rodata*)
+            *lib_dir.o(.text* .rodata*)
+            . = ALIGN(4);
+        }
+        /* the build: the views from the RAW, the external sort (lib_build.c, lib_sort.c) */
+        .ovl_lbuild
+        {
+            KEEP(*(.ovl_hdr.lbuild))
+            *(.ovl.lbuild.*)
+            *lib_build.o(.text* .rodata*)
+            *lib_sort.o(.text* .rodata*)
+            . = ALIGN(4);
+        }
     }
 
     /* the music library (services/lib.h, docs/LIBRARY.md): the index job, the views, the lists,
@@ -293,8 +320,20 @@ NOCROSSREFS_TO(.ovl_usbout .vectors .text .data .ovl_fsw)
 NOCROSSREFS_TO(.ovl_dev .vectors .text .data .ovl_fsw)
 NOCROSSREFS_TO(.ovl_lib .vectors .text .data .ovl_fsw)
 NOCROSSREFS_TO(.ovl_libtag .vectors .text .data .ovl_fsw)
-NOCROSSREFS_TO(.ovl_fsw .vectors .text .data .ovl_usbdac .ovl_usbout .ovl_dev .ovl_lib .ovl_libtag)
+NOCROSSREFS_TO(.ovl_fsw .vectors .text .data .ovl_usbdac .ovl_usbout .ovl_dev .ovl_lib .ovl_libtag .ovl_lwalk .ovl_lbuild)
 NOCROSSREFS(.ovl_lib .ovl_usbdac .ovl_usbout .ovl_dev .ovl_libtag)
+/* the phases call the library's code (.ovl_lib, always loaded before them), never the reverse */
+NOCROSSREFS_TO(.ovl_lwalk .vectors .text .data .ovl_fsw .ovl_lib .ovl_usbdac .ovl_usbout .ovl_dev .ovl_libtag)
+NOCROSSREFS_TO(.ovl_lbuild .vectors .text .data .ovl_fsw .ovl_lib .ovl_usbdac .ovl_usbout .ovl_dev .ovl_libtag)
+NOCROSSREFS(.ovl_lwalk .ovl_usbdac .ovl_usbout .ovl_dev .ovl_libtag)
+NOCROSSREFS(.ovl_lbuild .ovl_usbdac .ovl_usbout .ovl_dev .ovl_libtag)
+__ovl_lph_start = ORIGIN(OVL_LPH);
+__ovl_lph_end   = ORIGIN(OVL_LPH) + LENGTH(OVL_LPH);
+ASSERT(__ovl_lph_start >= ORIGIN(OVL_LIB) + LENGTH(OVL_LIB), "the phase window must not overlap the library's")
+ASSERT(__ovl_lph_end <= 0x0304F000, "the phase window must stay below the loaded image (0x0304F490)")
+ASSERT(ovl_hdr_lwalk == ORIGIN(OVL_LPH) && ovl_hdr_lbuild == ORIGIN(OVL_LPH), "the phases must start with their headers")
+ASSERT(SIZEOF(.ovl_lwalk) <= LENGTH(OVL_LPH), "the walk overlay is over the phase window")
+ASSERT(SIZEOF(.ovl_lbuild) <= LENGTH(OVL_LPH), "the build overlay is over the phase window")
 __ovl_fs_start = ORIGIN(OVL_FS);
 __ovl_fs_end   = ORIGIN(OVL_FS) + LENGTH(OVL_FS);
 ASSERT(__ovl_fs_start >= ORIGIN(OVL_WIN) + LENGTH(OVL_WIN), "the file system's window must not overlap the modes' window")

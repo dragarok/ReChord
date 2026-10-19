@@ -123,10 +123,17 @@ void lib_tmp_path(char *out, int n)
 
 enum { J_IDLE, J_SCAN, J_BUILD };
 
-void scan_abort(lib_job_t *j);
-void build_abort(lib_job_t *j);
-void build_forget(void);
-void srt_forget(void);
+/* The phase's code: the walk (J_SCAN) or the build (J_BUILD), each an overlay of its own in the
+ * phase window (lib.h): loaded here, at a phase's start or when it is not in the window, never
+ * while code in it runs (nothing there calls back into this file). NULL: refused (damaged). */
+#ifdef LIB_HOST
+static const lib_phase_api_t k_phase[2] = {
+    { scan_start, scan_step, scan_abort, 0 }, { build_start, build_step, build_abort, build_forget } };
+#define phase(b) (&k_phase[b])
+#else
+#include "ovl.h"
+#define phase(b) ((const lib_phase_api_t *)ovl_get((b) ? OVL_LBUILD : OVL_LWALK))
+#endif
 
 static void job_end(int ok)
 {
@@ -153,6 +160,7 @@ static void job_end(int ok)
 static void job_abort(const char *why)
 {
     lib_job_t *j = &s_job;
+    const lib_phase_api_t *ph;
 
     if (s_active < 0)
         return;
@@ -160,17 +168,15 @@ static void job_abort(const char *why)
                                                      * (FS_ERR_GONE), closed only to free them */
         fs_close(j->raw.f), fs_close(j->trk.f), fs_close(j->idx.f), fs_close(j->in.f), fs_close(j->srt.w.f);
         j->raw.f = j->trk.f = j->idx.f = j->in.f = j->srt.w.f = 0;
-        srt_forget();
-        build_forget();
+        if (j->state == J_BUILD && (ph = phase(1)))   /* (the walk holds no handles of its own) */
+            ph->forget();
     }
     if (s_gone[strncmp(g_lib_view[j->vol].dir, "/SD", 3) == 0]) {
         fs_close(j->old.f), fs_close(j->otrk.f);
         j->old.f = j->otrk.f = 0;        /* (the previous walk's, read from the view's place) */
     }
-    if (j->state == J_SCAN)
-        scan_abort(j);
-    else if (j->state == J_BUILD)
-        build_abort(j);
+    if ((j->state == J_SCAN || j->state == J_BUILD) && (ph = phase(j->state == J_BUILD)))
+        ph->abort(j);
     lib_log("lib: %s indexing stopped: %s", vol_name(j->vol), why);
     j->state = J_IDLE;
     s_active = -1;
@@ -181,8 +187,13 @@ static int job_start(int vol, int full)
 {
     lib_job_t *j = &s_job;
     lib_view_t *v = &g_lib_view[vol];
+    const lib_phase_api_t *ph = phase(0);
     int r;
 
+    if (!ph) {
+        lib_log("lib: %s: the walk's code is not usable (ovl.c says why)", vol_name(vol));
+        return -1;
+    }
     memset(j, 0, sizeof *j);
     j->vol = vol;
     j->full = full;
@@ -196,9 +207,10 @@ static int job_start(int vol, int full)
     g_lib.busy = 1;
     g_lib.busy_vol = (uint8_t)vol;
     g_lib.pct = 0;
-    r = scan_start(j);
-    if (r == LIB_WALKED && build_start(j) == 0) {
+    r = ph->start(j);
+    if (r == LIB_WALKED) {               /* (the build starts in the next slice: its code loaded then) */
         j->state = J_BUILD;
+        j->bph = -1;
     } else if (r) {
         lib_log("lib: %s: cannot write its index in %s", vol_name(vol), j->dir);
         s_active = -1;
@@ -366,7 +378,9 @@ int lib_step(void)
     {
         uint32_t rd0 = fs_target_nrd, wr0 = lib_slice_wr = fs_target_nwr;
 
-        r = j->state == J_SCAN ? scan_step(j, t_end) : j->bph < 0 ? (build_start(j) ? -1 : 0) : build_step(j, t_end);
+        const lib_phase_api_t *ph = phase(j->state == J_BUILD);
+
+        r = !ph ? -1 : j->state == J_SCAN ? ph->step(j, t_end) : j->bph < 0 ? (ph->start(j) ? -1 : 0) : ph->step(j, t_end);
         j->nrd0 += fs_target_nrd - rd0;
         j->nwr0 += fs_target_nwr - wr0;
     }

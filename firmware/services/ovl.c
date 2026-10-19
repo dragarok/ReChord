@@ -1,11 +1,13 @@
 /*
  * ovl.c -- the overlay windows on core A (ovl.h).
  *
- * Three windows (firmware_ap.ld): the modes' window (OVL_WIN: the USB DAC, USB-C earphones, the
+ * Four windows (firmware_ap.ld): the modes' window (OVL_WIN: the USB DAC, USB-C earphones, the
  * Developer tests, the library's tag reader, one at a time), the library's (OVL_LIB: the music
- * library alone) and the file system's (OVL_FS: the writer's cold half, fsw, alone). The last two
- * are loaded at their first use and never replaced, so they never take a window from USB-C
- * earphones playing, and code in any window can call the file system's writer.
+ * library alone), the file system's (OVL_FS: the writer's cold half, fsw, alone) and the library
+ * job's phase window (OVL_LPH: its walk or its build, carved from the library's own range). The
+ * second and third are loaded at their first use and never replaced, so they never take a window
+ * from USB-C earphones playing, and code in any window can call the file system's writer; the
+ * fourth is swapped by the library's job alone (services/lib_job.c), between its phases.
  *
  * Loading one: the one in its window leaves its mode (its stop hook, while it is still there), is
  * checked unchanged (a window holds code and constants only: its objects' .data and .bss stay
@@ -33,13 +35,14 @@
 extern uint8_t __ovl_win_start[], __ovl_win_end[];   /* firmware_ap.ld OVL_WIN */
 extern uint8_t __ovl_lib_start[], __ovl_lib_end[];   /* firmware_ap.ld OVL_LIB */
 extern uint8_t __ovl_fs_start[], __ovl_fs_end[];     /* firmware_ap.ld OVL_FS: fsw's alone */
+extern uint8_t __ovl_lph_start[], __ovl_lph_end[];   /* firmware_ap.ld OVL_LPH: the library job's phase */
 extern const char __ovl_abi[];                      /* absolute: this link's ABI (Makefile) */
 
-static uint8_t *const s_start[3] = { __ovl_win_start, __ovl_lib_start, __ovl_fs_start };
-static uint8_t *const s_end[3] = { __ovl_win_end, __ovl_lib_end, __ovl_fs_end };
+static uint8_t *const s_start[4] = { __ovl_win_start, __ovl_lib_start, __ovl_fs_start, __ovl_lph_start };
+static uint8_t *const s_end[4] = { __ovl_win_end, __ovl_lib_end, __ovl_fs_end, __ovl_lph_end };
 #define HDR(w) ((volatile ovl_hdr_t *)s_start[w])
 
-static unsigned s_cur[3];              /* OVL_NONE or the overlay in each window */
+static unsigned s_cur[4];              /* OVL_NONE or the overlay in each window */
 static unsigned s_hold;                /* calls running in the modes' window now (ovl_hold) */
 static uint32_t s_bad;                 /* refused for good this boot: bit per id */
 static const char *s_why[OVL_COUNT];

@@ -27,7 +27,8 @@
 #include <stdint.h>
 
 /* OVL_FSW: the file-system writer (services/fs_write_ext.c), the file system's window's only one */
-enum { OVL_NONE = 0, OVL_USBDAC, OVL_USBOUT, OVL_DEV, OVL_FSW, OVL_LIB, OVL_LIBTAG, OVL_COUNT };
+/* OVL_LWALK, OVL_LBUILD: the library job's walk and build, by turns in the library's phase window */
+enum { OVL_NONE = 0, OVL_USBDAC, OVL_USBOUT, OVL_DEV, OVL_FSW, OVL_LIB, OVL_LIBTAG, OVL_LWALK, OVL_LBUILD, OVL_COUNT };
 
 #define OVL_MAGIC 0x314C564Fu        /* "OVL1" */
 
@@ -49,8 +50,11 @@ typedef struct {
     void (*stop)(void);              /* leaves its mode before another overlay takes the window
                                       * (runs while it is still loaded); NULL: nothing to leave */
     uint8_t win;                     /* 0: the modes' window (OVL_WIN); 1: the library's (OVL_LIB);
-                                      * 2: the file system's (OVL_FS). 1 and 2 (firmware_ap.ld) hold
-                                      * one overlay each, loaded once, never replaced */
+                                      * 2: the file system's (OVL_FS); 3: the library's phase window
+                                      * (OVL_LPH). 1 and 2 (firmware_ap.ld) hold one overlay each,
+                                      * loaded once, never replaced; 3 holds the library job's walk
+                                      * or its build, swapped only by the job (services/lib_job.c),
+                                      * never while code in it runs */
 } ovl_desc_t;
 
 extern const ovl_desc_t ovl_desc[OVL_COUNT];

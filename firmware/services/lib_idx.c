@@ -21,6 +21,18 @@ static fs_file_t *s_f[2];            /* each view's IDX, open while it is valid 
 
 void lib_place_names(int vol, char *dir, int dn, char *base, int bn);   /* lib_job.c */
 
+void ref_get(const uint8_t *p, fs_ref_t *r, int vol)
+{
+    r->clus = lib_le32(p);
+    r->size = lib_le32(p + 4);
+    r->pclus = lib_le32(p + 8);
+    r->psize = lib_le32(p + 12);
+    r->slot = (uint16_t)lib_le16(p + 16);
+    r->flags = p[18];
+    r->vol = (uint8_t)vol;
+}
+
+
 void idx_cache_drop(void)
 {
     for (int i = 0; i < NCACHE; i++)

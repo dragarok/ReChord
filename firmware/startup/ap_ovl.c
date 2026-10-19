@@ -57,6 +57,8 @@ const ovl_desc_t ovl_desc[OVL_COUNT] = {
     [OVL_FSW]    = { "ov_fsw", "File writer", NULL, 2 },
     [OVL_LIB]    = { "ov_lib", "Library", NULL, 1 },
     [OVL_LIBTAG] = { "ov_ltag", "Tags", NULL, 0 },
+    [OVL_LWALK]  = { "ov_lwalk", "Library", NULL, 3 },
+    [OVL_LBUILD] = { "ov_lbld", "Library", NULL, 3 },
 };
 
 /* The USB interrupt goes wherever usb_irq_hook points (drivers/usb_msc_rknanoc.c): the USB DAC's
@@ -373,6 +375,14 @@ void ap_lib_data_changed(void)
 {
     LIB_CALL_V(data_changed());
 }
+
+/* ---- lwalk, lbuild: the library job's walk and build, by turns in the phase window (lib_job.c's
+ * gate loads the one its job is in; nothing resident calls them) ---- */
+
+static const lib_phase_api_t k_lwalk OVL_API(lwalk) = { scan_start, scan_step, scan_abort, NULL };
+OVL_HEADER(lwalk, OVL_LWALK, &k_lwalk);
+static const lib_phase_api_t k_lbuild OVL_API(lbuild) = { build_start, build_step, build_abort, build_forget };
+OVL_HEADER(lbuild, OVL_LBUILD, &k_lbuild);
 
 /* ---- libtag: the library's extended tag reader, in the modes' window (lib_tags.c) ------------- */
 

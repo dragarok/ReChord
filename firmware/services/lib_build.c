@@ -116,17 +116,6 @@ void ref_put(uint8_t *o, const fs_ref_t *r)
     o[18] = r->flags;
 }
 
-void ref_get(const uint8_t *p, fs_ref_t *r, int vol)
-{
-    r->clus = lib_le32(p);
-    r->size = lib_le32(p + 4);
-    r->pclus = lib_le32(p + 8);
-    r->psize = lib_le32(p + 12);
-    r->slot = (uint16_t)lib_le16(p + 16);
-    r->flags = p[18];
-    r->vol = (uint8_t)vol;
-}
-
 static uint32_t put_s(uint8_t *o, const uint8_t *s, uint32_t cap)   /* u8-counted, cut */
 {
     uint32_t n = s[0];
@@ -823,8 +812,11 @@ void build_abort(lib_job_t *j)
         lw_abort(&j->idx);
 }
 
+void srt_forget(void);
+
 void build_forget(void)              /* (their volume went: dead handles, closed to free them) */
 {
+    srt_forget();
     fs_close(s_ta.f), fs_close(s_fr.f);
     s_ta.f = 0;
     s_fr.f = 0;
