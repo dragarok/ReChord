@@ -4,7 +4,8 @@
  * The device's own writes to the card, end to end, timed: what QEMU cannot tell (the real card's
  * write and busy times) is in its log line for the next flash. On the mounted card (volume 1,
  * services/sdcard.c), in /SD/RECHORD (created if missing, left in place: the library keeps its
- * files there):
+ * files there; the test's own names start "sdtest" / "SD test" and are not .m3u8, so the library
+ * never takes one for a playlist and none of its files is touched):
  *   1 MiB written in 32 KiB pieces to a file with a long, non-ASCII name; 100 KiB appended; all of
  *   it read back and compared; its size and write time read (fs_stat); renamed; 20 small files
  *   with long names written and removed; the big file removed; the card synced (exFAT: VolumeDirty
@@ -119,12 +120,12 @@ void sd_selftest(void)
     t0 = time_ms();
     for (unsigned i = 0; !r && i < 20u; i++) {
         step = "small files";
-        snprintf(path, sizeof path, DIR "/playlist %02u with a long name.m3u8", i);
+        snprintf(path, sizeof path, DIR "/sdtest %02u with a long name.bin", i);
         r = put(path, 0, 200u + i, 30u + i, 0);
     }
     for (unsigned i = 0; !r && i < 20u; i++) {
         step = "remove";
-        snprintf(path, sizeof path, DIR "/playlist %02u with a long name.m3u8", i);
+        snprintf(path, sizeof path, DIR "/sdtest %02u with a long name.bin", i);
         r = fs_remove(path);
     }
     tf = time_ms() - t0;

@@ -72,7 +72,7 @@ void b_selftest(void)
     AS->st_b_high_words = words;
     AS->st_b_high = st_march2((volatile uint32_t *)heap, words);
     lock_check();
-    AS->st_b_low = st_march2((volatile uint32_t *)ST_LOW_B, ST_LOW_BYTES / 4u);
+    AS->st_b_low = st_march2_keep((volatile uint32_t *)ST_LOW_B, ST_LOW_BYTES / 4u, buf);   /* (core A's code there: kept) */
     lock_check();
     /* 4. the code core A loaded */
     AS->st_b_code = st_sum((const volatile uint32_t *)AS_B_RAM, AS->st_code_words);

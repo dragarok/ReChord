@@ -339,7 +339,7 @@ static unsigned selftest(void)
     unlock += !lock_ok();
     s_st.a_sig = st_kernel(ST_KERNEL_SEED, ST_KERNEL_ITERS, buf, &ten);
     unlock += !lock_ok();
-    s_st.a_march = st_march2((volatile uint32_t *)ST_LOW_A, ST_LOW_BYTES / 4u);
+    s_st.a_march = st_march2_keep((volatile uint32_t *)ST_LOW_A, ST_LOW_BYTES / 4u, buf);   /* (buf: free now) */
     unlock += !lock_ok();
     s_st.a_code = st_sum((const volatile uint32_t *)0x03050000u, s_a_code_words);
     unlock += !lock_ok();

@@ -46,9 +46,10 @@ enum {
     ST_N
 };
 
-/* The LOW window: core A's SRAM 0x03048000..0x0304F000, which firmware_ap.ld leaves free ("stays
- * free for a second window"; nothing is linked or loaded there once our code runs). Core A tests
- * the first half while core B tests the second, both at once. */
+/* The LOW window: core A's SRAM 0x03048000..0x0304F000. Core A tests the first half while core B
+ * tests the second, both at once. Since round6 it holds the library's overlay (firmware_ap.ld
+ * OVL_LIB), and the self-test runs from an interrupt that can stop that code anywhere: the window
+ * is tested with st_march2_keep, 64 words at a time, each piece saved first and put back after. */
 #define ST_LOW_A      0x03048000u
 #define ST_LOW_B      0x0304B800u
 #define ST_LOW_BYTES  0x00003800u
@@ -142,6 +143,30 @@ static inline uint32_t st_march2(volatile uint32_t *p, uint32_t n)
     uint32_t r = st_march(p, n, 0u);
 
     return r ? r : st_march(p, n, 0x55555555u);
+}
+
+/* st_march2 over n words at p, ST_KEEP words at a time, each piece copied to save (ST_KEEP words)
+ * first and back after: the memory holds what it held before (code, at the LOW window). The answer
+ * as st_march2's, its word index counted from p. */
+#define ST_KEEP 64u
+static inline uint32_t st_march2_keep(volatile uint32_t *p, uint32_t n, uint32_t *save)
+{
+    uint32_t r = 0, at, i, k;
+
+    for (at = 0; at < n && !r; at += k) {
+        k = n - at < ST_KEEP ? n - at : ST_KEEP;
+        for (i = 0; i < k; i++)
+            save[i] = p[at + i];
+        r = st_march2(p + at, k);
+        for (i = 0; i < k; i++)
+            p[at + i] = save[i];
+        if (r)                                       /* (its word index from p, not from the piece) */
+            r = ((r - 1u) & 0xFF000000u | (((r - 1u) & 0xFFFFFFu) + at) & 0xFFFFFFu) + 1u;
+    }
+#if defined(__arm__)
+    __asm__ volatile ("dsb\n isb" ::: "memory");     /* (code put back: fetched fresh) */
+#endif
+    return r;
 }
 
 /* A Fletcher-style checksum of n words (catches any single bit flip and any word swap). */
