@@ -98,9 +98,16 @@ Not affected (the crystal or the ACODEC PLL): UART1 (BT), eMMC/SD card clocks, S
   | WAV/AIFF/PCM (80/frame), FLAC up to 96 kHz (137/163), ALAC 16/44.1 (332), APE fast (394), Vorbis (445), WMA (260), WMA Pro (243, 24/96: 207) | FLAC 176.4/192 kHz, MP3 (665: 320 CBR dense), AAC (1260: HE v2, the profile is not known at queue time), Opus (709), WavPack (595), ALAC 24/96 (424), APE normal and up (616..10080), DSD (486/872/2014), WMA Lossless (2520 / 552) |
 
 - With the EQ on (RECHORD.CFG eq=, coreb/eq.h), `auto` adds its cost (EQ_INSN_FRAME + EQ_INSN_SECTION a
-  section, measured) to the format's; core B runs the EQ on a track only if its sections fit what is left
-  of 60 % of its clock at the point the track plays at (coreb/b_eq.c room), so with `96` the EQ runs on
-  light formats only (16/44.1 FLAC and WAV: all ten bands; ALAC 16/44.1: four; 24/96 FLAC: one).
+  section, measured: 12 + 27) to the format's; core B runs the EQ on a track only if its sections fit what
+  is left of 60 % of its clock at the point the track plays at (coreb/b_eq.c room): at the open from this
+  estimate, then every second from the track's own measured decoding cycles (and, while the EQ runs, its
+  own), so a curve that fits comes in after a second and one over the line goes out for the rest of the
+  track. The presets run 1-4 sections (stock's curves fitted, eq.h EQ_FIT_TABLE). With `96`, measured in
+  QEMU at 2.6 cycles an instruction: FLAC/WAV 16/44.1 and ALAC 16/44.1: everything; WMA and WMA Pro:
+  every preset (7-9 sections); Vorbis 44.1 and FLAC 24/96: every preset (4); APE normal: 3 (all but
+  Jazz); Vorbis 48k: 1-2; MP3: 0-1 (Bass on the lighter tracks); AAC-LC, Opus, WavPack -hh and FLAC
+  24/192: none (their decoding alone is at 55-85 % of 96 MHz: snowsky_echo_mini
+  docs/MERGE_NOTES_eqfit.md).
 - `stock`: FLAC for every track (stock never plays at 96 MHz). Stock's own lossy point is 1392 MHz /
   B 348; ReChord uses its one point, 448, for those too.
 

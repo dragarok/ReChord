@@ -62,7 +62,8 @@ void b_eq_open(void);
 void b_eq_step(int32_t *dst, uint32_t frames);
 void b_eq_close(uint32_t hz);
 void b_eq_stop(void);
-extern uint32_t b_eq_seq, b_eq_dirty;
+extern uint32_t b_eq_seq, b_eq_dirty, b_eq_watch;
+uint64_t b_dec_cycles(void);            /* b_main.c: the open track's decoding cycles so far */
 extern uint64_t b_eq_cyc;
 
 #endif
