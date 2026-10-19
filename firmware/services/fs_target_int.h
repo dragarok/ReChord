@@ -70,6 +70,7 @@ struct fs_file {
     uint16_t doff;
     uint16_t gen;                    /* its volume's gen when opened */
     uint8_t used, contig, wr, sum;   /* wr: write handle; sum: 8.3 checksum; contig: exFAT NoFatChain */
+    uint8_t cut;                     /* fs_open_append_at short of the end: old = the clusters past it */
     /* write handles: clus = cluster holding byte pos-1 (0: none yet);
      * head = first cluster allocated here, link = cluster it hangs off at
      * close (append), old = chain freed at close (rewrite). */
@@ -107,7 +108,10 @@ const fsx_api_t *fsx_api(void);
 #define s_leaf_missing fst_leaf_missing
 
 extern vol_t s_vol[FS_VOLUMES];
-extern struct fs_file s_files[4];
+#ifndef FS_HANDLES
+#define FS_HANDLES 8                 /* (fs_target.c: who holds them) */
+#endif
+extern struct fs_file s_files[FS_HANDLES];
 extern uint32_t s_sec[128], s_sec_lba;
 extern const vol_t *s_sec_vol;
 extern int s_sec_dirty, s_fsec_dirty;

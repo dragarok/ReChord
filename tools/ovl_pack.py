@@ -20,8 +20,8 @@ from make_fw1 import rknano_crc32  # noqa: E402
 
 OVL_MAGIC = 0x314C564F            # "OVL1"
 HDR = 24                          # magic, abi, id, len, crc, api
-IDS = {"usbdac": 1, "usbout": 2, "dev": 3, "fsw": 4}   # services/ovl.h OVL_*
-WIN2 = {"fsw"}                # in the second window (firmware_ap.ld OVL_FS)
+IDS = {"usbdac": 1, "usbout": 2, "dev": 3, "fsw": 4, "lib": 5, "libtag": 6}   # services/ovl.h OVL_*
+WINDOW = {"lib": "__ovl_lib_start", "fsw": "__ovl_fs_start"}   # their own windows; the others: __ovl_win_start
 
 
 def sections(d):
@@ -59,16 +59,17 @@ def main():
     d = open(a.elf, "rb").read()
     secs, hdrs = sections(d)
     sym = symbols(d, hdrs)
-    abi, win = sym["__ovl_abi"], sym["__ovl_win_start"]
+    abi = sym["__ovl_abi"]
     for spec in a.ovl:
         name, module = spec.split(":")
+        win = sym[WINDOW.get(name, "__ovl_win_start")]
         s = secs.get(".ovl_" + name)
         if not s:
             raise SystemExit(f"ovl_pack: no section .ovl_{name} in {a.elf}")
         addr, off, size = s[3], s[4], s[5]
         blob = bytearray(d[off:off + size])
         magic, h_abi, h_id = struct.unpack_from("<III", blob, 0)
-        if addr != (sym["__ovl_fs_start"] if name in WIN2 else win) or magic != OVL_MAGIC or h_id != IDS[name] or h_abi != abi or size < HDR:
+        if addr != win or magic != OVL_MAGIC or h_id != IDS[name] or h_abi != abi or size < HDR:
             raise SystemExit(f"ovl_pack: .ovl_{name}: bad header (at 0x{addr:08X}, magic {magic:08X}, "
                              f"id {h_id}, abi {h_abi:08X} vs {abi:08X})")
         blob += bytes(-len(blob) % 4)

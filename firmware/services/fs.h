@@ -108,6 +108,15 @@ long fs_seek(fs_file_t *f, long offset);
  * the host backend ignores it). 0, or FS_ERR_*. */
 int fs_mark(fs_file_t *f);
 
+/* Remove a file a piece at a time (the target's FAT32): its first `max` clusters, or all of it.
+ * 1 = gone, 0 = smaller, < 0 = error (open, missing, read-only). */
+int fs_remove_part(const char *path, uint32_t max);
+
+/* A reader's place in the cluster chain (the target's FAT only): get it after a read, set it
+ * after fs_seek and before the next read of the same stream. */
+void fs_place_get(fs_file_t *f, uint32_t pl[2]);
+void fs_place_set(fs_file_t *f, const uint32_t pl[2]);
+
 /* Total size of the open file in bytes, or FS_ERR_*. */
 long fs_file_size(fs_file_t *f);
 
@@ -129,6 +138,11 @@ fs_file_t *fs_open_write(const char *path);
 
 /* Open a file for appending, creating it if needed. NULL on failure. */
 fs_file_t *fs_open_append(const char *path);
+
+/* Open an existing file for appending at byte `at` (<= its size): what was past `at` is cut off
+ * when fs_close() switches the entry (until then the file is as it was). The target's FAT32 only
+ * (the library's resume after a power cut, services/lib_scan.c); NULL where unsupported. */
+fs_file_t *fs_open_append_at(const char *path, uint32_t at);
 
 /* Write <len> bytes at the end. Returns bytes written (short = disk full or
  * I/O error part way) or FS_ERR_*. Word-aligned buffers of whole sectors

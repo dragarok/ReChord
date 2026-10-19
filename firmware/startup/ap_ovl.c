@@ -9,7 +9,7 @@
  *           USB detect, BT listen (drivers/bt_jieli.c bt_listen), Panel TE (drivers/panel_io_rknanoc.c
  *           panel_te_probe), SD card test (services/sd_selftest.c) -- startup/ap_ui.c
  *   fsw     the file-system writer's cold half (services/fs_write_ext.c: exFAT writes, long names,
- *           mkdir, rename), in the second window: loaded at its first use, never evicted
+ *           mkdir, rename), in its own window (OVL_FS): loaded at its first use, never evicted
  *
  * Which code goes in which overlay is firmware_ap.ld's list (by object, and by function section
  * for a file that is partly resident), not this file's. The callers keep the drivers' own names:
@@ -30,6 +30,8 @@
 #include "ui/frame.h"
 #include "ui/nav.h"
 #include "services/fs_target_int.h"
+#include "services/lib.h"
+#include "services/fs_target.h"
 
 extern const char __ovl_abi[];       /* absolute: this link's ABI (Makefile) */
 
@@ -52,7 +54,9 @@ const ovl_desc_t ovl_desc[OVL_COUNT] = {
     [OVL_USBDAC] = { "ov_dac", "USB DAC", NULL },
     [OVL_USBOUT] = { "ov_uout", "USB-C out", usbout_stop },
     [OVL_DEV]    = { "ov_dev", "Developer test", NULL },
-    [OVL_FSW]    = { "ov_fsw", "File writer", NULL },
+    [OVL_FSW]    = { "ov_fsw", "File writer", NULL, 2 },
+    [OVL_LIB]    = { "ov_lib", "Library", NULL, 1 },
+    [OVL_LIBTAG] = { "ov_ltag", "Tags", NULL, 0 },
 };
 
 /* The USB interrupt goes wherever usb_irq_hook points (drivers/usb_msc_rknanoc.c): the USB DAC's
@@ -261,7 +265,7 @@ void ap_te_probe(void) { dev_run(DEV_TE_PROBE); }
 void ap_hifi_probe(void) { dev_run(DEV_HIFI_PROBE); }
 void ap_sd_test(void) { dev_run(DEV_SD_TEST); }
 
-/* ---- fsw: the file-system writer's cold half (services/fs_write_ext.c), second window --------- */
+/* ---- fsw: the file-system writer's cold half (services/fs_write_ext.c), its own window ------ */
 
 int fsx_create(vol_t *v, const char *leaf, size_t n, uint8_t attr, uint32_t clus);
 int fsx_grow(struct fs_file *f);
@@ -276,9 +280,127 @@ static const fsx_api_t k_fsw OVL_API(fsw) = {
 OVL_HEADER(fsw, OVL_FSW, &k_fsw);
 
 /* services/fs_target.c: the writer's entry points, NULL when the overlay was refused (then exFAT
- * stays read-only and FAT takes 8.3 names only, as before it existed). No hold: the second window
+ * stays read-only and FAT takes 8.3 names only, as before it existed). No hold: its window
  * is never evicted. */
 const fsx_api_t *fsx_api(void)
 {
     return ovl_get(OVL_FSW);
+}
+
+/* ---- lib: the music library (services/lib.h; the library's own window, never replaced) -------- */
+
+lib_status_t g_lib;                  /* resident: the overlay and the screens read it */
+
+typedef struct {
+    void (*boot)(void);
+    int (*step)(void);
+    void (*volume)(int vol, int ev);
+    void (*open)(void);
+    int (*home_value)(char *out, int n);
+    void (*np)(int what);
+    int (*np_fav)(void);
+    void (*data_changed)(void);
+} lib_api_t;
+
+static const lib_api_t k_lib OVL_API(lib) = {
+    lib_boot, lib_step, lib_vol_event, lib_ui_open, lib_ui_home_value, lib_ui_np, lib_ui_np_fav, lib_data_changed,
+};
+OVL_HEADER(lib, OVL_LIB, &k_lib);
+
+#define LIB_CALL(T, dflt, call) ({ const lib_api_t *a_ = ovl_if(OVL_LIB); a_ ? a_->call : (dflt); })
+#define LIB_CALL_V(call) do { const lib_api_t *a_ = ovl_if(OVL_LIB); if (a_) a_->call; } while (0)
+
+static void lib_state(void)          /* what the volumes are now, for the library */
+{
+    for (int v = 0; v < 2; v++) {
+        g_lib.mounted[v] = fs_target_type(v) != NULL;
+        g_lib.writable[v] = (uint8_t)fs_target_writable(v);
+    }
+}
+
+void ap_lib_boot(void)
+{
+    const lib_api_t *a;
+
+    lib_state();
+    if ((a = ovl_get(OVL_LIB)) != NULL)
+        a->boot();
+}
+
+void ap_lib_poll(void)
+{
+    LIB_CALL_V(step());
+}
+
+void ap_lib_volume(int vol, int ev)
+{
+    lib_state();
+    LIB_CALL_V(volume(vol, ev));
+}
+
+void ap_lib_open(void)
+{
+    const lib_api_t *a = ovl_get(OVL_LIB);
+
+    if (!a)
+        refused(OVL_LIB);
+    else
+        a->open();
+}
+
+int ap_lib_home_value(char *out, int n)
+{
+    out[0] = 0;
+    return LIB_CALL(int, 0, home_value(out, n));
+}
+
+void ap_lib_np(int what)
+{
+    const lib_api_t *a = ovl_get(OVL_LIB);
+
+    if (!a)
+        refused(OVL_LIB);
+    else
+        a->np(what);
+}
+
+int ap_lib_np_fav(void)
+{
+    return LIB_CALL(int, 0, np_fav());
+}
+
+void ap_lib_data_changed(void)
+{
+    LIB_CALL_V(data_changed());
+}
+
+/* ---- libtag: the library's extended tag reader, in the modes' window (lib_tags.c) ------------- */
+
+typedef int (*libtag_read_t)(uint32_t (*rd)(void *, uint32_t, void *, uint32_t), void *u, uint32_t size, int kind,
+                             void *out);
+int tags_read_ext(uint32_t (*rd)(void *, uint32_t, void *, uint32_t), void *u, uint32_t size, int kind, void *out);
+static const libtag_read_t k_libtag OVL_API(libtag) = tags_read_ext;
+OVL_HEADER(libtag, OVL_LIBTAG, &k_libtag);
+
+/* The window is the USB-C earphones' while they are on: the walk then reads the basic tags. */
+int ap_lib_tags_ok(void)
+{
+    const char *why = ovl_why(OVL_LIBTAG);
+
+    return !(ovl_current() == OVL_USBOUT && __wrap_usb_out_active()) && (!why || why[0] == 'b');   /* ("busy") */
+}
+
+/* The library's walk (services/lib_scan.c): a file's tags, album artist, genre, disc, year and
+ * duration too; -2 when the window cannot be had now (the walk falls back, reads it again later). */
+int ap_lib_tags(uint32_t (*rd)(void *, uint32_t, void *, uint32_t), void *u, uint32_t size, int kind, void *out)
+{
+    const libtag_read_t *a;
+    int r;
+
+    if (!ap_lib_tags_ok() || !(a = ovl_get(OVL_LIBTAG)))
+        return -2;
+    ovl_hold(1);
+    r = (*a)(rd, u, size, kind, out);
+    ovl_hold(-1);
+    return r;
 }

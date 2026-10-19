@@ -45,6 +45,9 @@ uint32_t fs_target_serial(int idx);
 /* "FAT32" / "exFAT" / "FAT16", or NULL when not mounted. */
 const char *fs_target_type(int idx);
 
+/* Sectors read and written through this layer so far (both volumes; the library logs its share). */
+extern uint32_t fs_target_nrd, fs_target_nwr;
+
 /* Nonzero when volume `idx` takes writes. */
 int fs_target_writable(int idx);
 

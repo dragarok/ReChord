@@ -62,6 +62,28 @@ int queue_from_folder(const char *path, const fs_ref_t *folder, const fs_ref_t *
     return 0;
 }
 
+int queue_from_list(int n, int start, int (*get)(int i, fs_ref_t *r, int *kind))
+{
+    int first = 0;
+
+    queue_clear();
+    for (int i = 0; i < n && s_n < Q_MAX; i++) {
+        int kind;
+
+        if (get(i, &s_q[s_n].ref, &kind))
+            continue;
+        if (i <= start)
+            first = s_n;                     /* (the start, or the last track before it) */
+        s_q[s_n].kind = (uint8_t)kind;
+        s_order[s_n] = (uint16_t)s_n;
+        s_n++;
+    }
+    s_stream = s_pos = first;
+    if (s_mode == Q_SHUFFLE)
+        queue_set_mode(Q_SHUFFLE);
+    return s_n ? 0 : FS_ERR_OPEN;
+}
+
 /* Depth first, sorted: a folder's files, then each of its subfolders. Pending
  * folders wait on a stack (pushed in reverse so they come off in order). */
 #define PENDING 128

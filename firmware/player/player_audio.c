@@ -89,6 +89,19 @@ int player_open_tree(const char *path)
     return PLAYER_OK;
 }
 
+/* A queue from the library (ui/lib_ui.c): n tracks from get(), from start; src is the start
+ * track's folder (the resume record keeps it as a folder queue). */
+int player_open_list(int n, int start, int (*get)(int i, fs_ref_t *r, int *kind), const char *src)
+{
+    s_open = 0;
+    if (queue_from_list(n, start, get) != 0)
+        return PLAYER_ERR_EMPTY;
+    snprintf(s_src, sizeof s_src, "%s", src ? src : "");
+    s_tree = 0;
+    s_open = 1;
+    return PLAYER_OK;
+}
+
 int player_play(void)
 {
     if (audio_paused()) {

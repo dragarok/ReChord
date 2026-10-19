@@ -22,6 +22,9 @@ enum { Q_NORMAL = 0, Q_SHUFFLE, Q_REPEAT_ONE, Q_REPEAT_ALL, Q_MODES };
 /* 0, or FS_ERR_*. *incomplete: the folder held more than the queue takes. */
 int queue_from_folder(const char *path, const fs_ref_t *folder, const fs_ref_t *start, int *incomplete);
 int queue_from_tree(const char *path, const fs_ref_t *folder, int *incomplete);
+/* n tracks from get(i) (the library's lists), from i = start on: 0, or FS_ERR_*. A track get()
+ * cannot give (-1) is left out. */
+int queue_from_list(int n, int start, int (*get)(int i, fs_ref_t *r, int *kind));
 void queue_clear(void);
 
 int queue_count(void);

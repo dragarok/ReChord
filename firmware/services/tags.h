@@ -28,11 +28,25 @@ enum { TAGS_MP3, TAGS_FLAC, TAGS_WAV, TAGS_MP4, TAGS_OGG };
 
 /* Strings are UTF-8, NUL-terminated, cut at a character boundary; "" and
  * track 0 when not found. */
+#ifdef TAGS_EXT
+/* The library's reader (services/lib_tags.c builds this file again with TAGS_EXT, into the
+ * library overlay; the resident reader above is the player's and stays as it is): album artist,
+ * genre, disc, year and the duration too, every string up to 255 bytes, and the kinds below. */
+enum { TAGS_WMA = 16, TAGS_DSF, TAGS_AIFF, TAGS_WV, TAGS_APE };
+typedef struct {
+    char title[256], artist[256], album[256], aartist[256], genre[64];
+    uint16_t track, year;
+    uint8_t disc, found;
+    uint32_t dur_ms;               /* from the headers the tags sit in; 0 = not known here */
+} tag_info_t;
+#define tags_read tags_read_ext
+#else
 typedef struct {
     char title[96], artist[64], album[64];
     uint16_t track;
     uint8_t found;                 /* TAGS_SRC_* bitmask */
 } tag_info_t;
+#endif
 
 /* Reads n bytes at file offset off into buf; returns the bytes read. */
 typedef uint32_t (*tags_read_at_t)(void *u, uint32_t off, void *buf, uint32_t n);

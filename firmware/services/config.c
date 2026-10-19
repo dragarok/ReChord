@@ -30,6 +30,7 @@ static const char *const k_display[] = { "pio", "vop", "dma", "gpio", "auto" };
 static const char *const k_hifi[] = { "auto", "off", "verify" };      /* AS_HIFI_* */
 static const char *const k_cpu_b[] = { "96", "auto", "stock" };       /* CFG_CPU_B_* */
 const char *const g_eq_names[8] = { "Off", "Retro", "Bass", "Heavy", "Pop", "Jazz", "Unique", "Custom" };
+static const char *const k_libdata[] = { "sd", "internal" };          /* LIB_DATA_* (library) */
 
 static uint32_t s_hash, s_save_at;
 static int s_idle_only;              /* the save waiting is the volume's alone: not while playing */
@@ -134,6 +135,8 @@ static void set(const char *k, const char *v)
                 ;
         }
     }
+    else if (!strcmp(k, "libdata") && (i = pick(v, k_libdata, 2)) >= 0)    /* library */
+        g_cfg.libdata = (uint8_t)i;
     else if (!strcmp(k, "usb_out") && (i = pick(v, k_off_on, 2)) >= 0)
         g_cfg.usb_out = (uint8_t)i;
     else if (!strcmp(k, "usb_out_ma") && (i = atoi(v)) >= 100 && i <= 500)
@@ -308,6 +311,13 @@ static int text_of(char *t, unsigned long cap)
     for (int k = 0; k < 10; k++)                    /* (40 B at most: the text stays far below cap) */
         n += snprintf(t + n, cap - (unsigned long)n, "%d,", g_cfg.eq_gain[k]);
     t[n - 1] = '\n';                                /* (the last comma) */
+    if (g_cfg.libdata == 1u) {                      /* library: written only when not sd */
+        int d = snprintf(t + n, cap - (unsigned long)n, "libdata=%s\n", k_libdata[1]);
+
+        if (d < 0 || (unsigned long)(n + d) >= cap)
+            return n + d;
+        n += d;
+    }
     if (g_cfg.theme && theme_name(g_cfg.theme)) {   /* (written only when not Classic) */
         int d = snprintf(t + n, cap - (unsigned long)n, "theme=%s\n", theme_name(g_cfg.theme));
 
