@@ -304,10 +304,10 @@ static int text_of(char *t, unsigned long cap)
             return n + d;
         n += d;
     }
-    n += snprintf(t + n, cap - (unsigned long)n, "eq=%s\neq_gains", g_eq_names[g_cfg.eq & 7u]);
+    n += snprintf(t + n, cap - (unsigned long)n, "eq=%s\neq_gains=", g_eq_names[g_cfg.eq & 7u]);
     for (int k = 0; k < 10; k++)                    /* (40 B at most: the text stays far below cap) */
-        n += snprintf(t + n, cap - (unsigned long)n, "%c%d", k ? ',' : '=', g_cfg.eq_gain[k]);
-    t[n++] = '\n';
+        n += snprintf(t + n, cap - (unsigned long)n, "%d,", g_cfg.eq_gain[k]);
+    t[n - 1] = '\n';                                /* (the last comma) */
     if (g_cfg.theme && theme_name(g_cfg.theme)) {   /* (written only when not Classic) */
         int d = snprintf(t + n, cap - (unsigned long)n, "theme=%s\n", theme_name(g_cfg.theme));
 

@@ -1808,8 +1808,12 @@ void audio_poll(void)
         return;
     }
     /* B ended the DMA chain: once the last block has played and been recycled,
-     * either the stream is over, or the next track needs another sample rate */
-    if (s_dma_on && !out_running() && AS->pcm_played == AS->pcm_wr) {
+     * either the stream is over, or the next track needs another sample rate. Or past that block:
+     * B ended the chain while underrunning with the DMA already beyond it, the DMA went one more lap
+     * of silence, and the underrun recycle_blocks then counted moved pcm_wr on, so the two never meet
+     * (QEMU, ReChord eq branch: APE 24/96 extra high at 96 MHz then ALAC 16/44.1, m43's d_rateswitch,
+     * hung in 5 of 8 runs: pcm_wr 0x1c4e, pcm_played 0x1c4d, pcm_end 0x1c46, state RATE) */
+    if (s_dma_on && !out_running() && (int32_t)(AS->pcm_played - (AS->pcm_end ? AS->pcm_end : AS->pcm_wr)) >= 0) {
         if (AS->state == AS_B_RATE)
             stream_switch();
         else if (AS->state == AS_B_ENDED) {

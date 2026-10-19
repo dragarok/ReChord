@@ -118,9 +118,9 @@ unsigned cpuclk_point_for(as_track_t *t, uint32_t extra, int usb_out)
         return CLOCK_POINT_UI;
     if (g_cfg.cpu_b == CFG_CPU_B_STOCK)
         return CLOCK_POINT_FLAC;
-    /* device cycles a second at the UI point (the format, and the EQ as set but on DSD), against 60 %
-     * of 96 MHz (b_main.c choose_clock's line) */
-    return (uint64_t)(t->eq + (n && t->codec != AS_CODEC_DSD ? EQ_INSN_FRAME + n * EQ_INSN_SECTION : 0u)) *
+    /* device cycles a second at the UI point (the format, and the EQ as set; DSD, which runs no EQ, is
+     * far over the line without it), against 60 % of 96 MHz (b_main.c choose_clock's line) */
+    return (uint64_t)(t->eq + (n ? EQ_INSN_FRAME + n * EQ_INSN_SECTION : 0u)) *
            t->rate * CPUCLK_DEVICE_CPI_X100 / 100u > 96000000ull * 60u / 100u ? CLOCK_POINT_FLAC : CLOCK_POINT_UI;
 }
 
