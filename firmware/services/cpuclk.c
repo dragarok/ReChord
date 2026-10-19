@@ -7,6 +7,7 @@
  * loop (audio.c: back to the UI point at a stop). Nothing here logs or touches the eMMC from the
  * SysTick: the switch leaves a record, the main loop writes it out.
  */
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -214,6 +215,22 @@ void cpuclk_b_loaded(uint32_t n)
 
 static int s_periph;                       /* the gating ran this boot (whatever came of it) */
 
+/* clock_periph_log's lines (up to ~40 of ~120 B when steps fail: more than the log's 4 KiB ring
+ * holds at once) with the log written out every 12 lines, so none is dropped. */
+static void periph_pr(const char *fmt, ...)
+{
+    static unsigned n;
+    char line[160];
+    va_list ap;
+
+    va_start(ap, fmt);
+    vsnprintf(line, sizeof line, fmt, ap);
+    va_end(ap);
+    log_printf("%s", line);
+    if (++n % 12u == 0u)
+        log_flush(NULL);
+}
+
 void cpuclk_prepare(void)
 {
     int r;
@@ -228,7 +245,8 @@ void cpuclk_prepare(void)
     }
     panel_io_sync();
     r = clock_periph_init();
-    clock_periph_log(log_printf);
+    log_flush(NULL);                         /* (room for its lines) */
+    clock_periph_log(periph_pr);
     if (r < 0) {
         s_failed = ST_PERIPH;
         s_rec = rec_make(ST_PERIPH, rec_passed(s_rec), rec_tried(s_rec));

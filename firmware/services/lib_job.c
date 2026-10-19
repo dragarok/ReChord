@@ -64,6 +64,18 @@ const char *lib_data_dir(int v)
     return s_dir[v];
 }
 
+/* The same place, only looked for, never made: for reading what was written there before (a
+ * volume that is not the library's place now gets no folder from it). */
+static const char *seek_dir(int v, char *buf, int n)
+{
+    if (s_dir[v][0])
+        return s_dir[v];
+    snprintf(buf, (unsigned)n, "/%s/RECHORD", vol_name(v));
+    if (!fs_exists(buf))
+        snprintf(buf, (unsigned)n, "/%s", vol_name(v));
+    return buf;
+}
+
 /* Where lists and the card's index go now: the chosen volume when it is in and takes writes. */
 int lib_lists_vol(void)
 {
@@ -90,7 +102,9 @@ static void other_place(char *dir, int dn, char *base, int bn)
         snprintf(dir, (unsigned)dn, "%s", lib_data_dir(0));
         snprintf(base, (unsigned)bn, "%08X", (unsigned)lib_vol_serial(1));
     } else {
-        snprintf(dir, (unsigned)dn, "%s", g_lib.mounted[1] ? lib_data_dir(1) : "");
+        char b[24];
+
+        snprintf(dir, (unsigned)dn, "%s", g_lib.mounted[1] ? seek_dir(1, b, sizeof b) : "");
         snprintf(base, (unsigned)bn, "SD");
     }
 }
@@ -259,8 +273,11 @@ void lib_data_changed(void)
     int was = s_was_lists;
 
     lists_place();
-    if (was == 1 && g_lib.lists_vol == 0 && m3u_move_all && g_lib.mounted[1])
-        m3u_move_all(lib_data_dir(1));   /* (to Internal: the card's lists come along) */
+    if (was == 1 && g_lib.lists_vol == 0 && m3u_move_all && g_lib.mounted[1]) {
+        char b[24];
+
+        m3u_move_all(seek_dir(1, b, sizeof b));   /* (to Internal: the card's lists come along) */
+    }
     if (g_lib.mounted[1]) {
         if (s_active == 1)
             job_abort("the library's place changed");
