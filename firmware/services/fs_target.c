@@ -67,6 +67,7 @@ struct fs_file {
     uint32_t dlba;                   /* 8.3 entry sector (FAT) */
     uint16_t doff;
     uint8_t used, contig, wr, sum;   /* wr: write handle; sum: 8.3 checksum */
+    uint8_t cut;                     /* fs_open_append_at short of the end: old = the clusters past it */
     /* write handles: clus = cluster holding byte pos-1 (0: none yet);
      * head = first cluster allocated here, link = cluster it hangs off at
      * close (append), old = chain freed at close (rewrite). */
@@ -89,6 +90,7 @@ static uint16_t s_u16[256];
 static uint32_t s_parent;            /* resolve(): dir of the last component */
 static int s_leaf_missing;           /* resolve(): only the last one missing */
 static uint32_t (*s_clock)(void);
+uint32_t fs_target_nrd, fs_target_nwr;   /* sectors read / written so far (the library's refresh cost) */
 
 static uint32_t le16(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8; }
 static uint32_t le32(const uint8_t *p) { return le16(p) | le16(p + 2) << 16; }
@@ -100,6 +102,7 @@ static int sec_flush(void)
 {
     if (s_sec_dirty) {
         s_sec_dirty = 0;
+        fs_target_nwr++;
         if (s_sec_vol->wr(s_sec_vol->base + s_sec_lba, 1, s_sec)) {
             s_sec_vol = NULL;
             return FS_ERR_IO;
@@ -117,6 +120,7 @@ static uint8_t *sector(const vol_t *v, uint32_t lba)
         if (sec_flush())
             return NULL;
         s_sec_vol = NULL;
+        fs_target_nrd++;
         if (v->rd(v->base + lba, 1, s_sec))
             return NULL;
         s_sec_vol = v;
@@ -141,7 +145,7 @@ static int fat_flush(void)
 
         s_fsec_dirty = 0;
         for (uint32_t k = 0; k < v->nfats; k++)
-            if (v->wr(v->base + s_fsec_lba + k * v->fatsz, 1, s_fsec)) {
+            if (fs_target_nwr++, v->wr(v->base + s_fsec_lba + k * v->fatsz, 1, s_fsec)) {
                 s_fsec_vol = NULL;
                 return FS_ERR_IO;
             }
@@ -155,6 +159,7 @@ static uint8_t *fat_sector(const vol_t *v, uint32_t lba)
         if (fat_flush())
             return NULL;
         s_fsec_vol = NULL;
+        fs_target_nrd++;
         if (v->rd(v->base + lba, 1, s_fsec))
             return NULL;
         s_fsec_vol = v;
@@ -779,7 +784,7 @@ static int dir_slot(vol_t *v, uint32_t dir, uint32_t *lba, uint32_t *off)
     memset(s_sec, 0, sizeof s_sec);
     s_sec_vol = NULL;
     for (uint32_t s = 0; s < v->spc; s++)
-        if (v->wr(v->base + clus_lba(v, c) + s, 1, s_sec))
+        if (fs_target_nwr++, v->wr(v->base + clus_lba(v, c) + s, 1, s_sec))
             return FS_ERR_IO;
     s_sec_vol = v;                           /* the cache holds a zero sector */
     s_sec_lba = *lba = clus_lba(v, c);
@@ -1033,6 +1038,7 @@ long fs_read(fs_file_t *f, void *buf, unsigned long cap)
                 secs = want;
             if (s_sec_dirty && sec_flush())  /* a writer's sector may be in range */
                 return FS_ERR_IO;
+            fs_target_nrd += secs;
             if (f->v->rd(f->v->base + clus_lba(f->v, f->clus) + f->pos % cl / 512u, secs, o + n))
                 return FS_ERR_IO;
             n += secs * 512u;
@@ -1097,6 +1103,8 @@ static int close_write(struct fs_file *f)
 
     if (!r && f->link && f->head)
         r = fat_set(v, f->link, f->head) || fat_flush();
+    else if (!r && f->cut)                   /* (cut short, nothing new: its last cluster ends it) */
+        r = fat_set(v, f->clus, 0x0FFFFFFFu) || fat_flush();
     if (!r) {
         if (!(b = sector(v, f->dlba)) || sfn_sum(b + f->doff) != f->sum) {
             r = 1;
@@ -1134,7 +1142,8 @@ int fs_close(fs_file_t *f)
     return r;
 }
 
-static fs_file_t *open_write(const char *path, int append)
+/* append: 0 rewrite, 1 at the end, 2 at byte `at` (fs_open_append_at). */
+static fs_file_t *open_write(const char *path, int append, uint32_t at)
 {
     const vol_t *cv;
     vol_t *v;
@@ -1149,10 +1158,16 @@ static fs_file_t *open_write(const char *path, int append)
         if (s_ent.is_dir || busy(v) || !(f = handle_new(v)))
             return NULL;
         f->sum = sfn_sum(s_ent.raw);
-        if (append && s_ent.size && s_ent.clus) {
+        if (append != 2)
+            at = s_ent.size;
+        if (at > s_ent.size) {
+            f->used = 0;
+            return NULL;
+        }
+        if (append && at && s_ent.clus) {
             uint32_t cl = v->spc * 512u, c = s_ent.clus;
 
-            for (uint32_t i = (s_ent.size - 1u) / cl; i && c; i--)
+            for (uint32_t i = (at - 1u) / cl; i && c; i--)
                 c = fat_next(v, c);
             if (!c) {
                 f->used = 0;
@@ -1160,7 +1175,9 @@ static fs_file_t *open_write(const char *path, int append)
             }
             f->first = s_ent.clus;
             f->clus = c;
-            f->size = f->pos = s_ent.size;
+            f->size = f->pos = at;
+            if (at < s_ent.size)             /* the clusters past `at`: cut off and freed at close */
+                f->old = fat_next(v, c), f->cut = 1;
         } else {
             f->old = s_ent.clus;             /* freed once the entry is switched */
         }
@@ -1197,12 +1214,17 @@ static fs_file_t *open_write(const char *path, int append)
 
 fs_file_t *fs_open_write(const char *path)
 {
-    return open_write(path, 0);
+    return open_write(path, 0, 0);
 }
 
 fs_file_t *fs_open_append(const char *path)
 {
-    return open_write(path, 1);
+    return open_write(path, 1, 0);
+}
+
+fs_file_t *fs_open_append_at(const char *path, uint32_t at)
+{
+    return open_write(path, 2, at);
 }
 
 /* Cluster for the byte at f->pos (a cluster boundary): the next free one
@@ -1275,6 +1297,7 @@ long fs_write(fs_file_t *f, const void *buf, unsigned long len)
                 s_sec_vol = NULL;            /* cached copy is stale now */
                 s_sec_dirty = 0;
             }
+            fs_target_nwr += secs;
             if (v->wr(v->base + lba, secs, s + n))
                 break;
             k = secs * 512u;

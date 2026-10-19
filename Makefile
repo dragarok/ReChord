@@ -277,7 +277,7 @@ COMMON_FLAGS := $(ARCH_FLAGS) -Os -Wall -Wno-unused-parameter \
                 -ffunction-sections -fdata-sections -MMD -MP -fcommon \
                 -include firmware/rockchip/include/armcc_compat.h
 BB_CFLAGS    := $(COMMON_FLAGS) -DRECHORD_BB_BUILD -D_RK_EQ_ -Ifirmware $(addprefix -I,$(BB_INCLUDE_DIRS))
-AP_CFLAGS    := $(COMMON_FLAGS) -DRECHORD_AP_BUILD -DBOARD=$(BOARD_ID) -Ifirmware $(addprefix -I,$(AP_INCLUDE_DIRS))
+AP_CFLAGS    := $(COMMON_FLAGS) -DRECHORD_AP_BUILD -DBOARD=$(BOARD_ID) $(if $(LIB_SD_SHIM),-DLIB_SD_SHIM) -Ifirmware $(addprefix -I,$(AP_INCLUDE_DIRS))
 
 BB_OBJS := $(foreach src,$(BB_SRCS),\
              $(BB_OBJ_DIR)/$(patsubst firmware/rockchip/%,%,$(src)).o)

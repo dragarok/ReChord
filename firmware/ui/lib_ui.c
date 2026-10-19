@@ -59,7 +59,8 @@ static ctx_t *below(void) { int d = nav_depth(); return &s_ctx[d > 1 && d <= NCT
 
 extern const page_t pg_lroot, pg_lview, pg_llists, pg_lopts, pg_lpick, pg_lletter, pg_ltext, pg_lask;
 
-static void push(const page_t *p, int kind, int vol, int sec, uint32_t first, uint32_t n, const char *name)
+/* The context of the page about to be pushed (its rows are read as it is pushed). */
+static ctx_t *ctx_new(int kind, int vol, int sec, uint32_t first, uint32_t n, const char *name)
 {
     int d = nav_depth();
     ctx_t *c = &s_ctx[d < NCTX ? d : NCTX - 1];
@@ -71,6 +72,12 @@ static void push(const page_t *p, int kind, int vol, int sec, uint32_t first, ui
     c->first = first;
     c->n = n;
     snprintf(c->name, sizeof c->name, "%s", name ? name : "");
+    return c;
+}
+
+static void push(const page_t *p, int kind, int vol, int sec, uint32_t first, uint32_t n, const char *name)
+{
+    ctx_new(kind, vol, sec, first, n, name);
     nav_push(p, kind);
 }
 
@@ -86,7 +93,7 @@ static const keydef_t k_txt[] = {
     { KEY_DOWN, IG_DOWN, A_DOWN, "\xE2\x80\xBA" }, { KEY_DOWN, IG_REPEAT, A_DOWN, NULL },
     { KEY_SELECT, IG_TAP, A_OPEN, "TYPE" }, { KEY_SELECT, IG_HOLD, A_OPEN_HOLD, "Aa" },
     { KEY_MENU, IG_TAP, A_DONE, "DONE" },
-    { KEY_BACK, IG_TAP, A_BACK, "DEL" }, { KEY_BACK, IG_HOLD, A_CANCEL, "CANCEL" },
+    { KEY_BACK, IG_TAP, A_SAFE, "DEL" }, { KEY_BACK, IG_HOLD, A_CANCEL, "CANCEL" },   /* (A_BACK: nav pops) */
     { 0 }
 };
 
@@ -556,7 +563,6 @@ static void root_act(int a, int i)
             m3u_lists();
             m3u_open(0);
             push(&pg_lview, V_LIST, s_vol, 0, 0, 0, "Favourites");
-            C()->list = 0;
         }
         break;
     case R_LISTS:   m3u_lists(); push(&pg_llists, V_LISTS, s_vol, 0, 0, 0, "Playlists"); break;
@@ -740,9 +746,11 @@ static void open_row(ctx_t *c, int i, int hold)
         if (hold) {
             play_range(c->vol, LS_ALBTRK, x.a, x.b, x.a, nm);
         } else {
-            push(&pg_lview, V_ARTIST, c->vol, LS_ARTALB, x.c, x.d, nm);
-            C()->a_first = x.a;
-            C()->d = x.b;
+            ctx_t *n = ctx_new(V_ARTIST, c->vol, LS_ARTALB, x.c, x.d, nm);
+
+            n->a_first = x.a;
+            n->d = x.b;
+            nav_push(&pg_lview, V_ARTIST);
         }
         break;
     case LS_GENRES:
@@ -832,8 +840,8 @@ static void lists_row(int i, row_t *r)
 static void list_open(int k)
 {
     m3u_open(k);
-    push(&pg_lview, V_LIST, s_vol, 0, 0, 0, g_lists[k].name);
-    C()->list = (uint8_t)k;
+    ctx_new(V_LIST, s_vol, 0, 0, 0, g_lists[k].name)->list = (uint8_t)k;
+    nav_push(&pg_lview, V_LIST);
 }
 
 static void lists_act(int a, int i)
@@ -1241,7 +1249,7 @@ static void txt_draw(void)
         char c[4] = { k_chars[i], 0 };
 
         if (c[0] == ' ')
-            memcpy(c, "\xE2\x90\xA3", 4);       /* (the space as a visible sign) */
+            memcpy(c, "\xC2\xB7", 3);           /* (the space as a visible dot) */
         else if (X.lower && c[0] >= 'A' && c[0] <= 'Z')
             c[0] = (char)(c[0] + 32);
         if (!k)
@@ -1278,7 +1286,7 @@ static void txt_act(int a, int i)
     case A_OPEN_HOLD:
         X.lower = !X.lower;
         break;
-    case A_BACK:
+    case A_SAFE:                         /* BACK: the last character (an empty name: leave) */
         if (!n) {
             nav_pop();
             return;

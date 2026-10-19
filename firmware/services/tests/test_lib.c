@@ -10,7 +10,8 @@
  *     view               the committed slot's trailer
  *     coll A B [artist]  lib_coll(A, B)
  * --fail-after N: every block write after the N-th fails (a power cut: the image keeps what was
- * written before). --io-busy K: lib_io_ok() says no every K-th call (audio without headroom).
+ * written before). --io-busy K: lib_io_ok() says no in every K-th pass (audio without headroom), and
+ * lib_io_dirty() ends a loop every 7th test (a slice that queued blocks).
  */
 #include <stdarg.h>
 #include <stdio.h>
@@ -24,6 +25,8 @@
 
 static FILE *s_img;
 static long s_fail_after = -1, s_writes, s_reads, s_io_busy, s_io_calls;
+static int s_io_no;                      /* storage is off for this lib_step() (lib_io_ok() says no) */
+static long s_io_viol;                   /* ... and a sector was read or written in it */
 static uint32_t s_scratch[LIB_SCRATCH / 4];
 uint32_t *const lib_scratch = s_scratch;
 lib_status_t g_lib;
@@ -32,6 +35,7 @@ static uint32_t s_serial;
 static int img_read(uint32_t lba, uint32_t count, void *buf)
 {
     s_reads += count;
+    s_io_viol += s_io_no;
     return fseek(s_img, (long)lba * 512L, SEEK_SET) || fread(buf, 512, count, s_img) != count;
 }
 
@@ -40,6 +44,7 @@ static int img_write(uint32_t lba, uint32_t count, const void *buf)
     if (s_fail_after >= 0 && s_writes >= s_fail_after)
         return -1;
     s_writes++;
+    s_io_viol += s_io_no;
     return fseek(s_img, (long)lba * 512L, SEEK_SET) || fwrite(buf, 512, count, s_img) != count;
 }
 
@@ -53,7 +58,15 @@ uint64_t lib_now_us(void)
 
 int lib_io_ok(void)
 {
-    return !s_io_busy || ++s_io_calls % (unsigned long)s_io_busy != 0;
+    return !s_io_no;
+}
+
+/* --io-busy: also a slice ended early (as by a block queued) every 7th test of a loop */
+int lib_io_dirty(void)
+{
+    static unsigned long n;
+
+    return s_io_busy && ++n % 7u == 0;
 }
 
 void lib_log(const char *fmt, ...)
@@ -67,6 +80,16 @@ void lib_log(const char *fmt, ...)
 }
 
 uint32_t lib_vol_serial(int vol) { return s_serial; }
+
+/* startup/ap_ovl.c on the device: the extended reader in the modes' window; --tags-busy: the
+ * USB-C earphones hold it (the walk falls back to the basic reader) */
+static int s_tags_busy;
+int tags_read_ext(uint32_t (*rd)(void *, uint32_t, void *, uint32_t), void *u, uint32_t size, int kind, void *out);
+int ap_lib_tags_ok(void) { return !s_tags_busy; }
+int ap_lib_tags(uint32_t (*rd)(void *, uint32_t, void *, uint32_t), void *u, uint32_t size, int kind, void *out)
+{
+    return s_tags_busy ? -2 : tags_read_ext(rd, u, size, kind, out);
+}
 void lib_serial_forget(void) { }
 
 uint32_t fwu_crc(uint32_t crc, const uint8_t *p, uint32_t n)
@@ -155,6 +178,8 @@ int main(int argc, char **argv)
             slice = atol(argv[a + 1]);
         else if (!strcmp(argv[a], "--io-busy"))
             s_io_busy = atol(argv[a + 1]);
+        else if (!strcmp(argv[a], "--tags-busy"))
+            s_tags_busy = atoi(argv[a + 1]);
         else if (!strcmp(argv[a], "--serial"))
             s_serial = (uint32_t)strtoul(argv[a + 1], 0, 16);
     }
@@ -176,11 +201,21 @@ int main(int argc, char **argv)
             if (full)
                 a++;
             lib_request(vol, full);
-            while (lib_step())
+            for (;;) {
+                int more;
+
+                /* --io-busy K: storage off for every K-th pass (audio without headroom): the
+                 * harness says so, not the job, so a pass that never asks is caught too */
+                s_io_no = s_io_busy && ++s_io_calls % (unsigned long)s_io_busy == 0;
+                more = lib_step();
+                s_io_no = 0;
+                if (!more)
+                    break;
                 steps++;
-            printf("stats reads=%ld writes=%ld steps=%lu ok=%d tracks=%u seq=%u slot=%c\n", s_reads - r0, s_writes - w0,
+            }
+            printf("stats reads=%ld writes=%ld steps=%lu ok=%d tracks=%u seq=%u slot=%c io_viol=%ld\n", s_reads - r0, s_writes - w0,
                    steps, g_lib_view[vol].ok, (unsigned)g_lib_view[vol].tr.ntracks, (unsigned)g_lib_view[vol].tr.seq,
-                   'A' + g_lib_view[vol].slot);
+                   'A' + g_lib_view[vol].slot, s_io_viol);
         } else if (!strcmp(argv[a], "rows") && a + 1 < argc) {
             int sec = sec_of(argv[++a]);
 

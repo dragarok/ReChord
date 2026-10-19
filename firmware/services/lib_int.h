@@ -8,6 +8,7 @@
  *   <base>.RWA / .RWB   the walk's folders ("RAW"): one record per folder, in walk order
  *   <base>.RTA / .RTB   the walk's tracks: each folder's tracks together (its 'F' says where)
  *   <base>.IXA / .IXB   the index ("IDX"): the views, sorted, built from the RAW of the same slot
+ *   <base>.RCA / .RCB   the walk's last checkpoint (one 'C' record), while a first walk runs
  *   LIBT0..LIBT5.TMP    the sorter's runs and results (any job; rewritten freely, removed after)
  * Two slots, A and B: a refresh writes the slot that is not current, RAW first then IDX, and the
  * IDX's trailer (written last, closed last) is the commit. A slot counts only when its IDX trailer
@@ -19,7 +20,9 @@
  *   'F' folder  u32 clus, size, pclus, psize; u16 slot; u8 rflags; u8 depth; u32 sig; u32 parent;
  *               u32 toff, tcount, tlen (its tracks in the tracks file); name (u8 n + bytes).
  *               Written once its tracks are: before its subfolders' (depth first, pre-order).
- *   'C' check   the walk so far (lib_ckpt_hdr_t, the stack, its names), then u32 len, u32 LIB_CKPT_MAGIC
+ *   'C' check   (its own file, .RC?) the walk so far: lib_ckpt_hdr_t, the stack, its names, then
+ *               u32 len, u32 LIB_CKPT_MAGIC. After a power cut the walk goes on from it: the folders
+ *               and tracks files cut back to the sizes it names (fs_open_append_at).
  *   'E' end     lib_rawend_t, then u32 len, u32 LIB_END_MAGIC
  * Tracks file: 'T' records: u32 nh, clus, size, wt; u16 slot; u8 rflags; u8 kind; u16 trk; u8 disc;
  *   u8 0; u16 year; u16 dur (s); title, artist, album, album artist, genre (u8 n + bytes each).
@@ -46,6 +49,11 @@
 /* ---- platform (lib_job.c on the device, test_lib.c on the host) ---- */
 uint64_t lib_now_us(void);
 int lib_io_ok(void);                 /* storage may be used now (audio has headroom) */
+/* This slice queued blocks to Internal's write-behind queue: end it now (a big write after them
+ * would first wait for each, ~3 ms a block). LIB_OVER: a loop's test, the clock every 16th row. */
+int lib_io_dirty(void);
+extern uint32_t lib_slice_wr;        /* fs_target_nwr when the slice began (lib_job.c) */
+#define LIB_OVER(k, t_end) ((((k) & 15) == 15 && lib_now_us() >= (t_end)) || lib_io_dirty())
 #ifdef LIB_HOST
 void lib_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 #else
@@ -62,6 +70,8 @@ extern uint32_t *const lib_scratch;  /* LIB_SCRATCH bytes, word aligned (service
  *   [0, 28 KiB)       the job: the walk's or the build's working set (lib_scan.c, lib_build.c)
  *   [28 KiB, 32 KiB)  the views and the lists: the index's sector cache, the lists' buffers */
 #define LIB_JOB_SCRATCH 28672u
+#define LIB_WBUF 4608u               /* the job's main writers: 9 sectors, past emmc_write_async's
+                                      * queue (more than half of it: one CMD25) */
 #define LIB_TAIL(off) ((uint8_t *)lib_scratch + LIB_JOB_SCRATCH + (off))
 #define LT_IDXC   LIB_TAIL(0)        /* 4 x 512: lib_idx.c's cache */
 #define LT_RBUF   LIB_TAIL(2048)     /* 512: lib_m3u.c's reader */
@@ -115,6 +125,7 @@ typedef struct {
 
 typedef struct {
     uint32_t seq, nfolders, ntracks, old_off, crc, tsize, tcrc, read_tags, root_sig;
+    uint32_t rsize;                  /* the folders file's size (crc: its CRC) */
     uint16_t sp, names;
 } lib_ckpt_hdr_t;
 
@@ -126,6 +137,7 @@ typedef struct {
     int err;
 } lw_t;
 int lw_open(lw_t *w, const char *path, void *buf, uint32_t cap, int append);
+int lw_open_at(lw_t *w, const char *path, void *buf, uint32_t cap, uint32_t at);   /* append from `at` */
 void lw_put(lw_t *w, const void *p, uint32_t n);
 void lw_u8(lw_t *w, uint32_t v);
 void lw_u16(lw_t *w, uint32_t v);
@@ -152,6 +164,7 @@ void lr_close(lr_t *r);
 /* The next record ([u8 type][u8][u16 len]...): a pointer to all len bytes, NULL at the end. */
 const uint8_t *lr_rec(lr_t *r);
 const uint8_t *lr_rec16(lr_t *r);   /* a sort record: [u16 len]... */
+const uint8_t *lr_rec_raw(lr_t *r); /* a RAW record, checkpoints passed over */
 
 static inline uint32_t lib_le16(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8; }
 static inline uint32_t lib_le32(const uint8_t *p) { return lib_le16(p) | lib_le16(p + 2) << 16; }
@@ -170,7 +183,7 @@ uint32_t lib_fnv(uint32_t h, const void *p, uint32_t n);
 
 /* ---- the sorter (lib_sort.c): variable-length records [u16 len]..., any comparator ---- */
 typedef int (*lib_cmp_t)(const uint8_t *a, const uint8_t *b);
-#define LIB_RUNS 192u
+#define LIB_RUNS 256u
 typedef struct {
     lib_cmp_t cmp;
     int phase, tmp_in, tmp_out, result;   /* result: the temp file holding the sorted records */
@@ -206,7 +219,7 @@ typedef struct {                     /* the folder being visited */
     fs_ref_t ref;
     uint32_t idx, parent, sig, old_off, old_sig, old_toff, old_tlen, toff, tcount, before;
     uint16_t nlen, last_slot, nfiles;
-    uint8_t depth, old, cont, root, done_files, at_cursor;
+    uint8_t depth, old, cont, root, done_files, at_cursor, partial;
     int32_t cont_slot;
 } lib_cur_t;
 
@@ -244,13 +257,14 @@ struct lib_job {
     uint8_t grp_kl[3];               /* the group being collected: its names' lengths (lib_build.c B_KEY) */
     /* stats for the log and the tests */
     uint64_t t_start, t_busy;
-    uint32_t steps, worst_us, reads0;
+    uint32_t steps, worst_us, reads0, deferred, nrd0, nwr0;
 };
 typedef struct lib_job lib_job_t;
 #define LIBW_DEPTH 1u
 #define LIBW_PEND  2u
 #define LIBW_MAX   4u
 #define LIBW_NAMES 8u
+#define LIBW_PARTIAL 16u
 /* scan_step: the walk found nothing changed (no RAW written, no build) */
 #define LIB_UNCHANGED 2
 /* scan_start: the walk of this seq is already whole (a cut in the build): build it */

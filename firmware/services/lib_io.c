@@ -23,6 +23,22 @@ int lw_open(lw_t *w, const char *path, void *buf, uint32_t cap, int append)
     return 0;
 }
 
+extern fs_file_t *fs_open_append_at(const char *path, uint32_t at) __attribute__((weak));
+
+int lw_open_at(lw_t *w, const char *path, void *buf, uint32_t cap, uint32_t at)
+{
+    memset(w, 0, sizeof *w);
+    w->buf = buf;
+    w->cap = cap;
+    w->f = fs_open_append_at ? fs_open_append_at(path, at) : 0;
+    if (!w->f) {
+        w->err = FS_ERR_OPEN;
+        return FS_ERR_OPEN;
+    }
+    w->pos = at;
+    return 0;
+}
+
 int lw_flush(lw_t *w)
 {
     if (w->n && !w->err) {
@@ -210,6 +226,22 @@ const uint8_t *lr_rec(lr_t *r)
         return 0;
     r->i += len;
     return p;
+}
+
+/* The next record that is not a checkpoint ('C': the walk's state, bigger than any reader's
+ * buffer: seeked over, never read). */
+const uint8_t *lr_rec_raw(lr_t *r)
+{
+    for (;;) {
+        const uint8_t *p = lr_peek(r, 4);
+        uint32_t len;
+
+        if (!p || (len = lib_le16(p + 2)) < 4u)
+            return 0;
+        if (p[0] != LIB_RAW_C)
+            return lr_rec(r);
+        lr_seek(r, lr_tell(r) + len);
+    }
 }
 
 const uint8_t *lr_rec16(lr_t *r)

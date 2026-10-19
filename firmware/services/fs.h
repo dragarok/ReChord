@@ -123,6 +123,11 @@ fs_file_t *fs_open_write(const char *path);
 /* Open a file for appending, creating it if needed. NULL on failure. */
 fs_file_t *fs_open_append(const char *path);
 
+/* Open an existing file for appending at byte `at` (<= its size): what was past `at` is cut off
+ * when fs_close() switches the entry (until then the file is as it was). The target's FAT32 only
+ * (the library's resume after a power cut, services/lib_scan.c); NULL where unsupported. */
+fs_file_t *fs_open_append_at(const char *path, uint32_t at);
+
 /* Write <len> bytes at the end. Returns bytes written (short = disk full or
  * I/O error part way) or FS_ERR_*. Word-aligned buffers of whole sectors
  * go to the device without a copy. */

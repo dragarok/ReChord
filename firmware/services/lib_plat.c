@@ -9,6 +9,7 @@
 #include "audio/audio.h"
 #include "drivers/clock.h"
 #include "drivers/emmc.h"
+#include "fs_target.h"
 
 uint32_t *const lib_scratch = g_scratch;
 
@@ -17,12 +18,22 @@ uint64_t lib_now_us(void)
     return time_us();
 }
 
-/* Storage may be used now: audio has its headroom (as the log and the settings, ap_bg.c), and no
- * block of the write-behind queue is being programmed (a read would wait for it in the slice: SD
- * NAND programs a block in ~3 ms). The queue drains a block a pass meanwhile. */
+/* Storage may be used now: audio has its headroom (as the log and the settings, ap_bg.c) and
+ * Internal's write-behind queue is empty. Then nothing in the slice waits for a block being
+ * programmed (SD NAND: ~3 ms a block; a read waits for the one in flight, a big write first drains
+ * the queue): the blocks a slice queues are programmed between slices, by the main loop. The job's
+ * big writes (LIB_WBUF) go to the card as one CMD25 of their own (emmc_write_async). With up to 4
+ * blocks allowed queued the slices that closed a file took 8-13 ms (m44 underrun). */
 int lib_io_ok(void)
 {
-    return audio_write_ok() && !emmc_busy();
+    return audio_write_ok() && !emmc_busy() && !emmc_wq_pending();
+}
+
+/* The slice wrote: end it. Internal's blocks wait in its queue (a big write next would wait for each);
+ * the card's writes are synchronous, each command ~3 ms (QEMU's figure; the sd-rw driver's). */
+int lib_io_dirty(void)
+{
+    return emmc_wq_pending() != 0u || fs_target_nwr != lib_slice_wr;
 }
 
 static uint32_t s_serial;
@@ -35,6 +46,8 @@ void lib_serial_forget(void)
 
 /* The card's volume serial (FAT32 0x43, FAT16 0x27, exFAT 0x64) from its boot sector: an MBR's
  * first partition, or a superfloppy. Read once per insertion. */
+extern uint32_t fs_target_serial(int idx) __attribute__((weak));   /* sd-rw: the mounted volume's */
+
 uint32_t lib_vol_serial(int vol)
 {
     uint32_t b[128];
@@ -43,6 +56,8 @@ uint32_t lib_vol_serial(int vol)
 
     if (vol != 1)
         return 0;
+    if (fs_target_serial)
+        return fs_target_serial(1);
     if (s_serial_ok)
         return s_serial;
     s_serial = 0;

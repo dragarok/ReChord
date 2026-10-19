@@ -25,12 +25,12 @@
 #define S8        ((uint8_t *)lib_scratch)
 #define B_RDBUF   (S8 + 0)
 #define B_RDCAP   2048u
-#define B_TABUF   (S8 + 2048)
-#define B_IDXBUF  (S8 + 4096)
-#define B_FRBUF   (S8 + 6144)            /* the folders file, beside the tracks (S1); S5's path */
-#define B_PATH    ((char *)(S8 + 6144))
-#define B_BLK     ((uint32_t *)(void *)(S8 + 6144))  /* a section's block index, while its rows go out */
-#define B_NBLK    ((LIB_JOB_SCRATCH - 512u - 6144u) / 4u)
+#define B_TABUF   (S8 + 2048)            /* (the sorter's writer's place: never at the same time) */
+#define B_IDXBUF  (S8 + 6656)
+#define B_FRBUF   (S8 + 11264)           /* the folders file, beside the tracks (S1); S5's path */
+#define B_PATH    ((char *)(S8 + 11264))
+#define B_BLK     ((uint32_t *)(void *)(S8 + 11264)) /* a section's block index, while its rows go out */
+#define B_NBLK    ((LIB_JOB_SCRATCH - 512u - 11264u) / 4u)
 #define B_KEY(i)  (S8 + LIB_JOB_SCRATCH - 512u + 164u * (i))   /* the group's names (3 x 164) */
 
 enum {
@@ -239,10 +239,10 @@ static int prod_s1(lib_job_t *j, uint64_t t_end)
         const uint8_t *g, *alb, *tit, *art, *gen, *aart;
         uint8_t *o;
 
-        if ((k & 15) == 15 && lib_now_us() >= t_end)
+        if (LIB_OVER(k, t_end))
             return 0;
         while (!j->f_left) {             /* the next folder with tracks */
-            if (!(p = lr_rec(&s_fr)) || p[0] == LIB_RAW_E) {
+            if (!(p = lr_rec_raw(&s_fr)) || p[0] == LIB_RAW_E) {
                 lr_close(&s_fr);
                 return 1;
             }
@@ -309,7 +309,7 @@ static int prod_s2(lib_job_t *j, uint64_t t_end)
         const uint8_t *p, *tit, *art;
         uint8_t *o;
 
-        if ((k & 15) == 15 && lib_now_us() >= t_end)
+        if (LIB_OVER(k, t_end))
             return 0;
         if (!(p = lr_rec16(&j->in)))
             return 1;
@@ -336,7 +336,7 @@ static int prod_ta(lib_job_t *j, uint64_t t_end)
         const uint8_t *p;
         uint8_t *o;
 
-        if ((k & 15) == 15 && lib_now_us() >= t_end)
+        if (LIB_OVER(k, t_end))
             return 0;
         if (!(p = lr_rec16(&j->in)))
             return 1;
@@ -358,9 +358,9 @@ static int prod_s5(lib_job_t *j, uint64_t t_end)
         const uint8_t *p;
         uint8_t *o;
 
-        if ((k & 15) == 15 && lib_now_us() >= t_end)
+        if (LIB_OVER(k, t_end))
             return 0;
-        if (!(p = lr_rec(&j->in)) || p[0] == LIB_RAW_E)
+        if (!(p = lr_rec_raw(&j->in)) || p[0] == LIB_RAW_E)
             return 1;
         if (p[0] != LIB_RAW_F)
             continue;
@@ -419,7 +419,7 @@ static int run_sort(lib_job_t *j, prod_t prod, uint64_t t_end)
             lr_close(&j->in);
             return 1;
         }
-        if (r == 0 || lib_now_us() >= t_end)
+        if (r == 0 || lib_now_us() >= t_end || lib_io_dirty())
             return 0;
     }
 }
@@ -490,7 +490,7 @@ static int cons_trk(lib_job_t *j, lw_t *ta, uint64_t t_end)
         uint8_t o[2 + 27 + 256 + 161];
         uint32_t n;
 
-        if ((k & 15) == 15 && lib_now_us() >= t_end)
+        if (LIB_OVER(k, t_end))
             return 0;
         if (!(p = lr_rec16(&j->in))) {
             if (j->grp_n)
@@ -520,7 +520,7 @@ static int cons_albrows(lib_job_t *j, uint64_t t_end, int letters)
     for (int k = 0; ; k++) {
         const uint8_t *p;
 
-        if ((k & 15) == 15 && lib_now_us() >= t_end)
+        if (LIB_OVER(k, t_end))
             return 0;
         if (!(p = lr_rec16(&j->in)))
             return 1;
@@ -557,7 +557,7 @@ static int cons_groups(lib_job_t *j, uint64_t t_end, int genres)
     for (int k = 0; ; k++) {
         const uint8_t *p, *key;
 
-        if ((k & 15) == 15 && lib_now_us() >= t_end)
+        if (LIB_OVER(k, t_end))
             return 0;
         if (!(p = lr_rec16(&j->in))) {
             if (j->grp_n)
@@ -585,7 +585,7 @@ static int cons_songs(lib_job_t *j, uint64_t t_end)
     for (int k = 0; ; k++) {
         const uint8_t *p;
 
-        if ((k & 15) == 15 && lib_now_us() >= t_end)
+        if (LIB_OVER(k, t_end))
             return 0;
         if (!(p = lr_rec16(&j->in)))
             return 1;
@@ -598,7 +598,7 @@ static int cons_folders(lib_job_t *j, uint64_t t_end)
     for (int k = 0; ; k++) {
         const uint8_t *p;
 
-        if ((k & 15) == 15 && lib_now_us() >= t_end)
+        if (LIB_OVER(k, t_end))
             return 0;
         if (!(p = lr_rec16(&j->in)))
             return 1;
@@ -653,10 +653,10 @@ int build_step(lib_job_t *j, uint64_t t_end)
                 return r;
             j->s1 = j->srt.result;
             tmp_path(p, sizeof p, 2);
-            if (lw_open(&s_ta, p, B_TABUF, 2048u, 0))
+            if (lw_open(&s_ta, p, B_TABUF, LIB_WBUF, 0))
                 return -1;
             snprintf(p, sizeof p, "%s/%s.IX%c", j->dir, j->base, 'A' + j->slot);
-            if (lw_open(&j->idx, p, B_IDXBUF, 2048u, 0) || start_pass(j, j->s1))
+            if (lw_open(&j->idx, p, B_IDXBUF, LIB_WBUF, 0) || start_pass(j, j->s1))
                 return -1;
             sec_begin(j);
             j->bph = B_TRK;

@@ -20,7 +20,7 @@ from make_fw1 import rknano_crc32  # noqa: E402
 
 OVL_MAGIC = 0x314C564F            # "OVL1"
 HDR = 24                          # magic, abi, id, len, crc, api
-IDS = {"usbdac": 1, "usbout": 2, "dev": 3, "lib": 4}   # services/ovl.h OVL_*
+IDS = {"usbdac": 1, "usbout": 2, "dev": 3, "lib": 4, "libtag": 5}   # services/ovl.h OVL_*
 WINDOW = {"lib": "__ovl_lib_start"}         # the library's own window; the others: __ovl_win_start
 
 

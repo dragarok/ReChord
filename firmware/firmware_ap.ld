@@ -70,12 +70,13 @@ MEMORY
     /* OVL_WIN: the modes' overlay window, and OVL_LIB the library's. Core-A SRAM between the
        audio input ring (to 0x0303FFFF) and the loaded image (0x0304F490): nothing of ours is there
        (the loader's data sits there while it boots us, SDK BuildAll.sct LOADER_DATA_BASE
-       0x0304A000, docs/community.md 4.2, and is dead once our code runs). OVL_WIN 16 KiB (its
-       largest overlay is under 9 KiB), OVL_LIB the 44 KiB after it, to 0x0304F000: the music
-       library alone, so it never takes a window from the USB DAC or USB-C earphones. Code and
-       read-only data only: an overlay's .data and .bss are resident. */
-    OVL_WIN (rx)  : ORIGIN = 0x03040000, LENGTH = 0x00004000
-    OVL_LIB (rx)  : ORIGIN = 0x03044000, LENGTH = 0x0000B000
+       0x0304A000, docs/community.md 4.2, and is dead once our code runs). OVL_WIN 14 KiB (its
+       largest overlay is under 11 KiB), then 8 KiB kept free (a file-system window, sd-rw), then
+       OVL_LIB, 38 KiB to 0x0304F000: the music library alone, so it never takes a window from
+       the USB DAC or USB-C earphones. Code and read-only data only: an overlay's .data and .bss
+       are resident. */
+    OVL_WIN (rx)  : ORIGIN = 0x03040000, LENGTH = 0x00003800
+    OVL_LIB (rx)  : ORIGIN = 0x03045800, LENGTH = 0x00009800
 
     /* OVL_STORE: the overlays' load addresses. Only in the full ELF: no such memory, nothing
        loads from it; the image carries each overlay as a module (Makefile: objcopy -R strips
@@ -119,6 +120,16 @@ SECTIONS
             KEEP(*(.ovl_hdr.usbout))
             *(.ovl.usbout.*)
             *usb_out_rknanoc.o(.text* .rodata*)
+            . = ALIGN(4);
+        }
+        /* the library's extended tag reader (services/lib_tags.c): only its walk reads tags, and
+           only for files that changed; a walk while USB-C earphones hold this window uses the
+           resident reader and reads those files again later (services/lib_scan.c) */
+        .ovl_libtag
+        {
+            KEEP(*(.ovl_hdr.libtag))
+            *(.ovl.libtag.*)
+            *lib_tags.o(.text* .rodata*)
             . = ALIGN(4);
         }
         /* the Developer tests (Settings > Developer) */
@@ -263,10 +274,12 @@ NOCROSSREFS_TO(.ovl_usbdac .vectors .text .data)
 NOCROSSREFS_TO(.ovl_usbout .vectors .text .data)
 NOCROSSREFS_TO(.ovl_dev .vectors .text .data)
 NOCROSSREFS_TO(.ovl_lib .vectors .text .data)
-NOCROSSREFS(.ovl_lib .ovl_usbdac .ovl_usbout .ovl_dev)
+NOCROSSREFS_TO(.ovl_libtag .vectors .text .data)
+NOCROSSREFS(.ovl_lib .ovl_usbdac .ovl_usbout .ovl_dev .ovl_libtag)
 __ovl_lib_start = ORIGIN(OVL_LIB);
 __ovl_lib_end   = ORIGIN(OVL_LIB) + LENGTH(OVL_LIB);
-ASSERT(ORIGIN(OVL_LIB) >= ORIGIN(OVL_WIN) + LENGTH(OVL_WIN), "the library's window after the modes' window")
+ASSERT(ORIGIN(OVL_LIB) >= ORIGIN(OVL_WIN) + LENGTH(OVL_WIN) + 0x2000,
+       "the library's window after the modes' window and the 8 KiB kept for sd-rw's file-system window")
 ASSERT(__ovl_lib_end <= 0x0304F000, "the library's window must stay below the loaded image (0x0304F490)")
 ASSERT(ovl_hdr_lib == ORIGIN(OVL_LIB), "the library overlay's header must be first in its window")
 ASSERT(SIZEOF(.ovl_lib) <= LENGTH(OVL_LIB), "the library overlay is over its window")
@@ -274,11 +287,13 @@ __ovl_win_start = ORIGIN(OVL_WIN);
 __ovl_win_end   = ORIGIN(OVL_WIN) + LENGTH(OVL_WIN);
 ASSERT(ORIGIN(OVL_WIN) >= 0x03040000, "the overlay window must stay above the audio input ring")
 ASSERT(__ovl_win_end <= 0x0304F000, "the overlay window must stay below the loaded image (0x0304F490)")
-ASSERT(ovl_hdr_usbdac == ORIGIN(OVL_WIN) && ovl_hdr_usbout == ORIGIN(OVL_WIN) && ovl_hdr_dev == ORIGIN(OVL_WIN),
+ASSERT(ovl_hdr_usbdac == ORIGIN(OVL_WIN) && ovl_hdr_usbout == ORIGIN(OVL_WIN) && ovl_hdr_dev == ORIGIN(OVL_WIN) &&
+       ovl_hdr_libtag == ORIGIN(OVL_WIN),
        "each overlay must start with its header")
 ASSERT(SIZEOF(.ovl_usbdac) <= LENGTH(OVL_WIN), "the usbdac overlay is over the window")
 ASSERT(SIZEOF(.ovl_usbout) <= LENGTH(OVL_WIN), "the usbout overlay is over the window")
 ASSERT(SIZEOF(.ovl_dev) <= LENGTH(OVL_WIN), "the dev overlay is over the window")
+ASSERT(SIZEOF(.ovl_libtag) <= LENGTH(OVL_WIN), "the libtag overlay is over the window")
 
 /* ---- layout contracts (fail the link loudly on violation) ------------- */
 ASSERT(ap_vectors == 0x03050000,

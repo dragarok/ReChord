@@ -9,19 +9,19 @@
  * read handle (each keeps 1 KiB, so its current record is always contiguous), into the other
  * temp file, level by level until one run is left: that file is the result.
  *
- * Scratch while sorting: [0, 2K) the producer's reader, [2K, 4K) this writer, [4K, 6K) the index
- * writer (lib_build.c), [6K, 7K) the build's folders reader, [7K, 28K) the arena, or the merge
- * cursors' buffers and the cursors themselves.
+ * Scratch while sorting: [0, 2K) the producer's reader, [2K, 6.5K) this writer, [6.5K, 11K) the
+ * index writer (lib_build.c), [11K, 12K) the build's folders reader, [12K, 28K) the arena, or the
+ * merge cursors' buffers and the cursors themselves.
  */
 #include <string.h>
 
 #include "lib_int.h"
 
-#define SRT_WBUF   ((uint8_t *)lib_scratch + 2048u)
-#define SRT_ARENA  ((uint8_t *)lib_scratch + 7168u)
-#define SRT_ACAP   (LIB_JOB_SCRATCH - 7168u)
+#define SRT_WBUF   ((uint8_t *)lib_scratch + 2048u)        /* LIB_WBUF */
+#define SRT_ARENA  ((uint8_t *)lib_scratch + 12288u)
+#define SRT_ACAP   (LIB_JOB_SCRATCH - 12288u)
 #define SRT_CUR    1024u
-#define SRT_FAN    20                        /* x SRT_CUR within the arena, their cursors after */
+#define SRT_FAN    15                        /* x SRT_CUR within the arena, their cursors after */
 #define SRT_REC_MAX 1024u
 
 enum { PH_FILL, PH_SORT, PH_WRITE, PH_MSTART, PH_MERGE, PH_DONE, PH_ERR };
@@ -44,7 +44,7 @@ static int open_out(lib_sort_t *s, int k)
     char p[48];
 
     tmp_name(p, sizeof p, k);
-    return lw_open(&s->w, p, SRT_WBUF, 2048u, 0);
+    return lw_open(&s->w, p, SRT_WBUF, LIB_WBUF, 0);
 }
 
 void srt_begin(lib_sort_t *s, lib_cmp_t cmp, int tmp_a, int tmp_b)
@@ -201,7 +201,7 @@ int srt_step(lib_sort_t *s, uint64_t t_end)
     uint32_t tick = 0;
 
     for (;;) {
-        if ((++tick & 15u) == 0 && lib_now_us() >= t_end)
+        if (((++tick & 15u) == 0 && lib_now_us() >= t_end) || lib_io_dirty())
             return 0;
         switch (s->phase) {
         case PH_FILL:

@@ -23,6 +23,7 @@
 
 #include "lib_int.h"
 #include "lib.h"
+#include "fs_target.h"
 
 extern int fs_mkdir(const char *path) __attribute__((weak));     /* sdrw: FAT32/exFAT mkdir */
 /* the screens' side (ui/lib_ui.c; absent in the host test) */
@@ -117,13 +118,17 @@ static void job_end(int ok)
     lib_job_t *j = &s_job;
     uint32_t ms = (uint32_t)((lib_now_us() - j->t_start) / 1000u);
 
-    if (ok)
+    if (ok) {
         lib_log("lib: %s indexed: %u tracks, %u folders, %u albums, %u artists, %u genres; %u files read%s, "
-                "%u reused, %u copied; %u ms (%u ms busy, %u slices, worst %u us)", vol_name(j->vol),
+                "%u reused, %u copied", vol_name(j->vol),
                 (unsigned)j->ntracks, (unsigned)j->nfolders, (unsigned)j->n_alb, (unsigned)j->n_art,
                 (unsigned)j->n_gen, (unsigned)(j->read_tags - j->reads0), j->reads0 ? " (more before a power cut)" : "",
-                (unsigned)j->reused, (unsigned)j->copied,
-                (unsigned)ms, (unsigned)(j->t_busy / 1000u), (unsigned)j->steps, (unsigned)j->worst_us);
+                (unsigned)j->reused, (unsigned)j->copied);
+        lib_log("lib: %s cost: %u ms (%u ms busy, %u slices, worst %u us, %u passes deferred); "
+                "%u sectors read, %u written", vol_name(j->vol),
+                (unsigned)ms, (unsigned)(j->t_busy / 1000u), (unsigned)j->steps, (unsigned)j->worst_us,
+                (unsigned)j->deferred, (unsigned)j->nrd0, (unsigned)j->nwr0);
+    }
     j->state = J_IDLE;
     s_active = -1;
     g_lib.busy = 0;
@@ -136,11 +141,13 @@ static void job_abort(const char *why)
 
     if (s_active < 0)
         return;
-    if (s_gone[j->vol] || s_gone[strncmp(j->dir, "/SD", 3) == 0]) {
-        j->raw.f = j->old.f = j->idx.f = j->in.f = j->srt.w.f = 0;   /* (gone with the volume) */
+    if (s_gone[strncmp(j->dir, "/SD", 3) == 0]) {   /* the job's files were there: gone with it */
+        j->raw.f = j->trk.f = j->idx.f = j->in.f = j->srt.w.f = 0;
         srt_forget();
         build_forget();
     }
+    if (s_gone[strncmp(g_lib_view[j->vol].dir, "/SD", 3) == 0])
+        j->old.f = j->otrk.f = 0;        /* (the previous walk's, read from the view's place) */
     if (j->state == J_SCAN)
         scan_abort(j);
     else if (j->state == J_BUILD)
@@ -165,6 +172,7 @@ static int job_start(int vol, int full)
     j->seq = (v->ok ? v->tr.seq : 0u) + 1u;
     j->slot = v->ok && !strcmp(v->dir, j->dir) && !strcmp(v->base, j->base) ? 1 - v->slot : 0;
     j->t_start = lib_now_us();
+    j->nrd0 = j->nwr0 = 0;              /* (the job's own sectors: counted slice by slice) */
     s_active = vol;
     g_lib.busy = 1;
     g_lib.busy_vol = (uint8_t)vol;
@@ -258,6 +266,8 @@ void lib_data_changed(void)
     g_lib.changed++;
 }
 
+uint32_t lib_slice_wr;
+
 int lib_step(void)
 {
     lib_job_t *j = &s_job;
@@ -280,7 +290,9 @@ int lib_step(void)
     if (s_active < 0) {
         int vol = s_want[1] && g_lib.mounted[1] ? 1 : s_want[0] && g_lib.mounted[0] ? 0 : -1;
 
-        if (s_clean && lib_io_ok()) {    /* one file a pass: the sorter's, an index left behind */
+        if ((s_clean || vol >= 0) && !lib_io_ok())
+            return 1;                    /* (a job's start and the clean-up use storage too) */
+        if (s_clean) {    /* one file a pass: the sorter's, an index left behind */
             char p[48], dir[24], base[12];
             int k = 0;
 
@@ -318,20 +330,29 @@ int lib_step(void)
         return 1;
     }
 
-    if (!lib_io_ok())
+    if (!lib_io_ok()) {
+        j->deferred++;                   /* (audio without headroom, or a block being programmed) */
         return 1;
+    }
     t0 = lib_now_us();
     t_end = t0 + LIB_STEP_US;
+    {
+        uint32_t rd0 = fs_target_nrd, wr0 = lib_slice_wr = fs_target_nwr;
+
+        r = j->state == J_SCAN ? scan_step(j, t_end) : j->bph < 0 ? (build_start(j) ? -1 : 0) : build_step(j, t_end);
+        j->nrd0 += fs_target_nrd - rd0;
+        j->nwr0 += fs_target_nwr - wr0;
+    }
     if (j->state == J_SCAN) {
-        r = scan_step(j, t_end);
         if (r == LIB_UNCHANGED) {        /* nothing to write, nothing to build */
             us = lib_now_us() - t0;
             j->t_busy += us;
             j->steps++;
-            lib_log("lib: %s unchanged: %u tracks, %u folders, %u ms (%u ms busy, %u slices, worst %u us)",
-                    vol_name(j->vol), (unsigned)j->ntracks, (unsigned)j->nfolders,
-                    (unsigned)((lib_now_us() - j->t_start) / 1000u), (unsigned)(j->t_busy / 1000u),
-                    (unsigned)j->steps, (unsigned)(us > j->worst_us ? us : j->worst_us));
+            lib_log("lib: %s unchanged: %u tracks, %u folders, %u ms (%u ms busy, %u slices, worst %u us, %u passes "
+                    "deferred); %u sectors read, %u written", vol_name(j->vol), (unsigned)j->ntracks,
+                    (unsigned)j->nfolders, (unsigned)((lib_now_us() - j->t_start) / 1000u), (unsigned)(j->t_busy / 1000u),
+                    (unsigned)j->steps, (unsigned)(us > j->worst_us ? us : j->worst_us), (unsigned)j->deferred,
+                    (unsigned)j->nrd0, (unsigned)j->nwr0);
             if (j->vol == 0) {
                 char p[48];
 
@@ -351,10 +372,7 @@ int lib_step(void)
                               g_lib_view[j->vol].tr.nfolders : j->nfolders % 50u);
         if (r == 1)
             r = 0;
-    } else if (j->bph < 0) {
-        r = build_start(j) ? -1 : 0;
     } else {
-        r = build_step(j, t_end);
         g_lib.pct = (uint8_t)(60u + (unsigned)j->bph * 40u / 15u);
     }
     us = lib_now_us() - t0;

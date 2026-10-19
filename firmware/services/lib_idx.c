@@ -98,11 +98,14 @@ int idx_load(int vol)
  * handle someone else has been given since). The views on it, and any read from it, end. */
 void lib_forget_handles_vol(int vol)
 {
-    for (int v = 0; v < 2; v++)
-        if (g_lib_view[v].ok && (v == vol || !strncmp(g_lib_view[v].dir, vol ? "/SD" : "/Internal", vol ? 3 : 9))) {
-            s_f[v] = 0;
-            idx_drop(v);
-        }
+    for (int v = 0; v < 2; v++) {
+        if (!g_lib_view[v].ok)
+            continue;
+        if (!strncmp(g_lib_view[v].dir, vol ? "/SD" : "/Internal", vol ? 3 : 9))
+            s_f[v] = 0;                  /* its file was there: the handle is gone with it */
+        if (v == vol || !s_f[v])
+            idx_drop(v);                 /* (a handle on the other volume is closed as usual) */
+    }
 }
 
 int idx_read(int vol, uint32_t off, void *dst, uint32_t len)

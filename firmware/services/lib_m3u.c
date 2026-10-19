@@ -307,7 +307,7 @@ int m3u_open(int k)
 {
     char p[80];
     lr_t r;
-    uint32_t at;
+    uint32_t at, info = 0xFFFFFFFFu;
 
     s_open = -1;
     s_n = 0;
@@ -316,10 +316,13 @@ int m3u_open(int k)
     m3u_path(k, p, sizeof p);
     if (lr_open(&r, p, s_rbuf, RBUF) == 0) {
         while (next_line(&r, s_line, &at) >= 0 && s_n < M3U_MAX) {
+            if (!strncmp(s_line, "#EXTINF:", 8))
+                info = at;               /* (an entry's block starts at its #EXTINF) */
             if (!is_entry(s_line))
                 continue;
             if (s_n % M3U_EVERY == 0)
-                s_off[s_n / M3U_EVERY] = at;
+                s_off[s_n / M3U_EVERY] = info != 0xFFFFFFFFu ? info : at;
+            info = 0xFFFFFFFFu;
             s_n++;
         }
         lr_close(&r);

@@ -26,7 +26,7 @@
 
 #include <stdint.h>
 
-enum { OVL_NONE = 0, OVL_USBDAC, OVL_USBOUT, OVL_DEV, OVL_LIB, OVL_COUNT };
+enum { OVL_NONE = 0, OVL_USBDAC, OVL_USBOUT, OVL_DEV, OVL_LIB, OVL_LIBTAG, OVL_COUNT };
 
 #define OVL_MAGIC 0x314C564Fu        /* "OVL1" */
 

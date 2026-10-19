@@ -51,6 +51,7 @@ const ovl_desc_t ovl_desc[OVL_COUNT] = {
     [OVL_USBOUT] = { "ov_uout", "USB-C out", usbout_stop },
     [OVL_DEV]    = { "ov_dev", "Developer test", NULL },
     [OVL_LIB]    = { "ov_lib", "Library", NULL, 1 },
+    [OVL_LIBTAG] = { "ov_ltag", "Tags", NULL, 0 },
 };
 
 /* The USB interrupt goes wherever usb_irq_hook points (drivers/usb_msc_rknanoc.c): the USB DAC's
@@ -331,4 +332,35 @@ int ap_lib_np_fav(void)
 void ap_lib_data_changed(void)
 {
     LIB_CALL_V(data_changed());
+}
+
+/* ---- libtag: the library's extended tag reader, in the modes' window (lib_tags.c) ------------- */
+
+typedef int (*libtag_read_t)(uint32_t (*rd)(void *, uint32_t, void *, uint32_t), void *u, uint32_t size, int kind,
+                             void *out);
+int tags_read_ext(uint32_t (*rd)(void *, uint32_t, void *, uint32_t), void *u, uint32_t size, int kind, void *out);
+static const libtag_read_t k_libtag OVL_API(libtag) = tags_read_ext;
+OVL_HEADER(libtag, OVL_LIBTAG, &k_libtag);
+
+/* The window is the USB-C earphones' while they are on: the walk then reads the basic tags. */
+int ap_lib_tags_ok(void)
+{
+    const char *why = ovl_why(OVL_LIBTAG);
+
+    return !(ovl_current() == OVL_USBOUT && __wrap_usb_out_active()) && (!why || why[0] == 'b');   /* ("busy") */
+}
+
+/* The library's walk (services/lib_scan.c): a file's tags, album artist, genre, disc, year and
+ * duration too; -2 when the window cannot be had now (the walk falls back, reads it again later). */
+int ap_lib_tags(uint32_t (*rd)(void *, uint32_t, void *, uint32_t), void *u, uint32_t size, int kind, void *out)
+{
+    const libtag_read_t *a;
+    int r;
+
+    if (!ap_lib_tags_ok() || !(a = ovl_get(OVL_LIBTAG)))
+        return -2;
+    ovl_hold(1);
+    r = (*a)(rd, u, size, kind, out);
+    ovl_hold(-1);
+    return r;
 }
