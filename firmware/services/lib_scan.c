@@ -69,7 +69,7 @@ typedef struct {
 } lib_match_t;
 
 enum { WS_POP, WS_SIG, WS_PREFIX, WS_DECIDE, WS_COPY, WS_MATCH, WS_BATCH, WS_FILES, WS_FEND, WS_CONT,
-       WS_END, WS_DONE };
+       WS_END, WS_DONE, WS_CLEAR = 20 };
 
 /* sd-rw's fs.h: the entry an fs_scan callback is called for (its first fields; its fs_stat_t) */
 typedef struct { uint32_t size, wtime, clus; uint8_t is_dir, attr; } lib_fs_stat_t;
@@ -522,17 +522,12 @@ static void raw_path(char *p, int n, const char *dir, const char *base, int t, i
 #define CK_H ((lib_ckpt_hdr_t *)(void *)&j->tr)   /* (the build's trailer: unused in the walk) */
 typedef char ck_fits[sizeof(lib_ckpt_hdr_t) <= sizeof(lib_trailer_t) ? 1 : -1];
 
-/* The walk's writers: new files (a checkpoint of this slot left by an earlier walk removed), or,
+/* The walk's writers: new files (WS_CLEAR removed the slot's old ones and its checkpoint first), or,
  * resumed, each cut back to the size the checkpoint (CK_H) names. */
 static int open_writers(lib_job_t *j, int resumed)
 {
     char p[48];
 
-    if (!resumed) {
-        raw_path(p, sizeof p, j->dir, j->base, 2, j->slot);
-        if (fs_exists(p))
-            fs_remove(p);
-    }
     raw_path(p, sizeof p, j->dir, j->base, 0, j->slot);
     if (resumed ? lw_open_at(&j->raw, p, W_FBUF, 1024u, CK_H->rsize) : lw_open(&j->raw, p, W_FBUF, 1024u, 0))
         return -1;
@@ -771,18 +766,16 @@ int scan_start(lib_job_t *j)
         resumed = ckpt_resume(j);
     j->reads0 = j->read_tags;
     j->lazy = j->old_ok && !resumed;
-    if (!j->lazy) {
+    if (resumed) {
         uint32_t fc = j->raw.crc, tc = j->trk.crc;
 
-        if (open_writers(j, resumed)) {
+        if (open_writers(j, 1)) {
             if (j->old_ok)
                 lr_close(&j->old), lr_close(&j->otrk);
             return -1;
         }
-        if (resumed) {
-            j->raw.crc = fc;
-            j->trk.crc = tc;
-        }
+        j->raw.crc = fc;
+        j->trk.crc = tc;
     }
     if (resumed) {
         j->wst = WS_POP;
@@ -792,7 +785,9 @@ int scan_start(lib_job_t *j)
     }
     memset(&j->cur, 0, sizeof j->cur);
     j->cur.root = 1;
-    j->wst = WS_SIG;
+    j->wst = j->lazy ? WS_SIG : WS_CLEAR;
+    j->wclr = WS_SIG;
+    j->bsub = 0;
     return 0;
 }
 
@@ -813,9 +808,9 @@ static int unlazy(lib_job_t *j, uint32_t fend, int next)
     j->pfx_end = fend;
     j->tpfx_end = j->t_sync;
     j->wnext = (uint32_t)next;
-    if (open_writers(j, 0))
-        return -1;
-    j->wst = WS_PREFIX;
+    j->wst = WS_CLEAR;                   /* (the slot's old files removed, the writers opened) */
+    j->wclr = WS_PREFIX;
+    j->bsub = 0;
     return 0;
 }
 
@@ -1102,6 +1097,20 @@ int scan_step(lib_job_t *j, uint64_t t_end)
             j->wst = WS_DONE + 1;        /* the folders file: closed in the next slice */
             return 0;
         }
+        case WS_CLEAR: {                  /* the slot's folders, tracks, checkpoint files: a piece a pass */
+            char p[48];
+
+            raw_path(p, sizeof p, j->dir, j->base, j->bsub, j->slot);
+            if (!lib_rm_step(p))
+                return 0;
+            if (++j->bsub < 3)
+                break;
+            j->bsub = 0;
+            if (open_writers(j, 0))
+                return -1;
+            j->wst = j->wclr;
+            break;
+        }
         case WS_DONE + 1:
             if (lw_close(&j->raw))
                 return -1;
@@ -1111,8 +1120,8 @@ int scan_step(lib_job_t *j, uint64_t t_end)
             char p[48];
 
             raw_path(p, sizeof p, j->dir, j->base, 2, j->slot);
-            if (fs_exists(p))
-                fs_remove(p);
+            if (!lib_rm_step(p))
+                return 0;
             if (j->warn)
                 lib_log("lib: %s walk:%s%s%s%s", j->base, j->warn & LIBW_DEPTH ? " folders deeper than 32 left out" : "",
                         j->warn & LIBW_NAMES ? " (some folder names asked of the FS again)" : "",

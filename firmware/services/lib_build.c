@@ -616,6 +616,7 @@ int build_start(lib_job_t *j)
     j->n_alb = j->n_art = j->n_gen = 0;
     j->bph = B_S1;
     j->ctr = 0;
+    j->bsub = 0;
     if (open_in(j, -2))
         return -1;
     srt_begin(&j->srt, cmp_s1, 0, 1);
@@ -642,21 +643,30 @@ static int start_pass(lib_job_t *j, int in)
 int build_step(lib_job_t *j, uint64_t t_end)
 {
     int r = 0;
-    char p[48];
+    char p[48], q[48];
 
     while (lib_now_us() < t_end) {
         if (j->idx.err)
             return -1;
         switch (j->bph) {
         case B_S1:
-            if ((r = run_sort(j, prod_s1, t_end)) <= 0)
-                return r;
-            j->s1 = j->srt.result;
-            tmp_path(p, sizeof p, 2);
+            if (!j->bsub) {
+                if ((r = run_sort(j, prod_s1, t_end)) <= 0)
+                    return r;
+                j->s1 = j->srt.result;
+                j->bsub = 1;
+            }
+            tmp_path(p, sizeof p, 2);    /* (the album rows' file and the slot's old index: removed first) */
+            if (j->bsub == 1 && !lib_rm_step(p))
+                return 0;
+            j->bsub = 2;
+            snprintf(q, sizeof q, "%s/%s.IX%c", j->dir, j->base, 'A' + j->slot);
+            if (!lib_rm_step(q))
+                return 0;
+            j->bsub = 0;
             if (lw_open(&s_ta, p, B_TABUF, LIB_WBUF, 0))
                 return -1;
-            snprintf(p, sizeof p, "%s/%s.IX%c", j->dir, j->base, 'A' + j->slot);
-            if (lw_open(&j->idx, p, B_IDXBUF, LIB_WBUF, 0) || start_pass(j, j->s1))
+            if (lw_open(&j->idx, q, B_IDXBUF, LIB_WBUF, 0) || start_pass(j, j->s1))
                 return -1;
             sec_begin(j);
             j->bph = B_TRK;

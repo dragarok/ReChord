@@ -138,6 +138,9 @@ typedef struct {
 } lw_t;
 int lw_open(lw_t *w, const char *path, void *buf, uint32_t cap, int append);
 int lw_open_at(lw_t *w, const char *path, void *buf, uint32_t cap, uint32_t at);   /* append from `at` */
+extern uint8_t lib_sd_wrote;
+#define LIB_RM_CLUS 96u
+int lib_rm_step(const char *path);   /* 1 = the file is gone, 0 = a piece removed (more passes) */         /* lw_open* on the card since lib_step's last fs_target_sync */
 void lw_put(lw_t *w, const void *p, uint32_t n);
 void lw_u8(lw_t *w, uint32_t v);
 void lw_u16(lw_t *w, uint32_t v);
@@ -152,6 +155,7 @@ typedef struct {
     uint32_t cap, n, i;              /* buf[i..n) are file bytes [base + i, base + n) */
     uint32_t base, end;              /* end: where this stream stops */
     int own;
+    uint32_t pl[2];                  /* shared handle: this stream's place in the chain (fs_place_*) */
 } lr_t;
 int lr_open(lr_t *r, const char *path, void *buf, uint32_t cap);
 int lr_open_ref(lr_t *r, const fs_ref_t *ref, void *buf, uint32_t cap);
@@ -238,6 +242,7 @@ struct lib_job {
     uint32_t nfolders, ntracks, read_tags, reused, copied, since_ckpt, root_sig;
     uint32_t sp, names;              /* the pending stack, the name stack's top */
     int wst;                         /* walk state */
+    int wclr;                        /* WS_CLEAR: the state after the slot's files are removed */
     lib_cur_t cur;
     uint32_t nbatch, bi, bpool;      /* files of the folder being read: count, next, name bytes */
     uint32_t nmatch;

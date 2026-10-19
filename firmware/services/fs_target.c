@@ -1080,6 +1080,23 @@ long fs_seek(fs_file_t *f, long offset)
     return offset;
 }
 
+/* A reader's place in the cluster chain, kept by a caller that shares one handle between several
+ * streams (the library's merge cursors): fs_read walks on from a place at or before the position
+ * instead of from the start (a backward seek on a long chain of small clusters reads its FAT). */
+void fs_place_get(fs_file_t *f, uint32_t pl[2])
+{
+    pl[0] = f->clus;
+    pl[1] = f->cidx;
+}
+
+void fs_place_set(fs_file_t *f, const uint32_t pl[2])
+{
+    if (pl[0] >= 2u && pl[1] <= f->pos / (f->v->spc * 512u)) {
+        f->clus = pl[0];
+        f->cidx = pl[1];
+    }
+}
+
 int fs_mark(fs_file_t *f)
 {
     uint8_t b;
@@ -1326,6 +1343,50 @@ long fs_write(fs_file_t *f, const void *buf, unsigned long len)
             f->size = f->pos;
     }
     return n || !len ? (long)n : FS_ERR_IO;
+}
+
+/* Remove a file a piece at a time: its first `max` clusters cut off (the entry moved to the next
+ * cluster and made smaller first, then the piece freed: a cut in between loses at most that piece),
+ * or, when that is all of it, the file removed. 1 = gone, 0 = smaller, < 0 = error. Freeing a big
+ * chain at once writes a FAT sector (both copies) per 128 clusters: 32 block writes for 1 MB of
+ * 512-byte clusters, in one call (the library's job keeps each pass short with this). */
+int fs_remove_part(const char *path, uint32_t max)
+{
+    const vol_t *cv;
+    vol_t *v;
+    int r = resolve(path, &cv);
+    uint32_t cl, head, c, n = 0;
+    uint8_t *b;
+
+    if (r)
+        return r == 1 ? FS_ERR_ARG : r;
+    if (!writable(cv) || s_ent.is_dir || busy(cv))
+        return FS_ERR_ARG;
+    v = (vol_t *)cv;
+    cl = v->spc * 512u;
+    if (!max || !s_ent.clus || s_ent.size <= max * cl)
+        return fs_remove(path) == 0 ? 1 : FS_ERR_IO;
+    for (head = c = s_ent.clus; n < max; n++)
+        if (!(c = fat_next(v, c)))
+            return FS_ERR_IO;
+    if (!(b = sector(v, s_ent.dlba)) || memcmp(b + s_ent.doff, s_ent.raw, 11))
+        return FS_ERR_IO;
+    b += s_ent.doff;
+    put16(b + 20, c >> 16);
+    put16(b + 26, c);
+    put32(b + 28, s_ent.size - max * cl);
+    s_sec_dirty = 1;
+    if (sec_flush())
+        return FS_ERR_IO;
+    for (; n; n--) {                         /* the piece: head .. the cluster before c */
+        uint32_t next = fat_get(v, head);
+
+        if (next == 0xFFFFFFFFu || fat_set(v, head, 0))
+            return FS_ERR_IO;
+        free_add(v, 1);
+        head = next;
+    }
+    return fat_flush() || fsi_flush(v) ? FS_ERR_IO : 0;
 }
 
 int fs_remove(const char *path)

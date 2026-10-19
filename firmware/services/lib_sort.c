@@ -24,7 +24,7 @@
 #define SRT_FAN    15                        /* x SRT_CUR within the arena, their cursors after */
 #define SRT_REC_MAX 1024u
 
-enum { PH_FILL, PH_SORT, PH_WRITE, PH_MSTART, PH_MERGE, PH_DONE, PH_ERR };
+enum { PH_FILL, PH_SORT, PH_WRITE, PH_MSTART, PH_MERGE, PH_DONE, PH_ERR, PH_OPEN, PH_MCLR };
 
 #define s_cur  ((lr_t *)(void *)(SRT_ARENA + SRT_FAN * SRT_CUR))
 #define s_heap ((uint8_t *)(s_cur + SRT_FAN))
@@ -54,7 +54,7 @@ void srt_begin(lib_sort_t *s, lib_cmp_t cmp, int tmp_a, int tmp_b)
     s->tmp_in = tmp_a;
     s->tmp_out = tmp_b;
     s->result = -1;
-    s->phase = open_out(s, tmp_a) ? PH_ERR : PH_FILL;
+    s->phase = PH_OPEN;                  /* (its output removed first, a piece a pass: srt_step) */
 }
 
 int srt_wants_input(const lib_sort_t *s)
@@ -154,16 +154,11 @@ static int cur_ready(lr_t *r)
     return p && lr_peek(r, lib_le16(p)) != 0;
 }
 
+/* A merge level: its output removed (PH_MCLR, a piece a pass), then input and output opened. */
 static int level_start(lib_sort_t *s)
 {
     char p[48];
 
-    if (lw_close(&s->w))
-        return -1;
-    if (s->nruns <= 1u) {
-        s->result = s->tmp_in;
-        return 1;
-    }
     tmp_name(p, sizeof p, s->tmp_in);
     if (!(s_in = fs_open_read(p)))
         return -1;
@@ -252,13 +247,34 @@ int srt_step(lib_sort_t *s, uint64_t t_end)
             }
             s->phase = PH_MSTART;
             break;
-        case PH_MSTART: {
-            int r = level_start(s);
+        case PH_OPEN: {                  /* the first output: the old file of that name removed */
+            char p[48];
 
-            if (r < 0)
+            tmp_name(p, sizeof p, s->tmp_in);
+            if (!lib_rm_step(p))
+                return 0;
+            if (open_out(s, s->tmp_in))
                 return s->phase = PH_ERR, -1;
-            if (r == 1)
+            s->phase = PH_FILL;
+            return 1;
+        }
+        case PH_MSTART:                  /* the level's output written */
+            if (lw_close(&s->w))
+                return s->phase = PH_ERR, -1;
+            if (s->nruns <= 1u) {
+                s->result = s->tmp_in;
                 return s->phase = PH_DONE, 2;
+            }
+            s->phase = PH_MCLR;
+            return 0;
+        case PH_MCLR: {
+            char p[48];
+
+            tmp_name(p, sizeof p, s->tmp_out);
+            if (!lib_rm_step(p))
+                return 0;
+            if (level_start(s) < 0)
+                return s->phase = PH_ERR, -1;
             s->phase = PH_MERGE;
             group_start(s);
             break;

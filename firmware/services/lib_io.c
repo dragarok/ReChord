@@ -8,8 +8,11 @@
 
 #include "lib_int.h"
 
+uint8_t lib_sd_wrote;                    /* a library file on the card written since its last sync */
+
 int lw_open(lw_t *w, const char *path, void *buf, uint32_t cap, int append)
 {
+    lib_sd_wrote |= !strncmp(path, "/SD/", 4);
     memset(w, 0, sizeof *w);
     w->buf = buf;
     w->cap = cap;
@@ -24,9 +27,26 @@ int lw_open(lw_t *w, const char *path, void *buf, uint32_t cap, int append)
 }
 
 extern fs_file_t *fs_open_append_at(const char *path, uint32_t at) __attribute__((weak));
+extern int fs_remove_part(const char *path, uint32_t max) __attribute__((weak));
+
+/* A step of removing a file a pass can afford (fs_remove_part: LIB_RM_CLUS clusters, at most two
+ * FAT sectors at 512-byte clusters): 1 = gone (or never there), 0 = more. Each file the job is
+ * about to write anew goes this way first: a rewrite frees the old chain at fs_close in one go. */
+int lib_rm_step(const char *path)
+{
+    int r;
+
+    if (!fs_exists(path))
+        return 1;
+    if (fs_remove_part && (r = fs_remove_part(path, LIB_RM_CLUS)) >= 0)
+        return r;
+    (void)fs_remove(path);
+    return 1;
+}
 
 int lw_open_at(lw_t *w, const char *path, void *buf, uint32_t cap, uint32_t at)
 {
+    lib_sd_wrote |= !strncmp(path, "/SD/", 4);
     memset(w, 0, sizeof *w);
     w->buf = buf;
     w->cap = cap;
@@ -118,9 +138,13 @@ void lw_abort(lw_t *w)
 
 /* ---- reader ---- */
 
+extern void fs_place_get(fs_file_t *f, uint32_t pl[2]) __attribute__((weak));
+extern void fs_place_set(fs_file_t *f, const uint32_t pl[2]) __attribute__((weak));
+
 static void lr_init(lr_t *r, fs_file_t *f, uint32_t start, uint32_t end, void *buf, uint32_t cap)
 {
     r->f = f;
+    r->pl[0] = 0;
     r->buf = buf;
     r->cap = cap;
     r->n = r->i = 0;
@@ -189,9 +213,13 @@ const uint8_t *lr_peek(lr_t *r, uint32_t n)
             want = r->end - at;
         if (fs_seek(r->f, (long)at) < 0)      /* (a no-op for a stream that owns its handle) */
             return 0;
+        if (!r->own && fs_place_set)
+            fs_place_set(r->f, r->pl);
         got = fs_read(r->f, r->buf + keep, want);
         if (got < 0)
             return 0;
+        if (!r->own && fs_place_get)
+            fs_place_get(r->f, r->pl);
         r->n += (uint32_t)got;
         if (r->n < n)
             return 0;

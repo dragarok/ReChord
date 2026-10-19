@@ -26,6 +26,7 @@
 #include "fs_target.h"
 
 extern int fs_mkdir(const char *path) __attribute__((weak));     /* sdrw: FAT32/exFAT mkdir */
+extern int fs_target_sync(int idx) __attribute__((weak));         /* sdrw: the card's writes on it */
 /* the screens' side (ui/lib_ui.c; absent in the host test) */
 extern int lib_adding(void) __attribute__((weak));
 extern int lib_add_step(uint32_t us) __attribute__((weak));
@@ -290,8 +291,14 @@ int lib_step(void)
     if (s_active < 0) {
         int vol = s_want[1] && g_lib.mounted[1] ? 1 : s_want[0] && g_lib.mounted[0] ? 0 : -1;
 
-        if ((s_clean || vol >= 0) && !lib_io_ok())
+        if ((s_clean || vol >= 0 || lib_sd_wrote) && !lib_io_ok())
             return 1;                    /* (a job's start and the clean-up use storage too) */
+        if (lib_sd_wrote) {              /* the index or a list written on the card: all of it there */
+            lib_sd_wrote = 0;
+            if (fs_target_sync && g_lib.mounted[1])
+                fs_target_sync(1);
+            return 1;
+        }
         if (s_clean) {    /* one file a pass: the sorter's, an index left behind */
             char p[48], dir[24], base[12];
             int k = 0;
@@ -310,15 +317,14 @@ int lib_step(void)
                     char q[48];
 
                     snprintf(q, sizeof q, "%s/%s.IXA", dir, base);
-                    if (p[0] && fs_exists(q))
-                        fs_remove(q);
-                    q[strlen(q) - 1] = 'B';
-                    if (p[0] && fs_exists(q))
-                        fs_remove(q);
+                    if (p[0] && (!lib_rm_step(q) || (q[strlen(q) - 1] = 'B', !lib_rm_step(q)))) {
+                        s_clean |= (uint16_t)(1u << k);
+                        return 1;
+                    }
                 }
             }
-            if (p[0] && fs_exists(p))
-                fs_remove(p);
+            if (p[0] && !lib_rm_step(p))
+                s_clean |= (uint16_t)(1u << k);  /* (a big file: a piece a pass) */
             return 1;
         }
         if (vol < 0)
@@ -380,9 +386,9 @@ int lib_step(void)
     j->steps++;
     if (us > j->worst_us)
         j->worst_us = (uint32_t)us;
-    if (us > 2u * LIB_STEP_US)           /* (a slice over its time: where, for the log and the tests) */
-        lib_log("lib: slice %u us in %s %d", (unsigned)us, j->state == J_SCAN ? "walk" : "build",
-                j->state == J_SCAN ? j->wst : j->bph);
+    if (us > 2u * LIB_STEP_US)           /* (a slice over its time: where, and its sectors, for the log and the tests) */
+        lib_log("lib: slice %u us in %s %d, %u sectors written", (unsigned)us, j->state == J_SCAN ? "walk" : "build",
+                j->state == J_SCAN ? j->wst : j->bph, (unsigned)(fs_target_nwr - lib_slice_wr));
     if (r < 0) {
         job_abort(j->state == J_SCAN ? "the walk failed (I/O)" : "the build failed (I/O)");
         return 1;

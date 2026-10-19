@@ -104,6 +104,15 @@ long fs_seek(fs_file_t *f, long offset);
  * the host backend ignores it). 0, or FS_ERR_*. */
 int fs_mark(fs_file_t *f);
 
+/* Remove a file a piece at a time (the target's FAT32): its first `max` clusters, or all of it.
+ * 1 = gone, 0 = smaller, < 0 = error (open, missing, read-only). */
+int fs_remove_part(const char *path, uint32_t max);
+
+/* A reader's place in the cluster chain (the target's FAT only): get it after a read, set it
+ * after fs_seek and before the next read of the same stream. */
+void fs_place_get(fs_file_t *f, uint32_t pl[2]);
+void fs_place_set(fs_file_t *f, const uint32_t pl[2]);
+
 /* Total size of the open file in bytes, or FS_ERR_*. */
 long fs_file_size(fs_file_t *f);
 
