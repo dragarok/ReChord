@@ -1706,10 +1706,13 @@ static const set_t g_dev[] = {
     { ICON_CHIP, S_DO, 0, 0, "HIFI probe (test)", 0, 0, ap_hifi_probe },   /* (Panel TE stays last: m32) */
     { ICON_SUN, S_DO, 0, 0, "Panel TE (test)", 0, 0, ap_te_probe },
 };
+#define ROWS(t) (uint8_t)(sizeof t / sizeof t[0])   /* (from the table: two branches adding a row each
+                                                    * to one literal count left one unreachable) */
 static const struct { const char *title; uint8_t icon, n; const set_t *rows; } k_groups[] = {
-    { "Settings", ICON_GEAR, 6, g_root }, { "Playback", ICON_PLAY, 4, g_playback },
-    { "Display", ICON_SUN, 3, g_display }, { "Power", ICON_POWER, 3, g_power },
-    { "USB", ICON_USB, 6, g_usb }, { "System", ICON_INFO, 4, g_system }, { "Developer", ICON_BUG, 11, g_dev },
+    { "Settings", ICON_GEAR, ROWS(g_root), g_root }, { "Playback", ICON_PLAY, ROWS(g_playback), g_playback },
+    { "Display", ICON_SUN, ROWS(g_display), g_display }, { "Power", ICON_POWER, ROWS(g_power), g_power },
+    { "USB", ICON_USB, ROWS(g_usb), g_usb }, { "System", ICON_INFO, ROWS(g_system), g_system },
+    { "Developer", ICON_BUG, ROWS(g_dev), g_dev },
 };
 #define GRP (k_groups[nav_arg() < 7 ? nav_arg() : 0])
 
