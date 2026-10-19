@@ -7,7 +7,8 @@
  *
  *   - fs_host.c   — POSIX backend over a real filesystem (tests, tools).
  *   - fs_target.c — FAT16/FAT32/exFAT on the device's block devices; writes
- *                   on FAT32 volumes mounted writable (fs_target.h).
+ *                   on volumes mounted writable (fs_target.h), long names,
+ *                   folders and renames through fs_write_ext.c.
  *
  * Exactly ONE backend is linked into any given image.
  *
@@ -29,6 +30,9 @@
 #define FS_ERR_OPEN       (-2)  /* file or directory not found / not openable */
 #define FS_ERR_IO         (-3)  /* read/write failure */
 #define FS_ERR_UNSUPPORTED (-4) /* operation not available in this backend */
+#define FS_ERR_EXIST      (-5)  /* fs_mkdir / fs_rename: the name is taken (a file or a folder) */
+#define FS_ERR_GONE       (-6)  /* the medium went away (SD card pulled): the handle is dead, close it */
+#define FS_ERR_FULL       (-7)  /* no free cluster, or no room for the directory entries */
 
 /* Opaque file handle (backed by FILE* on the host, by an SDK file id on the
  * target). */
@@ -115,9 +119,12 @@ int fs_close(fs_file_t *f);
 
 /* Open a file for writing, creating or truncating it. NULL on failure
  * (missing directory, read-only volume, file already open, bad name). On
- * the target, new names must be 8.3 (stored upper-case); the old content
- * stays on disk until fs_close() switches to the new one. Write handles
- * are write-only: fs_read / fs_seek answer FS_ERR_UNSUPPORTED. */
+ * the target, any name up to 255 UTF-16 units (UTF-8 in): an upper-case 8.3
+ * name gets a plain 8.3 entry, anything else long-name entries and a ~N
+ * alias on FAT, an entry set on exFAT (without the fsw overlay: 8.3 only,
+ * stored upper-case); the old content stays on disk until fs_close()
+ * switches to the new one. Write handles are write-only: fs_read / fs_seek
+ * answer FS_ERR_UNSUPPORTED. */
 fs_file_t *fs_open_write(const char *path);
 
 /* Open a file for appending, creating it if needed. NULL on failure. */
@@ -130,6 +137,29 @@ long fs_write(fs_file_t *f, const void *buf, unsigned long len);
 
 /* Delete a file (not a directory, not an open file). 0 or FS_ERR_*. */
 int fs_remove(const char *path);
+
+/* A file's or folder's entry. */
+typedef struct {
+    uint32_t size;           /* bytes (exFAT files over 4 GiB: 0xFFFFFFFF) */
+    uint32_t wtime;          /* last write: FAT date << 16 | FAT time (FAT bytes 22..25; exFAT: the 0x85
+                              * entry's LastModifiedTimestamp, the same layout); 0 for a volume root */
+    uint32_t clus;           /* first cluster (a hint only) */
+    uint8_t is_dir;
+    uint8_t attr;            /* 0x01 read-only, 0x02 hidden, 0x04 system, 0x10 folder, 0x20 archive */
+} fs_stat_t;
+
+/* 0, or FS_ERR_OPEN / FS_ERR_ARG. */
+int fs_stat(const char *path, fs_stat_t *st);
+
+/* Inside an fs_scan / fs_scan_ref callback: the entry being reported (valid until it returns). */
+const fs_stat_t *fs_scan_stat(void);
+
+/* Create a folder (the parent must exist). 0, FS_ERR_EXIST if the name is taken, FS_ERR_*. */
+int fs_mkdir(const char *path);
+
+/* Rename / move a file or folder within its volume (any folder to any folder; not one that is
+ * open, not a folder into itself). 0, FS_ERR_EXIST if `to` is taken, FS_ERR_*. */
+int fs_rename(const char *from, const char *to);
 
 /* 1 if the file or directory exists, else 0. */
 int fs_exists(const char *path);
