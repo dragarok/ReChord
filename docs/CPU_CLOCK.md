@@ -103,10 +103,10 @@ Not affected (the crystal or the ACODEC PLL): UART1 (BT), eMMC/SD card clocks, S
   estimate, then every second from the track's own measured decoding cycles (and, while the EQ runs, its
   own), so a curve that fits comes in after a second and one over the line goes out for the rest of the
   track. The presets run 1-4 sections (stock's curves fitted, eq.h EQ_FIT_TABLE). With `96`, measured in
-  QEMU at 2.6 cycles an instruction: FLAC/WAV 16/44.1, ALAC 16/44.1, WMA, WMA Pro: every preset (WMA,
-  WMA Pro 48k: Custom up to 8/7 bands); Vorbis 44.1: every preset; FLAC 24/96: every preset; APE normal
-  and Vorbis 48k: up to 3 and 1 sections; MP3: 0-1 (Bass on the lighter tracks); AAC-LC, Opus, WavPack
-  -hh and FLAC 24/192: none (their decoding alone is at 55-85 % of 96 MHz: snowsky_echo_mini
+  QEMU at 2.6 cycles an instruction: FLAC/WAV 16/44.1 and ALAC 16/44.1: everything; WMA and WMA Pro:
+  every preset (7-9 sections); Vorbis 44.1 and FLAC 24/96: every preset (4); APE normal: 3 (all but
+  Jazz); Vorbis 48k: 1-2; MP3: 0-1 (Bass on the lighter tracks); AAC-LC, Opus, WavPack -hh and FLAC
+  24/192: none (their decoding alone is at 55-85 % of 96 MHz: snowsky_echo_mini
   docs/MERGE_NOTES_eqfit.md).
 - `stock`: FLAC for every track (stock never plays at 96 MHz). Stock's own lossy point is 1392 MHz /
   B 348; ReChord uses its one point, 448, for those too.
