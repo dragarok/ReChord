@@ -21,6 +21,7 @@ static uint16_t s_idx[DL_MAX];               /* sorted order */
 static char s_pool[POOL];
 static uint32_t s_pool_used;
 static int s_n, s_skip, s_seen, s_more;
+static int s_root;                           /* listing a volume's root ("/Internal", "/SD") */
 
 static int ext_is(const char *dot, const char *ext)
 {
@@ -93,6 +94,8 @@ static int add(void *u, const char *name, const fs_ref_t *r)
 
     if (name[0] == '.' || (!dir && !kind))
         return 0;                            /* hidden, or not something we play */
+    if (dir && s_root && fold((uint8_t)name[0]) == 'r' && !dirlist_cmp(name, "RECHORD"))
+        return 0;                            /* the library's own folder (services/lib_job.c) */
     if (s_seen++ < s_skip)
         return 0;
     if (s_n == DL_MAX) {
@@ -132,6 +135,7 @@ int dirlist_load(const char *path, const fs_ref_t *dir, int page, int *more)
     s_n = s_seen = s_more = 0;
     s_pool_used = 0;
     s_skip = page * DL_MAX;
+    s_root = path && path[0] == '/' && path[1] && !strchr(path + 1, '/');
     r = path ? fs_scan(path, add, NULL) : fs_scan_ref(dir, add, NULL);
     if (r < 0) {
         s_n = 0;
