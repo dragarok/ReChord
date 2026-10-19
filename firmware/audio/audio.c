@@ -1783,15 +1783,19 @@ void audio_poll(void)
     /* The I2S DMA takes the blocks (pcm_played moves). Device 2026-10-19 (round4): the DMA read 0 and
      * dropped writes; the ring stayed full, which the supervisor counts as waiting for good reason, so
      * the player sat at 0:00 with no line in the log. One second without a block taken while the
-     * output runs and blocks wait: the channel's registers logged (all 0: the DMA does not answer), and
-     * stopped. (Not out_running(): it reads CHEN, which a dead DMA reads as 0.) */
-    if (!s_dma_on || s_paused || s_usb || AS->pcm_played == AS->pcm_wr || AS->pcm_played != s_out_seen) {
+     * output runs and blocks wait, and either the controller reads as off (DmaCfgReg 0: dead, as round4's)
+     * or the channel is on and takes nothing: the channel's registers logged, and stopped. A channel
+     * that is off with the controller alive is a chain B ended on purpose (a rate change: device
+     * 2026-10-19 round5, after 222 underruns of 24/96 APE extra high the switch to 44.1 kHz came more
+     * than 1 s after CHEN went 0; this check, without the condition, stopped it) and is the switch's. */
+    if (!s_dma_on || s_paused || s_usb || AS->pcm_played == AS->pcm_wr || AS->pcm_played != s_out_seen ||
+        ((DMA_CFGREG & 1u) && !out_running())) {
         s_out_seen = AS->pcm_played;
         s_out_seen_at = time_stamp(time_ms());
     } else if (time_ms() - s_out_seen_at > 1000u) {
-        log_printf("audio: the I2S DMA took no block in 1 s (ch%u CHEN %x SAR %x DAR %x CTL %x CFG %x): stopped",
-                   (unsigned)DMA_CH, (unsigned)DMA_CHEN, (unsigned)DMA_CHR(0x00), (unsigned)DMA_CHR(0x08),
-                   (unsigned)DMA_CHR(0x18), (unsigned)DMA_CHR(0x40));
+        log_printf("audio: the I2S DMA took no block in 1 s (DmaCfgReg %x, ch%u CHEN %x SAR %x DAR %x CTL %x CFG %x): "
+                   "stopped", (unsigned)DMA_CFGREG, (unsigned)DMA_CH, (unsigned)DMA_CHEN, (unsigned)DMA_CHR(0x00),
+                   (unsigned)DMA_CHR(0x08), (unsigned)DMA_CHR(0x18), (unsigned)DMA_CHR(0x40));
         halt();
         return;
     }
