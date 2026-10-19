@@ -249,7 +249,8 @@ static void save_state(const char *why)
 {
     config_save();                       /* (g_cfg.browse / cursor: the browser keeps them, ui/screens.c) */
     log_flush(why);
-    ap_bg_sync();                        /* (everything queued on the card before it ends) */
+    fs_target_sync(1);                   /* (the SD card's cached sectors into the queue: not mounted, a no-op) */
+    ap_bg_sync();                        /* (everything queued, on both cards, before it ends) */
 }
 
 /* RECHO's order (docs/RECHO_POWER_CFG.md C.6): stop, save, say so, 500 ms,

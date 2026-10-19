@@ -29,8 +29,8 @@ int lib_io_ok(void)
     return audio_write_ok() && !emmc_busy() && !emmc_wq_pending();
 }
 
-/* The slice wrote: end it. Internal's blocks wait in its queue (a big write next would wait for each);
- * the card's writes are synchronous, each command ~3 ms (QEMU's figure; the sd-rw driver's). */
+/* The slice wrote: end it. Its blocks wait in the write-behind queue, Internal's and the card's (a
+ * big write next would wait for each; drivers/emmc.h). */
 int lib_io_dirty(void)
 {
     return emmc_wq_pending() != 0u || fs_target_nwr != lib_slice_wr;

@@ -15,7 +15,7 @@ overlays in windows at 0x0307A008, 0x0307BF08, 0x0308B638). Sources: `firmware/f
 |---|---|---|---|
 | 0x03000000..0x03004000 | 16 KiB | main stack (MSP 0x03004000), nothing else ever | firmware_ap.ld; 2026-08-25 brick cause B |
 | 0x03004000..0x030040EC | 236 B | .data (the ROM enters through `ap_ram_vectors` at its start) | firmware_ap.ld, verdict #19 |
-| 0x030040EC..0x030283D8 | 148204 B | .bss (g_scratch 32 KiB, s_band 20 KiB, s_pool 16 KiB, s_q / s_ent 9.6 KiB each, s_wq_buf 8 KiB) | `build/cfw/ap_size.txt` |
+| 0x030040EC..0x030283D8 | 148204 B | .bss (g_scratch 32 KiB, s_band 20 KiB, s_pool 16 KiB, s_q / s_ent 9.6 KiB each, Q 8348 B: the write-behind queue of Internal and the microSD card, emmc_rknanoc.c) | `build/cfw/ap_size.txt` |
 | 0x030283D8..0x0302FFC0 | 31 KiB | free (the heap, symbolically) | |
 | 0x0302FFC0..0x03030000 | 64 B | .noinit: the crash record `g_bootguard_rec`, the display trial's marker | firmware_ap.ld |
 | 0x03030000..0x03040000 | 64 KiB | the audio input ring (A writes, B reads) | audio/audio_shared.h AS_IN_RING |

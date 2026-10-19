@@ -57,7 +57,8 @@ the panel is 320×170).*
 
 **Connections**
 - **USB disk:** internal storage and the microSD card, both read/write (FAT16, FAT32, exFAT; the player
-  writes to the card too: long names, folders, renames).
+  writes to the card too: long names, folders, renames, written behind the music like the internal
+  storage: a slow or stuck card never stops the keys).
 - **USB DAC:** UAC2, bit-perfect 16/24/32-bit at 44.1–192 kHz, with media keys and a choice of
   DAC power source.
 - **USB-C earphones:** the player acts as a USB audio host.

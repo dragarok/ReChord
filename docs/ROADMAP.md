@@ -42,6 +42,7 @@ published yet.
 | UI: no key bar, a status header (play state, volume, Bluetooth icon, battery), 7-row lists, Now Playing on the full height, options, queue, track info, settings, themes, questions that keep the music going, toasts, a hold line; Noto Sans in five sizes with Devanagari; key gestures in milliseconds (tap, hold, 2x, 3x, holds after taps) | device (2026-10-18): a full screen 13 ms after its key is handled on DMA (19-21 on GPIO); a tap's release takes ~50 ms to confirm |
 | Display: display list in 16-row bands, dirty rectangles with column windows; VOP + DMA path by default behind a trial guard (stock's bus timing), GPIO writer as the fallback (display=gpio) | device (DMA trial passed every boot, 2026-10-18), QEMU |
 | No stalls: storage writes queued behind the audio, settings saved at pause, core B at full speed on resume | device |
+| No stalls on the microSD card: its writes through the same queue (runs of blocks as one command), a stuck card failed and unmounted in 3.5 s instead of holding the loop | QEMU (sd-async) |
 
 ## The recovery path comes first
 

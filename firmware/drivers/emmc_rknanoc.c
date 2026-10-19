@@ -60,9 +60,14 @@ static void select_mmc(int sd)
 
 /* The microSD card is out (card detect GPIO0.11 reads high, its pull-up: reference 0x03062c34):
  * every polled wait on the SD instance gives up at once instead of running into its timeout. */
+static int sd_pin_out(void)
+{
+    return (((volatile uint32_t *)0x40160000u)[0x50 / 4] >> 11) & 1u;
+}
+
 static int sd_out(void)
 {
-    return s_on_sd && ((((volatile uint32_t *)0x40160000u)[0x50 / 4] >> 11) & 1u);
+    return s_on_sd && sd_pin_out();
 }
 
 static int wait_clear(unsigned reg, uint32_t mask, uint32_t tries)
@@ -206,6 +211,8 @@ static int xfer_data(uint32_t idx, uint32_t arg, uint32_t *buf, uint32_t len, in
 }
 
 static uint32_t s_sd_rca;           /* the SD card's RCA (it publishes it with CMD3) */
+static uint32_t s_sd_sectors, s_sd_wr;
+static int s_sd_hc, s_sd_4bit, s_cd_ready;
 
 
 static int wait_tran(void)
@@ -486,151 +493,348 @@ static int block_read(uint32_t arg, uint32_t count, void *buf)
     return ret;
 }
 
-/* ---- the write-behind queue ------------------------------------------------
+/* ---- the write-behind queue (Internal and the microSD card) ----------------
  *
- * A single-block write costs the UI nothing but the transfer: emmc_write_async() copies the block
- * into a queue and returns; emmc_wq_step(), called once per main-loop pass, sends the oldest one
- * (CMD24 and the FIFO, xfer_start) and on a later pass sees it done (data over, STATUS_BUSY clear --
- * the card programmed it -- then CMD13 in tran, the same signals send_cmd()/wait_tran() and
- * bootcrumb's polled writes wait on). The card is programming for most of a write (the device's
- * 600 ms log appends were about 8 of them, OURS_AUDIT 1.6), and nothing waits for that any more.
- * Order is kept: blocks reach the card oldest first (fs_target.c's crash order holds), a block
- * queued again while it is the newest is replaced in place. Every other access stays coherent:
- * emmc_read() lets a write in flight finish, then serves queued blocks from the queue;
- * emmc_write()/emmc_fw_write() (USB disk, the updater) drain the queue first; emmc_quiesce() lets
- * bootcrumb.c's own register writes in. emmc_sync() drains it (power off, sessions, reboot). */
+ * A single-block write costs the UI nothing but the transfer: emmc_write_async() / sd_write_async()
+ * copy the block into one queue and return; emmc_wq_step(), called once per main-loop pass, sends
+ * the oldest one on its own instance (CMD24 and the FIFO, xfer_start) and on a later pass sees it
+ * done (data over, STATUS_BUSY clear -- the card programmed it -- then CMD13 in tran, the same
+ * signals send_cmd()/wait_tran() and bootcrumb's polled writes wait on). The card is programming for
+ * most of a write (the device's 600 ms log appends were about 8 of them, OURS_AUDIT 1.6; an SD card
+ * may take up to 250 ms, 500 ms SDXC: SD Physical Layer Simplified 4.6.2.2), and nothing waits for
+ * that any more.
+ *
+ * Order is kept, across both devices: blocks reach the cards oldest first (one block in flight at a
+ * time), a block queued again while it is the newest (same device) is replaced in place, which
+ * skips only a state the next one overwrites. So whatever stops the queue -- a power cut, the card
+ * pulled, the card failing -- leaves each card holding a prefix of the writes the file system made,
+ * the states fs_target.c / fs_write_ext.c's crash order (data, FAT, entry) is built for (and
+ * tests/fs_sdrw.py cuts at every write). A card block that fails stops the card's queue there:
+ * nothing written after a write that did not take (sd_fail).
+ *
+ * Coherent: emmc_read() / sd_read() let a write in flight on their own instance finish (the card
+ * cannot be read while it programs; the other instance is not waited for), then serve queued blocks
+ * from the queue; emmc_write()/emmc_fw_write()/sd_write() (USB disk, the updater, big writes) drain
+ * the queue first; emmc_quiesce() lets bootcrumb.c's own register writes in. emmc_sync() drains it
+ * (power off, sessions, reboot); sd_sync() is the card's durability point (USB disk, a list moved
+ * to the card). */
 #ifndef EMMC_WQ_SLOTS
 #define EMMC_WQ_SLOTS 16u
 #endif
-static uint32_t s_wq_buf[EMMC_WQ_SLOTS][128];
-static uint32_t s_wq_lba[EMMC_WQ_SLOTS];
-static unsigned s_wq_head, s_wq_n;       /* the oldest block, blocks queued (the head may be in flight) */
-static int s_wq_flight;                  /* the head was sent and is being programmed */
-static uint32_t s_wq_t0;                 /* time_ms() when it was sent (a stuck card: wq_done) */
-static emmc_wq_stats_t s_wq_st;
+/* A card's block not programmed this long after it was sent: the card has failed. The SD spec's
+ * write busy limit is 250 ms (500 ms SDXC, 4.6.2.2); sd-rw's synchronous driver rode out 3 s (m44
+ * busyok: its 1 s busy waits and two retries), which this keeps, so a slow card in spec is never
+ * dropped. */
+#define WQ_SD_MS  3500u
+/* A wait that holds the loop (a full queue, a sync, a read) with the card-detect pin reading "out":
+ * past sdcard.c's debounce (three samples 100 ms apart) the card is taken as gone. */
+#define WQ_OUT_MS 400u
+static struct {                          /* (one struct: one base address per function, -Os) */
+    unsigned head, n;                    /* the oldest block, blocks queued (the head may be in flight) */
+    int flight;                          /* 1 + the head's device while it is sent and programmed */
+    unsigned fl;                         /* the head's run: blocks sent in one command (or to be popped) */
+    uint32_t t0;                         /* time_ms() when it was sent (a stuck card: wq_done) */
+    unsigned tries;                      /* the card's head block: failed sends */
+    emmc_wq_stats_t st;
+    uint32_t lba[EMMC_WQ_SLOTS];
+    uint8_t dev[EMMC_WQ_SLOTS];          /* 0 Internal (eMMC), 1 the card */
+    uint32_t buf[EMMC_WQ_SLOTS][128];
+} Q;
 
 static int raw_write(uint32_t lba, uint32_t count, const void *buf);
+static int wq_done(int wait);
 
-/* The head block sent: command and data, then back to the caller while the card programs it. */
-static int wq_send(void)
+/* A block's command argument on its device: SDSC cards are byte addressed (SD.c:601-604). */
+static uint32_t card_arg(int dev, uint32_t lba)
 {
-    int r;
-
-    watchdog_feed();
-    select_mmc(0);
-    clk_gate(0x6C, 1);
-    r = xfer_start(24, s_wq_lba[s_wq_head] << s_shift, s_wq_buf[s_wq_head], 512, 1);
-    if (r) {
-        MMC[CTRL] |= 2u;                     /* FIFO reset; the block is written the slow way */
-        wait_clear(CTRL, 2u, 5000);
-        MMC[RINTSTS] = 0xFFFFFFFFu;
-        clk_gate(0x6C, 0);
-        return r;
-    }
-    s_wq_flight = 1;
-    s_wq_t0 = time_ms();
-    return 0;
+    return dev ? (s_sd_hc ? lba : lba << 9) : lba << s_shift;
 }
 
+/* A queued command's end on the selected instance: after a failure the FIFO reset and the status
+ * cleared (while the clock is on: the CRU checker), then the card's clock gated. */
+static void xfer_end(int r)
+{
+    if (r) {
+        fifo_reset();
+        MMC[RINTSTS] = 0xFFFFFFFFu;
+    }
+    clk_gate(CARD_GATE, 0);
+}
+
+/* The head's run (Q.fl blocks) off the queue; rc: it failed (counted). */
 static void wq_pop(int rc)
 {
     if (rc) {
-        s_wq_st.errors++;
-        s_wq_st.last_error = rc;
+        Q.st.errors++;
+        Q.st.last_error = rc;
     }
-    s_wq_st.written++;
-    s_wq_head = (s_wq_head + 1u) % EMMC_WQ_SLOTS;
-    s_wq_n--;
+    Q.st.written += Q.fl;
+    Q.head = (Q.head + Q.fl) % EMMC_WQ_SLOTS;
+    Q.n -= Q.fl;
 }
 
-/* The block in flight: 1 = done (or failed: counted), 0 = the card still has it. wait: until done. */
+/* The card's blocks dropped (it went, or failed), counted; Internal's written now, in their order
+ * (the slow way: this is rare), and the queue is empty. */
+static void wq_drop_sd(void)
+{
+    if (Q.flight == 1)
+        wq_done(1);
+    Q.flight = 0;                            /* (the card's: never on the paths here -- sd_fail runs
+                                              * with none in flight -- and sd_init resets the controller) */
+    for (; Q.n; Q.n--, Q.head = (Q.head + 1u) % EMMC_WQ_SLOTS) {
+        if (Q.dev[Q.head])
+            Q.st.dropped++;
+        else if (raw_write(Q.lba[Q.head], 1, Q.buf[Q.head]))
+            Q.st.errors++;
+    }
+    Q.tries = 0;
+}
+
+/* The card failed: nothing more is written to it (its queued blocks dropped, 0 sectors: every
+ * read and write refused); services/sdcard.c unmounts it (emmc_wq_stats()->sd_fail). */
+static void __attribute__((noinline)) sd_fail(int code)
+{
+    if (Q.st.sd_fail)                        /* (the first reason stays: a big write that found the
+                                              * card failed must not make it "removed") */
+        return;
+    Q.st.errors++;
+    Q.st.last_error = code;
+    Q.st.sd_fail = code;
+    s_sd_sectors = 0;                        /* (the USB disk shows no medium) */
+    wq_drop_sd();
+}
+
+/* The head's run sent: the blocks after it on the same device with the next LBAs (up to the end of
+ * the ring: their buffers follow each other) in one command -- CMD24 for one, CMD25 for several,
+ * ended by CMD12 in wq_done (block_write_once's sequence) -- then back to the caller while the card
+ * programs them. 0 = sent; 1 = not sent: the card's detect pin reads "out" (it waits); < 0 = failed. */
+static int wq_send(void)
+{
+    unsigned h = Q.head, k = 1;
+    int dev = Q.dev[h], r;
+
+    while (k < Q.n && h + k < EMMC_WQ_SLOTS && Q.dev[h + k] == dev && Q.lba[h + k] == Q.lba[h] + k)
+        k++;
+    Q.fl = k;
+    watchdog_feed();
+    select_mmc(dev);
+    if (sd_out())
+        return 1;
+    clk_gate(CARD_GATE, 1);
+    if ((r = xfer_start(k > 1u ? 25 : 24, card_arg(dev, Q.lba[h]), Q.buf[h], k << 9, 1))) {
+        xfer_end(r);
+        return r;
+    }
+    Q.flight = 1 + dev;
+    Q.t0 = time_ms();
+    return 0;
+}
+
+/* The head's run failed (r): sent again, twice (after a FIFO reset, as reads are retried), unless
+ * it is the card's and the card is out (then it waits) or stuck. Then Internal's is counted and
+ * dropped (as it always was: emmc_sync reports it), the card has failed. */
+static void wq_failed(int r)
+{
+    int dev = Q.dev[Q.head];
+
+    if ((dev && sd_pin_out()) || (Q.tries += r == -33 ? 3u : 1u) <= 2u)
+        return;
+    Q.tries = 0;
+    if (dev)
+        sd_fail(r);
+    else
+        wq_pop(r);
+}
+
+/* The block in flight: 1 = done (or failed: handled), 0 = the card still has it. wait: until done
+ * (Internal: as long as it takes; the card: WQ_SD_MS from the send at most). */
 static int wq_done(int wait)
 {
-    int r = 0, on_sd = s_on_sd;
+    int r = 0, dev = Q.flight - 1;
 
-    if (!s_wq_flight)
-        return 1;
-    select_mmc(0);
-    if (!wait && (!(MMC[RINTSTS] & 0xAE88u) || (MMC[STATUS] & STATUS_BUSY))) {
-        if (time_ms() - s_wq_t0 < 2000u) {
-            select_mmc(on_sd);
-            return 0;                        /* data not over, or the card programs */
+    select_mmc(dev);                         /* (left selected: every entry point selects its own) */
+    while (!(MMC[RINTSTS] & 0xAE88u) || (MMC[STATUS] & STATUS_BUSY)) {   /* data not over, or programming */
+        if (sd_out()) {
+            r = SD_ERR_NOCARD;               /* broken off: sent again when the pin reads it in */
+            break;
         }
-        s_wq_st.stuck++;                     /* 2 s: wait it out below */
+        if (time_ms() - Q.t0 >= (dev ? WQ_SD_MS : 2000u)) {
+            Q.st.stuck++;                    /* Internal: 2 s, waited out below; the card: failed */
+            r = dev ? -33 : 0;
+            break;
+        }
+        if (!wait)
+            return 0;
+        watchdog_feed();
+        delay_us(10);
     }
-    r = xfer_finish();
+    if (!r)
+        r = xfer_finish();
+    if (Q.fl > 1u && r > -33) {              /* a CMD25 ended (also after a data error: the card back
+                                              * to tran); not to a card stuck busy or gone */
+        int s = send_cmd(12, s_rca, F_RESP | F_CRC | F_STOP, 1);   /* (SD: stuff bits, spec 4.7.4) */
+
+        if (!r)
+            r = s;
+    }
     if (!r && wait_tran())
         r = -31;
-    clk_gate(0x6C, 0);
-    s_wq_flight = 0;
-    if (r) {                                 /* failed: once more, the slow way */
-        r = raw_write(s_wq_lba[s_wq_head], 1, s_wq_buf[s_wq_head]);
+    xfer_end(r);
+    Q.flight = 0;
+    if (r) {
+        wq_failed(r);
+    } else {
+        Q.tries = 0;
+        wq_pop(0);
     }
-    wq_pop(r);
-    select_mmc(on_sd);
     return 1;
+}
+
+/* Holding the loop: the head block sent (if need be) and done, or handled. A card whose pin reads
+ * "out" for WQ_OUT_MS meanwhile is gone (its blocks dropped). */
+static void wq_head(void)
+{
+    uint32_t t = time_ms();
+    int r;
+
+    while (!Q.flight && Q.n && (r = wq_send())) {
+        if (r < 0) {
+            wq_failed(r);
+            return;
+        }
+        if (time_ms() - t >= WQ_OUT_MS) {
+            sd_fail(SD_ERR_NOCARD);
+            return;
+        }
+        delay_us(100);
+    }
+    if (Q.flight)
+        wq_done(1);
 }
 
 void emmc_quiesce(void)
 {
-    if (s_wq_flight)
-        s_wq_st.waits++;
-    wq_done(1);
+    if (Q.flight == 1) {                     /* (the card's instance is not bootcrumb's) */
+        Q.st.waits++;
+        wq_done(1);
+    }
 }
 
 int emmc_wq_step(int may_start)
 {
-    if (s_wq_flight) {                       /* done now: the next block waits for the next step, so
-                                              * the audio refill reads in between */
-        wq_done(0);
-        return (int)s_wq_n;
-    }
-    if (may_start && s_wq_n && wq_send()) {
-        int r = raw_write(s_wq_lba[s_wq_head], 1, s_wq_buf[s_wq_head]);
+    int r, f = Q.flight;
 
-        wq_pop(r);
-    }
-    return (int)s_wq_n;
+    /* Internal's run done: the next waits for the next step, so the audio refill reads in between.
+     * The card's: the next goes at once (a track on the card is refilled when its headroom runs
+     * low: may_start is audio_write_ok, ap_bg.c), else the card would get a block a pass. */
+    if (f && (!wq_done(0) || f == 1))
+        return (int)Q.n;
+    if (may_start && Q.n && (r = wq_send()) < 0)
+        wq_failed(r);
+    return (int)Q.n;
 }
 
 int emmc_busy(void)
 {
-    return s_wq_flight;
+    return Q.flight;
 }
 
 unsigned emmc_wq_pending(void)
 {
-    return s_wq_n;
+    return Q.n;
 }
 
 unsigned emmc_wq_free(void)
 {
-    return EMMC_WQ_SLOTS - s_wq_n;
+    return EMMC_WQ_SLOTS - Q.n;
 }
 
 const emmc_wq_stats_t *emmc_wq_stats(void)
 {
-    return &s_wq_st;
+    return &Q.st;
 }
 
 int emmc_sync(void)
 {
-    int errors = (int)s_wq_st.errors;
+    uint32_t errors = Q.st.errors + Q.st.dropped;
 
-    if (s_wq_n)
-        s_wq_st.syncs++;
-    while (s_wq_n) {
-        wq_done(1);
-        emmc_wq_step(1);
+    if (Q.n)
+        Q.st.syncs++;
+    while (Q.n)
+        wq_head();
+    return Q.st.errors + Q.st.dropped != errors ? -32 : 0;
+}
+
+/* The blocks copied into the queue (dev 0 Internal, 1 the card); 0, or SD_ERR_NOCARD when the card
+ * failed while this waited for room. */
+static int wq_put(int dev, uint32_t lba, uint32_t count, const uint32_t *src)
+{
+    for (uint32_t i = 0; i < count; i++, src += 128) {
+        unsigned tail = (Q.head + Q.n - 1u) % EMMC_WQ_SLOTS;
+
+        if (Q.n && Q.lba[tail] == lba + i && Q.dev[tail] == dev && !(Q.flight && Q.n <= Q.fl)) {
+            Q.st.merged++;                   /* the newest block again: replaced in place */
+        } else {
+            while (Q.n == EMMC_WQ_SLOTS) {   /* full: the oldest goes out first */
+                Q.st.waits++;
+                wq_head();
+            }
+            if (dev && Q.st.sd_fail)
+                return SD_ERR_NOCARD;
+            tail = (Q.head + Q.n++) % EMMC_WQ_SLOTS;
+            Q.lba[tail] = lba + i;
+            Q.dev[tail] = (uint8_t)dev;
+            Q.st.queued++;
+            if (Q.n > Q.st.peak)
+                Q.st.peak = Q.n;
+        }
+        memcpy(Q.buf[tail], src, 512);
     }
-    wq_done(1);
-    return s_wq_st.errors != (uint32_t)errors ? -32 : 0;
+    return 0;
+}
+
+
+
+/* A read on its instance (dev): a write in flight there waited for first (the card cannot be read
+ * while it programs; Internal: as long as it takes, the card: WQ_SD_MS at most, then it has
+ * failed), counted with its caller (lr); then the queued blocks, newer than the card's, copied over
+ * what was read. A card pulled: SD_ERR_NOCARD, no bus traffic (the reader waits, no zeros). */
+static int q_read(int dev, uint32_t lba, uint32_t count, void *buf, uint32_t lr)
+{
+    int r;
+
+    if (Q.flight == 1 + dev) {
+        Q.st.waits++;
+        Q.st.wait_lr = lr;
+        Q.st.wait_ms = time_ms();
+        wq_done(1);
+        Q.st.wait_ms = time_ms() - Q.st.wait_ms;
+    }
+    select_mmc(dev);
+    if (sd_out() || (dev && Q.st.sd_fail))
+        return SD_ERR_NOCARD;
+    if ((r = block_read(card_arg(dev, lba), count, buf)))
+        return sd_out() ? SD_ERR_NOCARD : r;
+    for (unsigned k = 0; k < Q.n; k++) {
+        unsigned i = (Q.head + k) % EMMC_WQ_SLOTS;
+
+        if (Q.dev[i] == dev && Q.lba[i] - lba < count)
+            memcpy((uint8_t *)buf + (Q.lba[i] - lba) * 512u, Q.buf[i], 512);
+    }
+    return 0;
+}
+
+int emmc_read(uint32_t lba, uint32_t count, void *buf)
+{
+    if (count == 0u)
+        return 0;
+    if (lba + count < lba || lba + count > s_sectors)
+        return -30;
+    return q_read(0, lba, count, buf, (uint32_t)__builtin_return_address(0));
 }
 
 int emmc_write_async(uint32_t lba, uint32_t count, const void *buf)
 {
-    const uint32_t *src = buf;
-
     if (count == 0u)
         return 0;
     if (lba < s_write_floor || lba + count < lba || lba + count > s_sectors)
@@ -639,56 +843,9 @@ int emmc_write_async(uint32_t lba, uint32_t count, const void *buf)
         emmc_sync();
         return raw_write(lba, count, buf);
     }
-    for (uint32_t i = 0; i < count; i++, src += 128) {
-        unsigned tail = (s_wq_head + s_wq_n - 1u) % EMMC_WQ_SLOTS;
-
-        if (s_wq_n && s_wq_lba[tail] == lba + i && !(s_wq_flight && s_wq_n == 1u)) {
-            memcpy(s_wq_buf[tail], src, 512);    /* the newest block again: replaced in place */
-            s_wq_st.merged++;
-            continue;
-        }
-        while (s_wq_n == EMMC_WQ_SLOTS) {        /* full: the oldest goes out first */
-            s_wq_st.waits++;
-            wq_done(1);
-            if (s_wq_n == EMMC_WQ_SLOTS)
-                emmc_wq_step(1);
-        }
-        tail = (s_wq_head + s_wq_n) % EMMC_WQ_SLOTS;
-        s_wq_lba[tail] = lba + i;
-        memcpy(s_wq_buf[tail], src, 512);
-        s_wq_n++;
-        s_wq_st.queued++;
-        if (s_wq_n > s_wq_st.peak)
-            s_wq_st.peak = s_wq_n;
-    }
-    return 0;
+    return wq_put(0, lba, count, buf);
 }
 
-int emmc_read(uint32_t lba, uint32_t count, void *buf)
-{
-    int r;
-
-    if (count == 0u)
-        return 0;
-    if (lba + count < lba || lba + count > s_sectors)
-        return -30;
-    if (s_wq_flight) {                       /* the card cannot be read while it programs */
-        s_wq_st.waits++;
-        s_wq_st.wait_lr = (uint32_t)__builtin_return_address(0);
-        s_wq_st.wait_ms = time_ms();
-        wq_done(1);
-        s_wq_st.wait_ms = time_ms() - s_wq_st.wait_ms;
-    }
-    select_mmc(0);
-    r = block_read(lba << s_shift, count, buf);
-    for (unsigned k = 0; !r && k < s_wq_n; k++) {   /* queued blocks are newer than the card's */
-        unsigned i = (s_wq_head + k) % EMMC_WQ_SLOTS;
-
-        if (s_wq_lba[i] >= lba && s_wq_lba[i] < lba + count)
-            memcpy((uint8_t *)buf + (s_wq_lba[i] - lba) * 512u, s_wq_buf[i], 512);
-    }
-    return r;
-}
 
 /* CMD24 / CMD25 + CMD12 on the selected instance (arg = card address), then the card's programming
  * waited out: STATUS data_busy (send_cmd before CMD12 and before the next command) and CMD13 until
@@ -720,7 +877,7 @@ static int block_write_once(uint32_t arg, uint32_t count, const void *buf)
 static int raw_write(uint32_t lba, uint32_t count, const void *buf)
 {
     watchdog_feed();
-    if (s_wq_flight)                         /* (the queue's own retry comes here with none) */
+    if (Q.flight == 1)                    /* (the queue's own retry comes here with none) */
         wq_done(1);
     select_mmc(0);
     return block_write_once(lba << s_shift, count, buf);
@@ -780,8 +937,6 @@ int emmc_fw_write(uint32_t rel, uint32_t count, const void *buf)
  *     pulled card runs into its 5 s waits).
  */
 
-static uint32_t s_sd_sectors, s_sd_wr;
-static int s_sd_hc, s_sd_4bit, s_cd_ready;
 
 /* Card detect GPIO0.11, pulled up, 0 = card in (reference 0x03062c34). */
 int sd_present(void)
@@ -910,9 +1065,15 @@ static void sd_off(void)
     clk_gate(0x18, 0);
 }
 
+/* (A card in again, or out: whatever the old one had queued is dropped, counted; sdcard.c says so.) */
 int sd_init(void)
 {
-    int r = sd_try_init();
+    int r;
+
+    wq_drop_sd();
+    Q.st.sd_fail = 0;
+    Q.st.dropped = 0;                    /* (the next card's count) */
+    r = sd_try_init();
 
     if (r) {
         if (r != -1)
@@ -926,25 +1087,28 @@ uint32_t sd_sectors(void) { return s_sd_sectors; }
 int sd_is_hc(void)        { return s_sd_hc; }
 int sd_bus_width(void)    { return s_sd_4bit ? 4 : 1; }
 
+/* The card's range check before a read or a write: 0 or -30 (also no card, or a failed one:
+ * sd_fail made it 0 sectors). */
+static int sd_check(uint32_t lba, uint32_t count)
+{
+    return lba + count < lba || lba + count > s_sd_sectors ? -30 : 0;
+}
+
+
 int sd_read(uint32_t lba, uint32_t count, void *buf)
 {
     int r;
 
-    watchdog_feed();
     if (count == 0u)
         return 0;
-    if (!s_sd_sectors || lba + count < lba || lba + count > s_sd_sectors)
-        return -30;
-    select_mmc(1);
-    if (sd_out())
-        return SD_ERR_NOCARD;               /* pulled: no bus traffic, no timeouts */
-    r = block_read(s_sd_hc ? lba : lba << 9, count, buf);
-    return r && sd_out() ? SD_ERR_NOCARD : r;   /* (pulled meanwhile: the reader waits, no zeros) */
+    if ((r = sd_check(lba, count)))
+        return r;
+    return q_read(1, lba, count, buf, (uint32_t)__builtin_return_address(0));
 }
 
-/* As sd_read; SDSC cards take byte addresses (CMD16 set 512-byte blocks at init). A failed write is
- * tried twice more after a FIFO reset, as reads are (the same data again is harmless), unless the
- * card is gone. */
+/* As sd_read; SDSC cards take byte addresses (CMD16 set 512-byte blocks at init). The queue first
+ * (its blocks are older). A failed write is tried twice more after a FIFO reset, as reads are (the
+ * same data again is harmless), unless the card is gone. The USB disk's and the big writes' path. */
 int sd_write(uint32_t lba, uint32_t count, const void *buf)
 {
     int r;
@@ -952,13 +1116,14 @@ int sd_write(uint32_t lba, uint32_t count, const void *buf)
     watchdog_feed();
     if (count == 0u)
         return 0;
-    if (!s_sd_sectors || lba + count < lba || lba + count > s_sd_sectors)
-        return -30;
+    emmc_sync();                             /* (first: a card that fails in it has 0 sectors then) */
+    if ((r = sd_check(lba, count)))
+        return r;
     select_mmc(1);
     for (int i = 0; ; i++) {
         if (sd_out())
             return SD_ERR_NOCARD;
-        r = block_write_once(s_sd_hc ? lba : lba << 9, count, buf);
+        r = block_write_once(card_arg(1, lba), count, buf);
         if (!r || i == 2)
             break;
     }
@@ -966,6 +1131,21 @@ int sd_write(uint32_t lba, uint32_t count, const void *buf)
         s_sd_wr += count;
     return r && sd_out() ? SD_ERR_NOCARD : r;
 }
+
+/* The file system's writer on the card (services/sdcard.c): up to EMMC_WQ_SLOTS blocks through the
+ * queue, bigger writes as one CMD25 after it; one of those failing fails the card as a queued
+ * block does (nothing is written after a write that did not take). */
+int sd_write_async(uint32_t lba, uint32_t count, const void *buf)
+{
+    int r = sd_check(lba, count);
+
+    if (r || count <= EMMC_WQ_SLOTS)
+        return r ? r : wq_put(1, lba, count, buf);
+    if ((r = sd_write(lba, count, buf)))
+        sd_fail(r);
+    return r;
+}
+
 
 uint32_t sd_written(void) { return s_sd_wr; }
 
