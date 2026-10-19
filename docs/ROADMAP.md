@@ -29,6 +29,8 @@ published yet.
 | Damaged files never stop the player (bounds at open, decoder abort, core-B supervisor) | done | QEMU |
 | Tags: ID3v2.2-2.4, ID3v1, APEv2, Vorbis comments, RIFF INFO, M4A, Ogg | done | QEMU, host tests |
 | Player: play queue, sorted browser, resume, play a whole folder | done | device |
+| Library: background index per volume (incremental, A/B commit, resumes after a power cut), Songs / Albums / Artists / Genres / Favourites / Playlists, playlists made and edited on the device (M3U8 on the SD card or Internal) | done | QEMU (round6) |
+| EQ on core B: stock's presets, a 10-band Custom, crossfaded changes, bit-exact when off | done | QEMU (round6) |
 | Settings file `RECHORD.CFG`, log ring flushed to `/Internal/ECHOLOG.TXT` | done | device |
 | Screenshot shortcut (VOL+ and VOL- together, then PLAY: `/Internal/SHOTn.BMP`) | done | QEMU |
 | Power: backlight PWM, screen off, auto power-off, battery reading and cut-off, charge state | done | device |
@@ -71,11 +73,11 @@ Nothing in ReChord may change what the ROM sees on that path:
   core B for each format).
 
 ### 2. Features
-- A library index: a background scan into a crash-safe index file, then Artists, Albums,
-  Genres, Years, Composers and All Tracks (the idea from upstream, docs/UPSTREAM_IDEAS.md).
+- Library follow-ups: Years and Composers views, an edit merged into the index instead of a
+  rebuild, very large folders scanned in more than one slice.
 - Settings and the resume point in a double-buffered, checksummed record that survives a power
   cut mid-write; the log appended and rotated.
-- A 10-band EQ and ReplayGain applied on core B.
+- ReplayGain applied on core B.
 - A real-time clock, a persistent queue across power-off, hold-to-boot, a battery-empty
   shutdown, and swap up/down.
 - A spectrum view.

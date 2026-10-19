@@ -29,6 +29,12 @@ the panel is 320×170).*
 - **Decoding:** core B decodes; core A feeds it and the DACs (two CS43131).
 - **Library basics:** tags (ID3v2/ID3v1/APEv2/Vorbis/MP4/RIFF), a play queue, play modes, and
   resume after power-off.
+- **Library:** Songs, Albums, Artists, Genres, Favourites and Playlists, indexed in the background
+  (it re-reads only what changed, and refreshes by itself when a card goes in or the PC wrote).
+  Playlists are made and edited on the player and kept as M3U8 files on the microSD card
+  (`/SD/RECHORD`, or Internal: Settings > Playback > Library data).
+- **EQ** on core B: stock's six presets (Retro, Bass, Heavy, Pop, Jazz, Unique) and a 10-band
+  Custom; Off is bit-exact.
 
 **Interface**
 - **Header:** a status line on every screen with play state, volume, a Bluetooth icon while
@@ -92,8 +98,7 @@ selected at build time (`BOARD=512m | 8g`). The 8 GB build has not been tested o
   push): a full screen is 13 ms on DMA; most of the ~70 ms after a tap is the release's
   confirmation (~50 ms), not the display
 - boot: the first folder listing (~0.5 s) and the USB wake (~0.9 s)
-- a library index
-- EQ and ReplayGain on core B
+- ReplayGain on core B
 - an on-device self-test mode
 - hardware decoding
 - a Bluetooth control channel
