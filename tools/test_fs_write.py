@@ -406,7 +406,7 @@ def scenario(spc, mbr, fsinfo_known):
     I = '/Internal'
     cmds = [
         'w:/SD/RO.TXT:10:1:10', 'rm:/SD/RECHORD.CFG',                # read-only volume
-        'w:/Internal/NoDir/X.TXT:10:1:10', 'w:/Internal/not 8.3 name.txt:10:1:10',
+        'w:/Internal/NoDir/X.TXT:10:1:10', 'w:/Internal/not 8.3 name.txt:10:1:10',   # a long name (fsw)
         'rm:/Internal/Music', 'rm:/Internal/NOPE.TXT', 'busy:/Internal/RECHORD.CFG',
         'w:/Internal/RECHORD.CFG:300:10:300',                         # rewrite shorter
         'w:/Internal/RECHORD.CFG:5000:11:100',                        # rewrite longer
@@ -429,6 +429,7 @@ def scenario(spc, mbr, fsinfo_known):
         '/NEWLOG.TXT': pat(16, 600) + pat(17, 600), '/FULL/NEW1.TXT': pat(18, 10),
         '/FULL/NEW2.TXT': pat(19, 700), '/ORPH/NEW.TXT': pat(20, 100), '/ORPH2/NEW.TXT': pat(21, 100),
         '/EMPTY.TXT': pat(22, 10), '/ZERO.TXT': b'', '/AFTER.BIN': pat(23, 3000),
+        '/not 8.3 name.txt': pat(1, 10),
     }
     for i in range(40):
         exp[f'/Music/N{i:02d}.TXT'] = pat(30 + i, i * 97)
@@ -439,7 +440,7 @@ def scenario(spc, mbr, fsinfo_known):
     out = run(img, cmds)
     o = '\n'.join(out)
     want_lines = ['mount 0 0', 'writable 1 0', 'w /SD/RO.TXT open-fail', 'rm /SD/RECHORD.CFG -4',
-                  'w /Internal/NoDir/X.TXT open-fail', 'w /Internal/not 8.3 name.txt open-fail',
+                  'w /Internal/NoDir/X.TXT open-fail',
                   'rm /Internal/Music -1', 'rm /Internal/NOPE.TXT -2',
                   'busy /Internal/RECHORD.CFG 1 1 -1', 'ex /Internal/MIS.BIN 0', 'ex /Internal/FULL 1']
     for w in want_lines:
@@ -524,7 +525,8 @@ def screenshot():
                            '-I' + os.path.join(ROOT, 'firmware'), '-I' + d, '-o', exe,
                            os.path.join(ROOT, 'firmware/services/test_screenshot.c'),
                            os.path.join(ROOT, 'firmware/services/screenshot.c'),
-                           os.path.join(ROOT, 'firmware/services/fs_target.c')] +
+                           os.path.join(ROOT, 'firmware/services/fs_target.c'), os.path.join(ROOT, 'firmware/services/fs_write_ext.c'),
+                           os.path.join(ROOT, 'firmware/services/fs_write_host.c')] +
                           [os.path.join(d, f) for f in ('display.c', 'text_stub.c', 'font.c', 'font8x8.c',
                                                         'panel_init_rknanoc.c', 'panel_io_sim.c')])
     img = os.path.join(T, 'shot.img')
@@ -566,7 +568,8 @@ def main():
     subprocess.check_call([cc, '-O2', '-Wall', '-Wextra', '-Wno-sign-compare', '-Werror',
                            '-I' + os.path.join(ROOT, 'firmware'), '-o', EXE,
                            os.path.join(ROOT, 'firmware/services/test_fs_write.c'),
-                           os.path.join(ROOT, 'firmware/services/fs_target.c')])
+                           os.path.join(ROOT, 'firmware/services/fs_target.c'), os.path.join(ROOT, 'firmware/services/fs_write_ext.c'),
+                           os.path.join(ROOT, 'firmware/services/fs_write_host.c')])
     scenario(1, False, True)
     scenario(1, True, False)
     scenario(4, True, True)

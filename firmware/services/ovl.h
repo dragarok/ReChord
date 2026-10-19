@@ -26,7 +26,8 @@
 
 #include <stdint.h>
 
-enum { OVL_NONE = 0, OVL_USBDAC, OVL_USBOUT, OVL_DEV, OVL_COUNT };
+/* OVL_FSW: the file-system writer (services/fs_write_ext.c), the second window's only one (ovl.c) */
+enum { OVL_NONE = 0, OVL_USBDAC, OVL_USBOUT, OVL_DEV, OVL_FSW, OVL_COUNT };
 
 #define OVL_MAGIC 0x314C564Fu        /* "OVL1" */
 

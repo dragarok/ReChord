@@ -6,7 +6,9 @@
  *   usbout  USB-C earphones, the player as USB host: drivers/usb_out_rknanoc.c
  *   dev     the Developer tests: DAC test, USB console (drivers/usb_cdc_rknanoc.c), USB-C probe,
  *           USB detect, BT listen (drivers/bt_jieli.c bt_listen), Panel TE (drivers/panel_io_rknanoc.c
- *           panel_te_probe) -- startup/ap_ui.c
+ *           panel_te_probe), SD card test (services/sd_selftest.c) -- startup/ap_ui.c
+ *   fsw     the file-system writer's cold half (services/fs_write_ext.c: exFAT writes, long names,
+ *           mkdir, rename), in the second window: loaded at its first use, never evicted
  *
  * Which code goes in which overlay is firmware_ap.ld's list (by object, and by function section
  * for a file that is partly resident), not this file's. The callers keep the drivers' own names:
@@ -26,6 +28,7 @@
 #include "audio/audio.h"
 #include "ui/frame.h"
 #include "ui/nav.h"
+#include "services/fs_target_int.h"
 
 extern const char __ovl_abi[];       /* absolute: this link's ABI (Makefile) */
 
@@ -48,6 +51,7 @@ const ovl_desc_t ovl_desc[OVL_COUNT] = {
     [OVL_USBDAC] = { "ov_dac", "USB DAC", NULL },
     [OVL_USBOUT] = { "ov_uout", "USB-C out", usbout_stop },
     [OVL_DEV]    = { "ov_dev", "Developer test", NULL },
+    [OVL_FSW]    = { "ov_fsw", "File writer", NULL },
 };
 
 /* The USB interrupt goes wherever usb_irq_hook points (drivers/usb_msc_rknanoc.c): the USB DAC's
@@ -213,16 +217,18 @@ int __wrap_usb_out_set_volume(int db)
 
 /* ---- dev: the Developer tests (Settings > Developer, ui/screens.c) ------------------------------ */
 
-enum { DEV_DAC_TEST, DEV_USB_CONSOLE, DEV_USB_PROBE, DEV_USB_DETECT, DEV_BT_LISTEN, DEV_TE_PROBE, DEV_HIFI_PROBE };
+enum { DEV_DAC_TEST, DEV_USB_CONSOLE, DEV_USB_PROBE, DEV_USB_DETECT, DEV_BT_LISTEN, DEV_TE_PROBE, DEV_HIFI_PROBE,
+       DEV_SD_TEST };
 
 void dac_test_run(void), usb_console_run(void), usb_probe_menu(void), usb_detect_test(void),
      bt_listen_test(void), te_probe_test(void);   /* startup/ap_ui.c */
 void hifi_probe_test(void);                       /* audio/hifi_probe.c */
+void sd_selftest(void);                           /* services/sd_selftest.c */
 
 static void (*const k_dev[])(void) OVL_API(dev) = {
     [DEV_DAC_TEST] = dac_test_run, [DEV_USB_CONSOLE] = usb_console_run, [DEV_USB_PROBE] = usb_probe_menu,
     [DEV_USB_DETECT] = usb_detect_test, [DEV_BT_LISTEN] = bt_listen_test, [DEV_TE_PROBE] = te_probe_test,
-    [DEV_HIFI_PROBE] = hifi_probe_test,
+    [DEV_HIFI_PROBE] = hifi_probe_test, [DEV_SD_TEST] = sd_selftest,
 };
 OVL_HEADER(dev, OVL_DEV, k_dev);
 
@@ -242,3 +248,26 @@ void ap_usb_detect(void) { dev_run(DEV_USB_DETECT); }
 void ap_bt_listen(void) { dev_run(DEV_BT_LISTEN); }
 void ap_te_probe(void) { dev_run(DEV_TE_PROBE); }
 void ap_hifi_probe(void) { dev_run(DEV_HIFI_PROBE); }
+void ap_sd_test(void) { dev_run(DEV_SD_TEST); }
+
+/* ---- fsw: the file-system writer's cold half (services/fs_write_ext.c), second window --------- */
+
+int fsx_create(vol_t *v, const char *leaf, size_t n, uint8_t attr, uint32_t clus);
+int fsx_grow(struct fs_file *f);
+int fsx_close(struct fs_file *f);
+int fsx_open(struct fs_file *f, int append);
+int fsx_path(int op, const char *a, const char *b, fs_stat_t *st);
+int fsx_clean(vol_t *v);
+
+static const fsx_api_t k_fsw OVL_API(fsw) = {
+    fsx_create, fsx_grow, fsx_close, fsx_open, fsx_path, fsx_clean,
+};
+OVL_HEADER(fsw, OVL_FSW, &k_fsw);
+
+/* services/fs_target.c: the writer's entry points, NULL when the overlay was refused (then exFAT
+ * stays read-only and FAT takes 8.3 names only, as before it existed). No hold: the second window
+ * is never evicted. */
+const fsx_api_t *fsx_api(void)
+{
+    return ovl_get(OVL_FSW);
+}

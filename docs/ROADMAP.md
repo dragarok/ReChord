@@ -32,7 +32,7 @@ published yet.
 | Settings file `RECHORD.CFG`, log ring flushed to `/Internal/ECHOLOG.TXT` | done | device |
 | Screenshot shortcut (VOL+ and VOL- together, then PLAY: `/Internal/SHOTn.BMP`) | done | QEMU |
 | Power: backlight PWM, screen off, auto power-off, battery reading and cut-off, charge state | done | device |
-| USB mass storage (internal read/write, SD read-only), hot-plug | done | device, QEMU |
+| USB mass storage (internal and SD read/write), hot-plug | done (SD writes: QEMU, sd-rw) | device, QEMU |
 | USB DAC: UAC2 high-speed asynchronous, bit-perfect 16/24/32-bit at 44.1-192 kHz, VOL keys, media keys to the host, DAC power modes (battery / power only / charge) | done | device, QEMU |
 | USB-C earphones: the player as USB host to a UAC1/UAC2 device | done | QEMU |
 | Bluetooth (JieLi module, off by default): scan, connect, reconnect, audio routing, earphone keys, settings from earphone key sequences, USB DAC to Bluetooth earphones | done | device (2026-10-17), QEMU; see [BT_DEVICE_NOTES.md](BT_DEVICE_NOTES.md) |

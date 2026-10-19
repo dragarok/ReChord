@@ -13,6 +13,7 @@
 #include "drivers/emmc.h"
 #include "drivers/panel_io.h"
 #include "drivers/usb_msc.h"
+#include "services/sdcard.h"
 #include "drivers/usb_cdc.h"
 #include "drivers/usb_uac.h"
 #include "drivers/usb_probe.h"
@@ -52,8 +53,7 @@ static int s_pass_held;         /* this pass held a USB disk session: not timed 
 static uint32_t s_power_down_ms;     /* time_ms() when the power key went down */
 static int s_power_armed;    /* power key seen released since boot */
 static uint32_t s_user;              /* user volume start, 0 = unknown */
-static char s_emmc[32], s_usb[32] = "plug in", s_sd[32];
-static int s_sd_in = -1;
+static char s_emmc[32], s_usb[32] = "plug in";
 
 /* Read-only eMMC probe for the root menu: size and user volume start. */
 static int s_storage_failed;          /* our driver could not use the storage the ROM booted from */
@@ -88,26 +88,6 @@ static void emmc_probe(void)
     text_fonts_load();                           /* the fonts module from our slot (drivers/text.h) */
 }
 
-
-/* SD row: size, type, bus width and the first volume's file system. */
-static void sd_probe(void)
-{
-    int r = sd_init();
-
-    fs_target_unmount(1);
-    if (r == -1) {
-        snprintf(s_sd, sizeof s_sd, "no card");
-        return;
-    }
-    if (r) {
-        snprintf(s_sd, sizeof s_sd, "init %d", r);
-        return;
-    }
-    r = fs_target_mount(1, "SD", sd_read, 0);
-    snprintf(s_sd, sizeof s_sd, "%uM %s %db %s", (unsigned)(sd_sectors() >> 11),
-             sd_is_hc() ? "HC" : "SC", sd_bus_width(),
-             r ? (r == -3 ? "rd err" : "no fs") : fs_target_type(1));
-}
 
 
 static const char *usbd_text(void)
@@ -295,7 +275,8 @@ static void power_off(const char *why)
 
 /* MSC session, run on demand from the "USB storage" menu entry (the cable
  * edge opens the CDC console instead): expose the user volume (LUN 0) and
- * the SD card (LUN 1, read-only) until eject/unplug/power key. */
+ * the SD card (LUN 1, writable: services/sdcard.c unmounts it first and mounts
+ * it again after) until eject/unplug/power key. */
 /* Before a USB device mode (disk, console, DAC) or the probe: the core back from host. */
 /* USB detect test (menu, last row): which idle state of the USB block lets the PHY's comparators see
  * a cable plugged in after boot. For each candidate (usb_detect_names): unplug, the state applied,
@@ -479,7 +460,7 @@ static void usb_session(void)
 {
     const usb_lun_t luns[2] = {
         { emmc_read, emmc_write, s_user, emmc_sectors() - s_user },
-        { sd_read, NULL, 0, sd_sectors() },
+        { sd_read, sd_write, 0, sd_sectors() },
     };
     uint32_t rd, wr;
     int r;
@@ -503,10 +484,12 @@ static void usb_session(void)
         line(1, "eject on the PC or press power");
         display_flush_rows(0, DISPLAY_H - 1);
     }
+    sdcard_usb_begin();
     r = usb_msc_run(luns, 2, keys_power, &rd, &wr);
     if (s_ui_up)
         nav_pop();
     fs_target_mount_rw(0, "Internal", emmc_read, emmc_write_async, s_user);   /* host may have written */
+    sdcard_usb_end();
     snprintf(s_usb, sizeof s_usb, "x%d r%uM w%uM", r, (unsigned)(rd >> 11), (unsigned)(wr >> 11));
     log_printf("usb: disk session ended: exit %d, read %u MB, written %u MB, cable %d", r,
                (unsigned)(rd >> 11), (unsigned)(wr >> 11), usb_cable());
@@ -1304,7 +1287,7 @@ void ap_diag_row(int i, row_t *r)
     case 1: snprintf(v, n, "%u MHz", (unsigned)(clock_core_b_hz() / 1000000u)); break;
     case 2: snprintf(v, n, "%s", power_battery_text()); break;
     case 3: snprintf(v, n, "%s", s_emmc); break;
-    case 4: snprintf(v, n, "%s", s_sd); break;
+    case 4: snprintf(v, n, "%s", sdcard_text()); break;
     case 5: snprintf(v, n, "%s", s_usb); break;
     case 6: snprintf(v, n, "%s", usbd_text()); break;
     case 7: snprintf(v, n, "%u, %u slow", (unsigned)d->frames, (unsigned)d->slow); break;
@@ -1420,13 +1403,8 @@ void ap_ui_loop(void)
             bootcrumb(BC_LOOP);                     /* persisted with them */
         }
 
-        if (sd_present() != s_sd_in) {   /* card inserted / removed */
-            s_sd_in = sd_present();
-            if (s_sd_in)
-                panel_io_delay_ms(300);  /* let the contacts settle */
-            sd_probe();
+        if (sdcard_tick())               /* card in / out, debounced (services/sdcard.c) */
             ui_invalidate_all();
-        }
 
         {                                /* what the cable reading depends on, when it changes */
             static uint32_t s_st[3];

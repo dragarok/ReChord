@@ -20,7 +20,8 @@ overlays in windows at 0x0307A008, 0x0307BF08, 0x0308B638). Sources: `firmware/f
 | 0x0302FFC0..0x03030000 | 64 B | .noinit: the crash record `g_bootguard_rec`, the display trial's marker | firmware_ap.ld |
 | 0x03030000..0x03040000 | 64 KiB | the audio input ring (A writes, B reads) | audio/audio_shared.h AS_IN_RING |
 | **0x03040000..0x03048000** | **32 KiB** | **the overlay window (OVL_WIN)**: one overlay at a time | this change |
-| 0x03048000..0x0304F000 | 28 KiB | free: room for a second window | |
+| **0x03048000..0x0304C000** | **16 KiB** | **the second window (OVL_FS)**: the file-system writer's overlay (fsw) alone, never evicted | sd-rw |
+| 0x0304C000..0x0304F000 | 12 KiB | free | |
 | 0x0304F298.. | | the loaded image (IMG offset 0; the payload from 0x0304F490) | docs/HANDOVER.md "PHASE A AUDIT RESULT" |
 | 0x03050000..0x03077820 | 161824 B | FW_CODE: vectors, code, read-only data, the .data load image; executes in place | firmware_ap.ld |
 | 0x03077900..0x0308FF00 | 99840 B | the fonts window ("fonts" module, 92472 B, loaded at boot) | drivers/text_load.c |
@@ -58,7 +59,8 @@ go in an overlay (or free code) first, before the space is gone rather than afte
 |---|---|---|---|
 | usbdac | ov_dac | the USB DAC (UAC2): `drivers/usb_uac_rknanoc.c`, the session in `startup/ap_ui.c` | the cable's mode, Home > USB > USB DAC |
 | usbout | ov_uout | USB-C earphones, the player as USB host: `drivers/usb_out_rknanoc.c` | Settings (usb_out=on), every pass while no cable |
-| dev | ov_dev | the Developer tests: DAC test, USB console (`drivers/usb_cdc_rknanoc.c`), USB-C probe screen, USB detect, BT listen (`bt_jieli.c` bt_listen), HIFI probe (`audio/hifi_probe.c`; core B's side `coreb/b_hifi_probe.c`, docs/HIFI_PLAN.md) | Settings > System > Developer |
+| dev | ov_dev | the Developer tests: DAC test, USB console (`drivers/usb_cdc_rknanoc.c`), USB-C probe screen, USB detect, BT listen (`bt_jieli.c` bt_listen), HIFI probe (`audio/hifi_probe.c`; core B's side `coreb/b_hifi_probe.c`, docs/HIFI_PLAN.md), SD card test (`services/sd_selftest.c`) | Settings > System > Developer |
+| fsw (second window) | ov_fsw | the file-system writer's cold half (`services/fs_write_ext.c`): exFAT writes, new long names on FAT, mkdir, rename, fs_remove, fs_stat | `services/fs_target.c` through `fsx_api()` (`startup/ap_ovl.c`), at the first write that needs it |
 
 How it works:
 
@@ -93,6 +95,15 @@ How it works:
   image load does (the device: 99688 B in 9..17 ms, ECHOLOG 2026-10-16/17 "B up with bmain"; an
   overlay is under a tenth of that), with the 64 KiB input ring and the PCM ring still feeding the
   output. The only load that can happen while music plays is usbout (USB-C earphones switched on).
+
+**The second window** (OVL_FS, 0x03048000, 16 KiB; `services/ovl.c`): one overlay only, fsw. It is loaded
+the first time the file system needs it and never evicted, so it runs while any overlay is in the first window
+(USB-C earphones, a mode whose overlay calls the file system: the music library's scanner) -- the first window's
+one-at-a-time rule would otherwise swap the earphones' code out to save a playlist. Same checks (sum, magic,
+id, length, ABI, CRC, slot 2) and the same refusal; refused, exFAT stays read-only and FAT takes 8.3 names
+only, as before fsw existed (the log and the settings are 8.3 names on Internal: resident, never wait for it).
+`NOCROSSREFS_TO` keeps the first window's overlays and fsw from naming each other; `tools/ovl_pack.py` and
+`tools/ap_size.py` know it ("core A second window ... fsw N (free)").
 
 ## Putting a feature in an overlay
 

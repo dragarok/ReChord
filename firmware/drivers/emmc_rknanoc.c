@@ -58,10 +58,17 @@ static void select_mmc(int sd)
     s_mmc = (volatile uint32_t *)(sd ? 0x60020000u : 0x60030000u);
 }
 
+/* The microSD card is out (card detect GPIO0.11 reads high, its pull-up: reference 0x03062c34):
+ * every polled wait on the SD instance gives up at once instead of running into its timeout. */
+static int sd_out(void)
+{
+    return s_on_sd && ((((volatile uint32_t *)0x40160000u)[0x50 / 4] >> 11) & 1u);
+}
+
 static int wait_clear(unsigned reg, uint32_t mask, uint32_t tries)
 {
     while (MMC[reg] & mask) {
-        if (tries-- == 0)
+        if (tries-- == 0 || sd_out())
             return -1;
         delay_us(1);
     }
@@ -112,7 +119,7 @@ static int send_cmd(uint32_t idx, uint32_t arg, uint32_t flags, int wait_busy)
     if (wait_clear(CMD, CMD_START, 50000))
         return -3;
     while (!(MMC[RINTSTS] & 0x4u)) {        /* command done */
-        if (--tries == 0)
+        if (--tries == 0 || sd_out())
             return -4;
         delay_us(1);
     }
@@ -155,7 +162,7 @@ static int xfer_start(uint32_t idx, uint32_t arg, uint32_t *buf, uint32_t len, i
         if (write)
             n = n < s_fifo_words ? s_fifo_words - n : 0u;
         if (n == 0u) {
-            if (--fifo_tries == 0u)
+            if (--fifo_tries == 0u || sd_out())
                 return -13;
             delay_us(1);
             continue;
@@ -179,7 +186,7 @@ static int xfer_finish(void)
     int ret = 0;
 
     while (!(MMC[RINTSTS] & 0xAE88u)) {     /* data over or error */
-        if (--tries == 0u) {
+        if (--tries == 0u || sd_out()) {
             ret = -10;
             break;
         }
@@ -198,12 +205,15 @@ static int xfer_data(uint32_t idx, uint32_t arg, uint32_t *buf, uint32_t len, in
     return ret ? ret : xfer_finish();
 }
 
+static uint32_t s_sd_rca;           /* the SD card's RCA (it publishes it with CMD3) */
+
+
 static int wait_tran(void)
 {
     for (uint32_t i = 0; i < 100000u; i++) {
         uint32_t r;
 
-        if (send_cmd(13, s_rca, F_RESP | F_CRC, 0))
+        if (send_cmd(13, s_on_sd ? s_sd_rca << 16 : s_rca, F_RESP | F_CRC, 0))   /* (the selected card's) */
             return -1;
         r = MMC[RESP0];
         if ((r & 0x100u) && ((r & 0x1FFFu) >> 9) == 4u)   /* ready, tran */
@@ -436,6 +446,14 @@ uint32_t emmc_sectors(void)
     return s_sectors;
 }
 
+/* A FIFO reset, with the card's clock on (an access with it gated gets no bus answer: QEMU's CRU
+ * checker, SDK Hw_cru.h; the read retry used to do it after the gate went off). */
+static void fifo_reset(void)
+{
+    MMC[CTRL] |= 2u;
+    wait_clear(CTRL, 2u, 1000);
+}
+
 /* CMD17/CMD18 (+CMD12) on the selected instance; arg = card address. */
 static int block_read_once(uint32_t arg, uint32_t count, void *buf)
 {
@@ -450,6 +468,8 @@ static int block_read_once(uint32_t arg, uint32_t count, void *buf)
         if (!ret)
             ret = stop;
     }
+    if (ret)
+        fifo_reset();                       /* (for the retry: while the clock is still on) */
     clk_gate(CARD_GATE, 0);
     return ret;
 }
@@ -461,11 +481,8 @@ static int block_read(uint32_t arg, uint32_t count, void *buf)
     int ret = block_read_once(arg, count, buf);
 
     watchdog_feed();             /* (long storage work keeps it fed, as stock's FS code does) */
-    for (int i = 0; ret && i < 2; i++) {
-        MMC[CTRL] |= 2u;                    /* FIFO reset */
-        wait_clear(CTRL, 2u, 1000);
+    for (int i = 0; ret && i < 2; i++)     /* (block_read_once reset the FIFO) */
         ret = block_read_once(arg, count, buf);
-    }
     return ret;
 }
 
@@ -673,28 +690,40 @@ int emmc_read(uint32_t lba, uint32_t count, void *buf)
     return r;
 }
 
-static int raw_write(uint32_t lba, uint32_t count, const void *buf)
+/* CMD24 / CMD25 + CMD12 on the selected instance (arg = card address), then the card's programming
+ * waited out: STATUS data_busy (send_cmd before CMD12 and before the next command) and CMD13 until
+ * READY_FOR_DATA in tran (wait_tran) -- the eMMC write the reference does (0x0305271c) and the SD
+ * spec's (Physical Layer Simplified 4.3.4: an open-ended CMD25 ends with CMD12; 4.6.2.2: busy up to
+ * 250 ms, 500 ms on SDXC, inside wait_clear's bound). */
+static int block_write_once(uint32_t arg, uint32_t count, const void *buf)
 {
     int ret, r;
 
-    watchdog_feed();
-    if (s_wq_flight)                         /* (the queue's own retry comes here with none) */
-        wq_done(1);
-    select_mmc(0);
-    clk_gate(0x6C, 1);
+    clk_gate(CARD_GATE, 1);
     if (count == 1u) {
-        ret = xfer_data(24, lba << s_shift, (uint32_t *)buf, 512, 1);
+        ret = xfer_data(24, arg, (uint32_t *)buf, 512, 1);
     } else {
-        ret = xfer_data(25, lba << s_shift, (uint32_t *)buf, count << 9, 1);
-        r = send_cmd(12, s_rca, F_RESP | F_CRC | F_STOP, 1);
+        ret = xfer_data(25, arg, (uint32_t *)buf, count << 9, 1);
+        r = send_cmd(12, s_rca, F_RESP | F_CRC | F_STOP, 1);   /* (SD: stuff bits, spec 4.7.4) */
         if (!ret)
             ret = r;
     }
     r = wait_tran();                        /* programming done */
     if (!ret && r)
         ret = -31;
-    clk_gate(0x6C, 0);
+    if (ret)
+        fifo_reset();                       /* (for the retry: while the clock is still on) */
+    clk_gate(CARD_GATE, 0);
     return ret;
+}
+
+static int raw_write(uint32_t lba, uint32_t count, const void *buf)
+{
+    watchdog_feed();
+    if (s_wq_flight)                         /* (the queue's own retry comes here with none) */
+        wq_done(1);
+    select_mmc(0);
+    return block_write_once(lba << s_shift, count, buf);
 }
 
 /* Refuses anything below the user volume: IDB and firmware slots are
@@ -723,9 +752,35 @@ int emmc_fw_write(uint32_t rel, uint32_t count, const void *buf)
     return raw_write(EMMC_FW_BASE + rel, count, buf);
 }
 
-/* ---- SD card (read-only, like the reference) ---- */
+/* ---- SD card ----
+ *
+ * Read and write, as stock writes it (MINIV390: MDWrite 0x03069422 -> SDCardWrite 0x030605c8 ->
+ * _SDMMC_Write 0x030604f8 -> SDC_Request 0x0305eda4; the SDK's SD_MMC/SDM.c:147-222 and
+ * SDCtrl.c:971-1229; the flag words are in all 26 stock versions):
+ *   - one block CMD24, several CMD25 then CMD12: the CMD words 0xA0002758 / 0xA0002759 (start,
+ *     use_hold, wait_prvdata, write, data, CRC, response: stock 0x0306054a / 0x03060528) are
+ *     xfer_start()'s 0x400 | 0xA0002340 | idx; no auto-stop, no CMD23, no ACMD23 pre-erase (stock
+ *     sends none; SDConfig.h:42 PRE_DEFINE_BLKCNT off). Stock's CMD12 (0x414C) leaves out
+ *     wait_prvdata; ours keeps send_cmd()'s, as the read path's CMD12 always has (device-proven).
+ *   - BLKSIZ 512, BYTCNT n * 512 (SDCtrl.c:1040-1041), FIFOTH 0x300F0010 and TMOUT 0xFFFFFF40 at
+ *     init (stock 0x030602e4, SDCtrl.c:846-851): the eMMC values below.
+ *   - the card's programming busy: stock polls STATUS bit 9 before the *next* command, 5,000,000 x
+ *     1 us (SDCtrl.c:212-241, stock 0x0305eda4); ours polls it before every command (send_cmd,
+ *     xfer_start: 0.5 / 1 s) and after the write waits for CMD13 READY_FOR_DATA in tran (SD spec,
+ *     Physical Layer Simplified 4.10.1; stock never sends CMD13 on SD), inside the spec's write
+ *     busy limits (4.6.2.2: 250 ms SDSC/SDHC, 500 ms SDXC).
+ *   - errors: stock checks the response timeout, DCRC (bit 7) and EBE (bit 15), sends CMD12 after
+ *     a multi-block error, resets only the FIFO and does not retry (SDCtrl.c:1110-1131); ours checks
+ *     every error bit (0xAE80 / 0xAF82), always ends a CMD25 with CMD12, and tries twice more after
+ *     a FIFO reset, as our reads do.
+ *   - SDSC: byte addresses (lba << 9) after CMD16 512; SDHC/SDXC: block addresses (stock
+ *     0x030605f0 tst #0x84; SD.c:601-604, SDM.c:601-604).
+ *   - the card pulled: every polled wait gives up as soon as GPIO0.11 reads high (sd_out), and
+ *     sd_read / sd_write answer SD_ERR_NOCARD without bus traffic (stock has no such handling: a
+ *     pulled card runs into its 5 s waits).
+ */
 
-static uint32_t s_sd_sectors, s_sd_rca;
+static uint32_t s_sd_sectors, s_sd_wr;
 static int s_sd_hc, s_sd_4bit, s_cd_ready;
 
 /* Card detect GPIO0.11, pulled up, 0 = card in (reference 0x03062c34). */
@@ -765,9 +820,10 @@ static int sd_try_init(void)
     if (!sd_present())
         return -1;
     select_mmc(1);
-    clk_gate(0x18, 1);
+    clk_gate(0x18, 1);                          /* CLK_SDMMC, HCLK_SDMMC (SDK Hw_cru.h 24, 107) */
     clk_gate(0x6B, 1);
-    clk_reset(0x12, 0);
+    clk_reset(0x11, 0);                         /* SDMMC_SRST 17 (SDK Hw_cru.h; stock SDA_Init 0x03060468
+                                                 * port 0); RECHO 0x03062d84 used 0x12, eMMC's SDIO_SRST */
     CRU[0x30 / 4] = 0x009F009Fu;
     GRF[8] = 0xFC005400u;                       /* SD pinmux GPIO1.5..10 */
     GRF[9] = 0x003F0015u;
@@ -872,14 +928,46 @@ int sd_bus_width(void)    { return s_sd_4bit ? 4 : 1; }
 
 int sd_read(uint32_t lba, uint32_t count, void *buf)
 {
+    int r;
+
     watchdog_feed();
     if (count == 0u)
         return 0;
     if (!s_sd_sectors || lba + count < lba || lba + count > s_sd_sectors)
         return -30;
     select_mmc(1);
-    return block_read(s_sd_hc ? lba : lba << 9, count, buf);
+    if (sd_out())
+        return SD_ERR_NOCARD;               /* pulled: no bus traffic, no timeouts */
+    r = block_read(s_sd_hc ? lba : lba << 9, count, buf);
+    return r && sd_out() ? SD_ERR_NOCARD : r;   /* (pulled meanwhile: the reader waits, no zeros) */
 }
+
+/* As sd_read; SDSC cards take byte addresses (CMD16 set 512-byte blocks at init). A failed write is
+ * tried twice more after a FIFO reset, as reads are (the same data again is harmless), unless the
+ * card is gone. */
+int sd_write(uint32_t lba, uint32_t count, const void *buf)
+{
+    int r;
+
+    watchdog_feed();
+    if (count == 0u)
+        return 0;
+    if (!s_sd_sectors || lba + count < lba || lba + count > s_sd_sectors)
+        return -30;
+    select_mmc(1);
+    for (int i = 0; ; i++) {
+        if (sd_out())
+            return SD_ERR_NOCARD;
+        r = block_write_once(s_sd_hc ? lba : lba << 9, count, buf);
+        if (!r || i == 2)
+            break;
+    }
+    if (!r)
+        s_sd_wr += count;
+    return r && sd_out() ? SD_ERR_NOCARD : r;
+}
+
+uint32_t sd_written(void) { return s_sd_wr; }
 
 static uint32_t s_buf[256];
 

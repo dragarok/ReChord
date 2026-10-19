@@ -74,6 +74,11 @@ MEMORY
        window. Holds code and read-only data only: an overlay's .data and .bss are resident. */
     OVL_WIN (rx)  : ORIGIN = 0x03040000, LENGTH = 0x00008000
 
+    /* OVL_FS: the second window, beside the first in the same unused SRAM: the file-system
+       writer's overlay (fsw) alone, loaded at its first use and never evicted, so it runs while
+       any overlay is in OVL_WIN (services/ovl.c). 16 KiB; 0x0304C000..0x0304F000 stays free. */
+    OVL_FS (rx)   : ORIGIN = 0x03048000, LENGTH = 0x00004000
+
     /* OVL_STORE: the overlays' load addresses. Only in the full ELF: no such memory, nothing
        loads from it; the image carries each overlay as a module (Makefile: objcopy -R strips
        them from what tools/make_fw1.py packs, tools/ovl_pack.py extracts them). */
@@ -125,6 +130,7 @@ SECTIONS
             *(.ovl.dev.*)
             *usb_cdc_rknanoc.o(.text* .rodata*)
             *hifi_probe.o(.text* .rodata*)
+            *sd_selftest.o(.text* .rodata*)
             *bt_jieli.o(.text.bt_listen .rodata.bt_listen.*)
             *panel_io_rknanoc.o(.text.panel_te_probe .text.te_watch .rodata.panel_te_probe.*)
             /* (.rodata.usb_console_run.str1.1 and .rodata.usb_probe_menu.str1.1 stay resident:
@@ -138,6 +144,16 @@ SECTIONS
                      .text.te_probe_test*)
             . = ALIGN(4);
         }
+    }
+
+    /* the file-system writer's cold half (services/fs_write_ext.c), in the second window; its
+       load address after the first window's overlays */
+    .ovl_fsw ORIGIN(OVL_FS) : AT (ORIGIN(OVL_STORE) + 0x80000)
+    {
+        KEEP(*(.ovl_hdr.fsw))
+        *(.ovl.fsw.*)
+        *fs_write_ext.o(.text* .rodata*)
+        . = ALIGN(4);
     }
 
     /* ---- vector table FIRST at the entry base -------------------------
@@ -246,9 +262,16 @@ ASSERT(__fonts_ram_end - __fonts_ram_start >= 0x17000,
 /* ---- the overlays (services/ovl.h) ------------------------------------
  * The resident image never refers into an overlay: only through the header at OVL_WIN, which
  * services/ovl.c checks before anything in it runs. */
-NOCROSSREFS_TO(.ovl_usbdac .vectors .text .data)
-NOCROSSREFS_TO(.ovl_usbout .vectors .text .data)
-NOCROSSREFS_TO(.ovl_dev .vectors .text .data)
+NOCROSSREFS_TO(.ovl_usbdac .vectors .text .data .ovl_fsw)
+NOCROSSREFS_TO(.ovl_usbout .vectors .text .data .ovl_fsw)
+NOCROSSREFS_TO(.ovl_dev .vectors .text .data .ovl_fsw)
+NOCROSSREFS_TO(.ovl_fsw .vectors .text .data .ovl_usbdac .ovl_usbout .ovl_dev)
+__ovl_fs_start = ORIGIN(OVL_FS);
+__ovl_fs_end   = ORIGIN(OVL_FS) + LENGTH(OVL_FS);
+ASSERT(__ovl_fs_start >= ORIGIN(OVL_WIN) + LENGTH(OVL_WIN), "the second window must not overlap the first")
+ASSERT(__ovl_fs_end <= 0x0304F000, "the second window must stay below the loaded image (0x0304F490)")
+ASSERT(ovl_hdr_fsw == ORIGIN(OVL_FS), "fsw must start with its header")
+ASSERT(SIZEOF(.ovl_fsw) <= LENGTH(OVL_FS), "the fsw overlay is over its window")
 __ovl_win_start = ORIGIN(OVL_WIN);
 __ovl_win_end   = ORIGIN(OVL_WIN) + LENGTH(OVL_WIN);
 ASSERT(ORIGIN(OVL_WIN) >= 0x03040000, "the overlay window must stay above the audio input ring")

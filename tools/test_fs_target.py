@@ -8,7 +8,8 @@ import os, re, struct, subprocess, tempfile, time
 T = tempfile.mkdtemp()
 EXE = os.path.join(T, 'test_fs_target')
 subprocess.check_call(['cc', '-O2', '-Wall', '-Ifirmware', '-o', EXE,
-                       'firmware/services/test_fs_target.c', 'firmware/services/fs_target.c'])
+                       'firmware/services/test_fs_target.c', 'firmware/services/fs_target.c',
+                       'firmware/services/fs_write_ext.c', 'firmware/services/fs_write_host.c'])
 
 
 def fnv(b):
