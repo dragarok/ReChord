@@ -16,7 +16,9 @@
  * is written ("lazy"): the first difference copies the matched prefix and the walk goes on
  * writing; a walk with no difference ends with LIB_UNCHANGED and writes nothing at all.
  *
- * Every step is bounded: one directory scan, one file's tags, or records until the slice ends.
+ * Every step is bounded: a directory read until the slice ends (lib_dir.c: it goes on in the next
+ * one from the entry where it stopped), one file's tags (a far read in it first walked to through
+ * the FAT a slice at a time: WS_CHAIN), or records until the slice ends.
  * A writing walk checkpoints every LIB_CKPT_TAGS files read (the stack and the counters, both
  * files closed), so a power cut costs the tag reads since then: the next start resumes there.
  *
@@ -69,16 +71,11 @@ typedef struct {
 } lib_match_t;
 
 enum { WS_POP, WS_SIG, WS_PREFIX, WS_DECIDE, WS_COPY, WS_MATCH, WS_BATCH, WS_FILES, WS_FEND, WS_CONT,
-       WS_END, WS_DONE, WS_CLEAR = 20 };
+       WS_CHAIN, WS_END, WS_DONE, WS_CLEAR = 20 };
 
-/* fs.h: the entry an fs_scan callback is called for (weak: the host build's file system has none) */
-extern const fs_stat_t *fs_scan_stat(void) __attribute__((weak));
-
-static uint32_t wtime(void)
+static uint32_t wtime(void)          /* (the entry lib_dscan reports) */
 {
-    const fs_stat_t *st = fs_scan_stat ? fs_scan_stat() : 0;
-
-    return st ? st->wtime : 0u;
+    return lib_dscan_wtime();
 }
 
 /* The tag readers: the extended one in the modes' window (startup/ap_ovl.c ap_lib_tags: -2 when the
@@ -222,16 +219,9 @@ static int skipped(const lib_job_t *j, const char *name)
     return 0;
 }
 
-typedef struct {
-    lib_job_t *j;
-    uint32_t base, pushed, limit;
-    int32_t last;                    /* the last pushed subfolder's slot */
-    int cont, more;                  /* a continuation's scan; subfolders left for a continuation */
-} scan_t;
-
 static int sig_cb(void *u, const char *name, const fs_ref_t *r)
 {
-    scan_t *s = u;
+    lib_scan_t *s = u;
     lib_job_t *j = s->j;
     lib_cur_t *c = &j->cur;
     int dir = (r->flags & FS_REF_DIR) != 0, kind = dir ? 0 : dirlist_kind(name);
@@ -268,22 +258,29 @@ static int sig_cb(void *u, const char *name, const fs_ref_t *r)
     return 0;
 }
 
-static int scan_dir(lib_job_t *j, fs_scan_cb cb, void *u)
+/* The folder being visited, read from entry `from` on (lib_dir.c): 0, or < 0 (it is gone). */
+static int dir_start(lib_job_t *j, uint32_t from)
 {
-    if (j->cur.root)
-        return fs_scan(j->root, cb, u);
-    return fs_scan_ref(&j->cur.ref, cb, u);
+    j->ds_on = 1;
+    return lib_dscan_start(&j->ds, j->cur.root ? j->root : 0, &j->cur.ref, from);
 }
 
-/* the next batch of playable files after last_slot */
-typedef struct {
-    lib_job_t *j;
-    int any;
-} batch_t;
+/* ... on from where it stopped: 1 = read to the end (or the callback stopped it), 0 = the slice is
+ * over (more in the next), < 0 = gone */
+static int dir_run(lib_job_t *j, fs_scan_cb cb, uint64_t t_end)
+{
+    int r = lib_dscan(&j->ds, cb, &j->sc, t_end);
 
+    if (r == 0)
+        return 0;
+    j->ds_on = 0;
+    return r < 0 ? r : 1;
+}
+
+/* the next batch of playable files (after last_slot) */
 static int batch_cb(void *u, const char *name, const fs_ref_t *r)
 {
-    batch_t *b = u;
+    lib_scan_t *b = u;
     lib_job_t *j = b->j;
     lib_bent_t *e;
     uint32_t n = (uint32_t)strlen(name);
@@ -372,13 +369,22 @@ static void old_find(lib_job_t *j)
 
 /* ---- tags ---- */
 
+/* The tag readers' reads. One whose walk through the FAT is long (a tag at the end of a big file
+ * of small clusters) is refused: the file's tags are read again once WS_CHAIN has walked there a
+ * slice at a time (j->far: the farthest such offset). */
 static uint32_t rd_at(void *u, uint32_t off, void *buf, uint32_t n)
 {
+    lib_job_t *j = u;
     long got;
 
-    if (fs_seek((fs_file_t *)u, (long)off) < 0)
+    if (fs_seek(j->tf, (long)off) < 0)
         return 0;
-    got = fs_read((fs_file_t *)u, buf, n);
+    if (lib_chain_gap(j->tf, off) > LIB_CHAIN_FAR) {
+        if (!j->far_bad && off > j->far)
+            j->far = off;
+        return 0;
+    }
+    got = fs_read(j->tf, buf, n);
     return got > 0 ? (uint32_t)got : 0u;
 }
 
@@ -400,17 +406,20 @@ static int tag_kind(int k)
     }
 }
 
-/* A file's tags: 0, or T_PARTIAL (the basic reader's: the walk reads it again when it can). */
+/* A file's tags: 0, or T_PARTIAL (the basic reader's: the walk reads it again when it can); -1 =
+ * a far read was refused (j->far): the file stays open (j->tf) for WS_CHAIN, then this again. */
 static int read_tags(lib_job_t *j, const lib_bent_t *e, tag_info_t *t)
 {
-    fs_file_t *f = fs_open_ref(&e->ref);
+    void *f = j;                         /* (the readers' context: rd_at's) */
     int k = tag_kind(e->kind), partial = 0;
 
     memset(t, 0, sizeof *t);
-    j->read_tags++;
-    j->since_ckpt++;
-    if (!f)
+    if (!j->tf && !(j->tf = fs_open_ref(&e->ref))) {
+        j->read_tags++;
+        j->since_ckpt++;
         return 0;
+    }
+    j->far = 0;
     if (k >= 0 && ap_lib_tags(rd_at, f, e->ref.size, k, t) == -2) {
         tag_basic_t *b = (tag_basic_t *)(void *)t->aartist;   /* (the space of fields it lacks) */
 
@@ -423,7 +432,7 @@ static int read_tags(lib_job_t *j, const lib_bent_t *e, tag_info_t *t)
         partial = 1;
         j->warn |= LIBW_PARTIAL;
     }
-    if (!t->dur_ms && e->kind == DL_MP3) {
+    if (!t->dur_ms && e->kind == DL_MP3 && !j->far) {
         mp3_info_t *mi = W_MP3;
 
         if (mp3_info(rd_at, f, e->ref.size, mi) == 0 && mi->rate) {
@@ -432,13 +441,19 @@ static int read_tags(lib_job_t *j, const lib_bent_t *e, tag_info_t *t)
             else if (mi->bitrate)
                 t->dur_ms = (uint32_t)((uint64_t)(mi->data_end - mi->data_off) * 8u / mi->bitrate);
         }
-    } else if (!t->dur_ms && e->kind == DL_APE) {
+    } else if (!t->dur_ms && e->kind == DL_APE && !j->far) {
         ape_info_t ai;
 
         if (ape_info(rd_at, f, e->ref.size, &ai) == 0 && ai.rate)
             t->dur_ms = (uint32_t)((uint64_t)ai.samples * 1000u / ai.rate);
     }
-    fs_close(f);
+    if (j->far)
+        return -1;                       /* (walked there first, then read again) */
+    fs_close(j->tf);
+    j->tf = 0;
+    j->far_bad = 0;
+    j->read_tags++;
+    j->since_ckpt++;
     return partial;
 }
 
@@ -792,6 +807,10 @@ int scan_start(lib_job_t *j)
 
 static void scan_close(lib_job_t *j)
 {
+    if (j->tf)
+        fs_close(j->tf);
+    j->tf = 0;
+    j->ds_on = 0;
     if (j->old_ok) {
         lr_close(&j->old);
         lr_close(&j->otrk);
@@ -866,7 +885,7 @@ int scan_step(lib_job_t *j, uint64_t t_end)
                 break;
             }
             if (e->nlen == NAME_ASK) {
-                if (fs_ref_name(&c->ref, W_CURNAME, 256) != 0)
+                if (lib_ref_name(&c->ref, W_CURNAME) != 0)
                     break;               /* (gone since: skip it) */
                 c->nlen = (uint16_t)cut(W_CURNAME, 255);
             } else {
@@ -877,25 +896,32 @@ int scan_step(lib_job_t *j, uint64_t t_end)
             j->wst = WS_SIG;
             break;
         }
-        case WS_SIG: {                    /* one directory scan */
-            scan_t s;
+        case WS_SIG: {                    /* the folder's directory, read until the slice ends */
+            lib_scan_t *s = &j->sc;
+            int r = 0;
 
-            c->idx = j->nfolders;
-            c->sig = LIB_FNV0;
-            memset(&s, 0, sizeof s);
-            s.j = j;
-            s.base = j->sp;
-            s.last = -1;
-            s.limit = LIB_PEND - 2u;
-            if (scan_dir(j, sig_cb, &s) < 0) {
+            if (!j->ds_on) {
+                c->idx = j->nfolders;
+                c->sig = LIB_FNV0;
+                memset(s, 0, sizeof *s);
+                s->j = j;
+                s->base = j->sp;
+                s->last = -1;
+                s->limit = LIB_PEND - 2u;
+                r = dir_start(j, 0);
+            }
+            if (r >= 0 && (r = dir_run(j, sig_cb, t_end)) == 0)
+                return 0;                /* (more of it in the next slice) */
+            if (r < 0) {
+                j->ds_on = 0;
                 if (c->root)
                     return -2;           /* the volume itself: gone */
-                j->sp = s.base;          /* (a folder that vanished: skip it) */
+                j->sp = s->base;         /* (a folder that vanished: skip it) */
                 j->wst = WS_POP;
                 break;
             }
-            if (s.more)
-                push_cont(j, s.base, s.last);
+            if (s->more)
+                push_cont(j, s->base, s->last);
             if (c->root)
                 j->root_sig = c->sig;
             j->nfolders++;
@@ -956,7 +982,12 @@ int scan_step(lib_job_t *j, uint64_t t_end)
                 memset(W_MATCH, 0, W_NMATCH * sizeof(lib_match_t));
                 c->last_slot = 0;
                 c->done_files = 0;
-                j->wst = c->old ? WS_MATCH : c->nfiles ? WS_BATCH : WS_FEND;
+                j->mmore = 0;
+                j->mret = c->nfiles ? WS_BATCH : WS_FEND;
+                j->wst = c->old ? WS_MATCH : j->mret;
+                if (c->old && fs_seek(j->otrk.f, (long)c->old_toff) >= 0)
+                    fs_mark(j->otrk.f);  /* (its reused tracks are read back from here: no walk from
+                                          * the old tracks file's first cluster) */
             }
             break;
         case WS_COPY: {                   /* an unchanged folder: its tracks as they were */
@@ -976,7 +1007,13 @@ int scan_step(lib_job_t *j, uint64_t t_end)
             lib_match_t *m;
 
             if (j->pfx >= c->old_toff + c->old_tlen) {
-                j->wst = c->nfiles ? WS_BATCH : WS_FEND;
+                j->mmore = 0;
+                j->wst = j->mret;
+                break;
+            }
+            if (j->nmatch >= W_NMATCH * 3u / 4u) {   /* the table is full: the rest when the files */
+                j->mmore = 1;                       /* get past the last one in it (WS_FILES) */
+                j->wst = j->mret;
                 break;
             }
             lr_seek(&j->otrk, j->pfx);
@@ -984,23 +1021,34 @@ int scan_step(lib_job_t *j, uint64_t t_end)
                 j->pfx = c->old_toff + c->old_tlen;
                 break;
             }
-            if (j->nmatch < W_NMATCH * 3u / 4u && (m = match_slot(lib_le32(p + 4), lib_le32(p + 8))) && !m->off) {
+            if ((m = match_slot(lib_le32(p + 4), lib_le32(p + 8))) && !m->off) {
                 m->nh = lib_le32(p + 4);
                 m->clus = lib_le32(p + 8);
                 m->size = lib_le32(p + 12);
                 m->off = j->pfx + 1u;
                 j->nmatch++;
             }
+            j->mslot = lib_le16(p + 20);
             j->pfx += lib_le16(p + 2);
             break;
         }
-        case WS_BATCH: {                  /* one directory scan: the next files to read */
-            batch_t b;
+        case WS_BATCH: {                  /* the next files to read: the directory on from the last batch */
+            int r = 0;
 
-            j->nbatch = j->bi = j->bpool = 0;
-            b.j = j;
-            b.any = c->done_files;
-            if (scan_dir(j, batch_cb, &b) < 0 || !j->nbatch) {
+            if (!j->ds_on) {
+                if (!c->done_files)      /* (the folder's first batch: its directory from the start;
+                                          * the next ones go on from where this one stops) */
+                    r = dir_start(j, 0);
+                j->nbatch = j->bi = j->bpool = 0;
+                memset(&j->sc, 0, sizeof j->sc);
+                j->sc.j = j;
+                j->ds_on = 1;
+            }
+            j->sc.any = c->done_files;
+            if (r >= 0 && (r = dir_run(j, batch_cb, t_end)) == 0)
+                return 0;
+            j->ds_on = 0;
+            if (r < 0 || !j->nbatch) {
                 j->wst = WS_FEND;
                 break;
             }
@@ -1009,8 +1057,20 @@ int scan_step(lib_job_t *j, uint64_t t_end)
         }
         case WS_FILES: {                  /* one file: copied, or its tags read */
             lib_bent_t *e = &W_BATCH[j->bi];
-            lib_match_t *m = j->nmatch ? match_slot(e->nh, e->ref.clus) : 0;
+            lib_match_t *m;
             int reused = 0;
+
+            if (j->mmore && e->ref.slot > j->mslot) {
+                /* past the table's last old track: the next ones in its place. A folder's tracks
+                 * are in slot order and a file that did not change kept its slot, so what the
+                 * files before this one could still match is behind it. */
+                j->nmatch = 0;
+                memset(W_MATCH, 0, W_NMATCH * sizeof(lib_match_t));
+                j->mret = WS_FILES;
+                j->wst = WS_MATCH;
+                break;
+            }
+            m = j->nmatch ? match_slot(e->nh, e->ref.clus) : 0;
 
             if (m && m->off && m->size == e->ref.size) {
                 const uint8_t *p;
@@ -1033,9 +1093,15 @@ int scan_step(lib_job_t *j, uint64_t t_end)
                 }
             }
             if (!reused) {
+                int p;
+
                 if ((int64_t)(t_end - lib_now_us()) < 1000)
                     return 0;            /* (a file's tags take ~1-2 ms: in the next slice) */
-                write_track(j, e, W_TAGS, read_tags(j, e, W_TAGS));
+                if ((p = read_tags(j, e, W_TAGS)) < 0) {
+                    j->wst = WS_CHAIN;   /* (its far read walked to first, then this file again) */
+                    break;
+                }
+                write_track(j, e, W_TAGS, p);
             }
             c->last_slot = e->ref.slot;
             c->done_files = 1;
@@ -1052,18 +1118,35 @@ int scan_step(lib_job_t *j, uint64_t t_end)
             write_folder(j);
             j->wst = WS_POP;
             break;
-        case WS_CONT: {                   /* one directory scan: more subfolders */
-            scan_t s;
+        case WS_CONT: {                   /* more subfolders: the directory from the entry after the last pushed */
+            lib_scan_t *s = &j->sc;
+            int r = 0;
 
-            memset(&s, 0, sizeof s);
-            s.j = j;
-            s.base = j->sp;
-            s.last = c->cont_slot;
-            s.cont = 1;
-            s.limit = LIB_PEND - 1u;
-            if (scan_dir(j, sig_cb, &s) >= 0 && s.more)
-                push_cont(j, s.base, s.last);
+            if (!j->ds_on) {
+                memset(s, 0, sizeof *s);
+                s->j = j;
+                s->base = j->sp;
+                s->last = c->cont_slot;
+                s->cont = 1;
+                s->limit = LIB_PEND - 1u;
+                r = dir_start(j, c->cont_slot < 0 ? 0u : (uint32_t)c->cont_slot + 1u);
+            }
+            if (r >= 0 && (r = dir_run(j, sig_cb, t_end)) == 0)
+                return 0;
+            j->ds_on = 0;
+            if (r >= 0 && s->more)
+                push_cont(j, s->base, s->last);
             j->wst = WS_POP;
+            break;
+        }
+        case WS_CHAIN: {                  /* a far read of the file at W_BATCH[bi]: its chain walked to */
+            int r = lib_chain_walk(j->tf, j->far, t_end);
+
+            if (r == 0)
+                return 0;
+            if (r < 0)
+                j->far_bad = 1;          /* (a short chain: those reads fail, the rest stands) */
+            j->wst = WS_FILES;
             break;
         }
         case WS_END: {
@@ -1079,6 +1162,8 @@ int scan_step(lib_job_t *j, uint64_t t_end)
                 j->wst = WS_DONE;
                 return LIB_UNCHANGED;
             }
+            if (lw_close(&j->trk))       /* (first: its last big write before anything queued) */
+                return -1;
             crc = j->raw_end_crc = j->raw.crc;
             rec_hdr(&j->raw, LIB_RAW_E, 4u + (uint32_t)sizeof(lib_rawend_t) + 8u);
             lw_u32(&j->raw, j->seq);
@@ -1091,8 +1176,6 @@ int scan_step(lib_job_t *j, uint64_t t_end)
             lw_u32(&j->raw, 4u + (uint32_t)sizeof(lib_rawend_t) + 8u);
             lw_u32(&j->raw, LIB_END_MAGIC);
             scan_close(j);
-            if (lw_close(&j->trk))
-                return -1;
             j->wst = WS_DONE + 1;        /* the folders file: closed in the next slice */
             return 0;
         }

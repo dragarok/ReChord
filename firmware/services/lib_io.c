@@ -9,6 +9,7 @@
 #include "lib_int.h"
 
 uint8_t lib_sd_wrote;                    /* a library file on the card written since its last sync */
+uint8_t lib_wdue;
 
 int lw_open(lw_t *w, const char *path, void *buf, uint32_t cap, int append)
 {
@@ -68,6 +69,7 @@ int lw_flush(lw_t *w)
             w->err = FS_ERR_IO;
     }
     w->n = 0;
+    w->due = 0;
     return w->err;
 }
 
@@ -89,6 +91,8 @@ void lw_put(lw_t *w, const void *p, uint32_t n)
         if (w->n == w->cap)
             lw_flush(w);
     }
+    if (w->cap > 4096u && w->n >= w->cap - LIB_WSLACK && !w->due)
+        w->due = lib_wdue = 1;           /* (lib_int.h: its flush first in the next slice) */
 }
 
 void lw_u8(lw_t *w, uint32_t v)

@@ -120,8 +120,10 @@ AP_SERVICE_SRCS := \
   firmware/services/lib_io.c \
   firmware/services/lib_sort.c \
   firmware/services/lib_scan.c \
+  firmware/services/lib_dir.c \
   firmware/services/lib_build.c \
   firmware/services/lib_idx.c \
+  firmware/services/lib_fsx.c \
   firmware/services/lib_job.c \
   firmware/services/lib_m3u.c \
   firmware/services/lib_tags.c \

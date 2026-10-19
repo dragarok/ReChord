@@ -18,6 +18,15 @@ static struct {
 #define CBUF(i) ((uint32_t *)(void *)(LT_IDXC + 512u * (i)))
 static uint32_t s_age;
 static fs_file_t *s_f[2];            /* each view's IDX, open while it is valid */
+/* Places in each view's chain (fs_place_*: a cluster and its index in the file), the first one read in
+ * each 1/NPLACE of the file: a read walks the FAT on from the nearest one at or before it, not from the
+ * first cluster (a 3 MB index at 512-byte clusters: 6000 clusters, ~47 FAT sectors a read; the merge's
+ * binary search over SONGS reads at random). At most two of those parts' clusters walked a read. */
+#define NPLACE 32
+static uint32_t s_pl[2][NPLACE][2];
+
+extern void fs_place_get(fs_file_t *f, uint32_t pl[2]) __attribute__((weak));
+extern void fs_place_set(fs_file_t *f, const uint32_t pl[2]) __attribute__((weak));
 
 void lib_place_names(int vol, char *dir, int dn, char *base, int bn);   /* lib_job.c */
 
@@ -44,6 +53,7 @@ void idx_drop(int vol)
     if (s_f[vol])
         fs_close(s_f[vol]);
     s_f[vol] = 0;
+    memset(s_pl[vol], 0, sizeof s_pl[vol]);
     g_lib_view[vol].ok = 0;
     for (int i = 0; i < NCACHE; i++)
         if (s_c[i].vol == vol)
@@ -120,6 +130,13 @@ void lib_forget_handles_vol(int vol)
     }
 }
 
+int idx_warm(int vol, uint64_t t_end)
+{
+    if (!g_lib_view[vol].ok || !s_f[vol])
+        return 1;
+    return lib_chain_places(s_f[vol], s_pl[vol], NPLACE, g_lib_view[vol].size / NPLACE + 1u, t_end) != 0;
+}
+
 int idx_read(int vol, uint32_t off, void *dst, uint32_t len)
 {
     uint8_t *o = dst;
@@ -137,13 +154,28 @@ int idx_read(int vol, uint32_t off, void *dst, uint32_t len)
                 old = i;
         }
         if (hit < 0) {
-            uint32_t n = g_lib_view[vol].size - sec * 512u;
+            uint32_t n = g_lib_view[vol].size - sec * 512u, cl = lib_clus_bytes(s_f[vol]), at = sec * 512u / cl;
+            uint32_t part = g_lib_view[vol].size / NPLACE + 1u, k = sec * 512u / part, *pl = 0, cur[2];
 
             hit = old;
             s_c[hit].age = 0;
-            if (fs_seek(s_f[vol], (long)(sec * 512u)) < 0 ||
-                fs_read(s_f[vol], CBUF(hit), n < 512u ? n : 512u) < 0)
+            if (fs_seek(s_f[vol], (long)(sec * 512u)) < 0)
                 return -1;
+            for (uint32_t i = k + 1u; i-- > 0 && fs_place_set && !pl; )
+                if (s_pl[vol][i][0] && s_pl[vol][i][1] <= at)
+                    pl = s_pl[vol][i];   /* (the nearest part's place at or before here) */
+            if (pl) {                    /* (unless the handle's own place is nearer) */
+                fs_place_get(s_f[vol], cur);
+                if (cur[0] < 2u || cur[1] > at || cur[1] < pl[1])
+                    fs_place_set(s_f[vol], pl);
+            }
+            if (fs_read(s_f[vol], CBUF(hit), n < 512u ? n : 512u) < 0)
+                return -1;
+            if (fs_place_get) {          /* (this part's first place, or one before it) */
+                fs_place_get(s_f[vol], cur);
+                if (cur[0] >= 2u && (!s_pl[vol][k][0] || cur[1] < s_pl[vol][k][1]) && cur[1] * cl / part == k)
+                    memcpy(s_pl[vol][k], cur, sizeof cur);
+            }
             s_c[hit].vol = vol;
             s_c[hit].sec = sec;
         }

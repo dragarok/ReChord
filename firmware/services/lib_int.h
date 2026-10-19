@@ -134,8 +134,14 @@ typedef struct {
     fs_file_t *f;
     uint8_t *buf;
     uint32_t cap, n, pos, crc;
-    int err;
+    int err, due;                    /* due: within LIB_WSLACK of full (lib_wdue said so) */
 } lw_t;
+/* A big writer (cap > 8 sectors: its flush is one multi-block write, past the queue) within a record of
+ * full ends the slice (lib_io_dirty): its flush then comes early in the next slice, with the queue empty,
+ * not after a slice's 3 ms of work (that write, and the FAT blocks its clusters queued before it, then
+ * took the slice past 6 ms: m46 scale 30k). Cleared at each slice's start (lib_job.c). */
+#define LIB_WSLACK 1152u             /* the longest record (a track's: 5 strings) */
+extern uint8_t lib_wdue;
 int lw_open(lw_t *w, const char *path, void *buf, uint32_t cap, int append);
 int lw_open_at(lw_t *w, const char *path, void *buf, uint32_t cap, uint32_t at);   /* append from `at` */
 extern uint8_t lib_sd_wrote;
@@ -218,7 +224,37 @@ void lib_tmp_path(char *out, int n);         /* "<dir>/LIBTn.TMP" in the current
 const char *lib_job_dir(void);
 int lib_tmp_ref(int n, fs_ref_t *ref);       /* the temp file's ref after its writer closed */
 
+/* ---- directory reads (lib_dir.c, in the walk's overlay) and chain walks (lib_fsx.c) in pieces ---- */
+/* A directory read over several slices: the file system's own cursor, kept between them, so a
+ * folder of thousands of entries is read a slice's worth at a time and never again from its start. */
+typedef struct { void *p; uint32_t w[11]; } lib_dscan_t;   /* (lib_dir.c: the cursor and its folder) */
+/* Its start: a volume's root by path (root), else the folder dir, from entry index `from` on (the
+ * entries before it skipped by cluster arithmetic, not read). 0, or < 0 (the volume is gone). */
+int lib_dscan_start(lib_dscan_t *s, const char *root, const fs_ref_t *dir, uint32_t from);
+/* Entries from where it stopped, each to cb as fs_scan's: 2 = cb said stop (that entry is read
+ * again by the next call), 1 = the directory's end, 0 = t_end came (more), < 0 = the volume went. */
+int lib_dscan(lib_dscan_t *s, fs_scan_cb cb, void *u, uint64_t t_end);
+uint32_t lib_dscan_wtime(void);      /* inside its callback: the entry's write time */
+int lib_ref_name(const fs_ref_t *r, char *out);   /* its name (<= 255 bytes): 0, or < 0 (gone) */
+/* A file of small clusters is read near its end (tags at the end: APE, MP3's ID3v1, WavPack): the
+ * cursor has to get there through the FAT, one FAT sector per 128 clusters (16.5 MB at 512-byte
+ * clusters: 252 sectors, 133 ms on SD NAND in one slice). A read whose walk is longer than
+ * LIB_CHAIN_FAR clusters is refused by the walk's reader and done first a slice at a time. */
+#define LIB_CHAIN_FAR  1024u         /* clusters: 8 FAT sectors */
+#define LIB_CHAIN_STEP 512u          /* clusters between tests of the slice's end */
+/* Seeked to off: the clusters a read there walks through the FAT (0: contiguous, or near); the
+ * cursor first moved to the file's mark when that is nearer. */
+uint32_t lib_chain_gap(fs_file_t *f, uint32_t off);
+/* The cursor walked toward off and marked there: 1 = there, 0 = more (t_end), < 0 = the chain ended. */
+int lib_chain_walk(fs_file_t *f, uint32_t off, uint64_t t_end);
+
 /* ---- the walk (lib_scan.c) and the build (lib_build.c) ---- */
+typedef struct {                     /* a directory scan of the walk's (its callback's state) */
+    struct lib_job *j;
+    uint32_t base, pushed, limit;
+    int32_t last;                    /* the last pushed subfolder's slot */
+    int cont, more, any;             /* a continuation's scan; subfolders left for one; files after last_slot */
+} lib_scan_t;
 typedef struct {                     /* the folder being visited */
     fs_ref_t ref;
     uint32_t idx, parent, sig, old_off, old_sig, old_toff, old_tlen, toff, tcount, before;
@@ -246,7 +282,15 @@ struct lib_job {
     lib_cur_t cur;
     uint32_t nbatch, bi, bpool;      /* files of the folder being read: count, next, name bytes */
     uint32_t nmatch;
+    uint32_t mslot;                  /* the reuse table: the slot of the last old track in it */
+    int mret, mmore;                 /* ... the state after filling it; old tracks left for it */
     uint32_t warn;                   /* LIBW_* seen (logged once) */
+    lib_scan_t sc;                   /* the directory scan in progress (ds_on), over slices */
+    lib_dscan_t ds;
+    int ds_on;
+    fs_file_t *tf;                   /* the file whose tags are read (kept while its chain is walked) */
+    uint32_t far;                    /* ... the far offset its reader asked for (WS_CHAIN walks there) */
+    int far_bad;                     /* ... its chain ended early: far reads fail */
     /* the build */
     int bph, bsub;
     lib_sort_t srt;
@@ -260,6 +304,7 @@ struct lib_job {
     uint32_t ctr, sec_crc, raw_end_crc;   /* records counted by a producer, a section's CRC, the RAW's */
     uint16_t path_off[LIB_DEPTH + 2];
     uint8_t grp_kl[3];               /* the group being collected: its names' lengths (lib_build.c B_KEY) */
+    int warm;                        /* the view's chain places known (idx_warm) */
     /* stats for the log and the tests */
     uint64_t t_start, t_busy;
     uint32_t steps, worst_us, reads0, deferred, nrd0, nwr0;
@@ -307,6 +352,11 @@ uint32_t idx_letter(int vol, int sec, int letter);   /* first row of that bucket
 int idx_folder_path(int vol, uint32_t clus, char *out, int n);
 /* Read len bytes at off of volume vol's IDX (cached). */
 int idx_read(int vol, uint32_t off, void *dst, uint32_t len);
+uint32_t lib_clus_bytes(fs_file_t *f);   /* lib_fsx.c */
+int lib_chain_places(fs_file_t *f, uint32_t (*pl)[2], int n, uint32_t part, uint64_t t_end);
+/* The view's chain places for every part of its IDX, a step a slice (a job's first slices): then a
+ * read anywhere in it walks at most a part's clusters. 1 = done (or nothing to do), 0 = more. */
+int idx_warm(int vol, uint64_t t_end);
 
 /* Track rows: encode / decode (lib_build.c writes, lib_idx.c reads). */
 uint32_t row_track_put(uint8_t *o, const lib_row_t *r);

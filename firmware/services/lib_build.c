@@ -639,19 +639,32 @@ int build_step(lib_job_t *j, uint64_t t_end)
             return -1;
         switch (j->bph) {
         case B_S1:
+            /* (each step that writes ends its slice: the blocks a close or a removal queues are
+             * programmed between slices, and a big write after them would wait for each) */
             if (!j->bsub) {
                 if ((r = run_sort(j, prod_s1, t_end)) <= 0)
                     return r;
                 j->s1 = j->srt.result;
                 j->bsub = 1;
+                if (lib_io_dirty())
+                    return 0;
             }
             tmp_path(p, sizeof p, 2);    /* (the album rows' file and the slot's old index: removed first) */
-            if (j->bsub == 1 && !lib_rm_step(p))
-                return 0;
-            j->bsub = 2;
+            if (j->bsub == 1) {
+                if (!lib_rm_step(p))
+                    return 0;
+                j->bsub = 2;
+                if (lib_io_dirty())
+                    return 0;
+            }
             snprintf(q, sizeof q, "%s/%s.IX%c", j->dir, j->base, 'A' + j->slot);
-            if (!lib_rm_step(q))
-                return 0;
+            if (j->bsub == 2) {
+                if (!lib_rm_step(q))
+                    return 0;
+                j->bsub = 3;
+                if (lib_io_dirty())
+                    return 0;
+            }
             j->bsub = 0;
             if (lw_open(&s_ta, p, B_TABUF, LIB_WBUF, 0))
                 return -1;
@@ -661,11 +674,14 @@ int build_step(lib_job_t *j, uint64_t t_end)
             j->bph = B_TRK;
             return 0;                    /* (a phase begun: the rest in the next slice) */
         case B_TRK:
-            if ((r = cons_trk(j, &s_ta, t_end)) <= 0)
-                return r;
-            lr_close(&j->in);
-            if (lw_close(&s_ta))
-                return -1;
+            if (s_ta.f) {                /* (the album rows' file closed in a slice of its own) */
+                if ((r = cons_trk(j, &s_ta, t_end)) <= 0)
+                    return r;
+                lr_close(&j->in);
+                if (lw_close(&s_ta))
+                    return -1;
+                return 0;
+            }
             sec_end(j, LS_ALBTRK);
             if (start_sort(j, cmp_s2, j->s1, 3, 4))
                 return -1;

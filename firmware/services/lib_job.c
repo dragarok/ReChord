@@ -306,7 +306,8 @@ int lib_step(void)
 {
     lib_job_t *j = &s_job;
     uint64_t t0, t_end, us;
-    int r;
+    uint32_t rd0;
+    int r, st0;
 
     if (CANARY != s_canary) {            /* someone else had the scratch buffer (it is ours now) */
         idx_cache_drop();
@@ -375,12 +376,18 @@ int lib_step(void)
     }
     t0 = lib_now_us();
     t_end = t0 + LIB_STEP_US;
+    st0 = j->state == J_SCAN ? j->wst : j->bph;
+    lib_wdue = 0;                        /* (a writer near full: its flush comes first in this slice) */
     {
-        uint32_t rd0 = fs_target_nrd, wr0 = lib_slice_wr = fs_target_nwr;
+        uint32_t wr0 = lib_slice_wr = fs_target_nwr;
 
+        rd0 = fs_target_nrd;
         const lib_phase_api_t *ph = phase(j->state == J_BUILD);
 
-        r = !ph ? -1 : j->state == J_SCAN ? ph->step(j, t_end) : j->bph < 0 ? (ph->start(j) ? -1 : 0) : ph->step(j, t_end);
+        if (!j->warm)                    /* (first the previous index's chain places: its random reads) */
+            j->warm = idx_warm(j->vol, t_end), r = 0;
+        else
+            r = !ph ? -1 : j->state == J_SCAN ? ph->step(j, t_end) : j->bph < 0 ? (ph->start(j) ? -1 : 0) : ph->step(j, t_end);
         j->nrd0 += fs_target_nrd - rd0;
         j->nwr0 += fs_target_nwr - wr0;
     }
@@ -421,9 +428,9 @@ int lib_step(void)
     j->steps++;
     if (us > j->worst_us)
         j->worst_us = (uint32_t)us;
-    if (us > 2u * LIB_STEP_US)           /* (a slice over its time: where, and its sectors, for the log and the tests) */
-        lib_log("lib: slice %u us in %s %d, %u sectors written", (unsigned)us, j->state == J_SCAN ? "walk" : "build",
-                j->state == J_SCAN ? j->wst : j->bph, (unsigned)(fs_target_nwr - lib_slice_wr));
+    if (us > 2u * LIB_STEP_US)           /* (a slice over its time: where it began and ended, its sectors, for the log and the tests) */
+        lib_log("lib: slice %u us in %s %d-%d, %u sectors read, %u written", (unsigned)us, j->state == J_SCAN ? "walk" : "build",
+                st0, j->state == J_SCAN ? j->wst : j->bph, (unsigned)(fs_target_nrd - rd0), (unsigned)(fs_target_nwr - lib_slice_wr));
     if (r < 0) {
         job_abort(j->state == J_SCAN ? "the walk failed (I/O)" : "the build failed (I/O)");
         return 1;
