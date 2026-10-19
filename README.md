@@ -50,7 +50,8 @@ the panel is 320×170).*
   repaints only what changed. On the device, a key reaches the screen in about 8 ms (median).
 
 **Connections**
-- **USB disk:** internal storage read/write, microSD read-only.
+- **USB disk:** internal storage and the microSD card, both read/write (FAT16, FAT32, exFAT; the player
+  writes to the card too: long names, folders, renames).
 - **USB DAC:** UAC2, bit-perfect 16/24/32-bit at 44.1–192 kHz, with media keys and a choice of
   DAC power source.
 - **USB-C earphones:** the player acts as a USB audio host.
