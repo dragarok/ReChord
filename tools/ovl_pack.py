@@ -20,8 +20,9 @@ from make_fw1 import rknano_crc32  # noqa: E402
 
 OVL_MAGIC = 0x314C564F            # "OVL1"
 HDR = 24                          # magic, abi, id, len, crc, api
-IDS = {"usbdac": 1, "usbout": 2, "dev": 3, "fsw": 4, "lib": 5, "libtag": 6}   # services/ovl.h OVL_*
-WINDOW = {"lib": "__ovl_lib_start", "fsw": "__ovl_fs_start"}   # their own windows; the others: __ovl_win_start
+IDS = {"usbdac": 1, "usbout": 2, "dev": 3, "fsw": 4, "lib": 5, "libtag": 6, "lwalk": 7, "lbuild": 8}   # services/ovl.h OVL_*
+WINDOW = {"lib": "__ovl_lib_start", "fsw": "__ovl_fs_start",      # their own windows; the others: __ovl_win_start
+          "lwalk": "__ovl_lph_start", "lbuild": "__ovl_lph_start"}
 
 
 def sections(d):

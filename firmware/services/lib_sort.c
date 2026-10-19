@@ -181,6 +181,9 @@ static int group_start(lib_sort_t *s)
         int c = (int)(i - s->grp);
 
         lr_attach(&s_cur[c], s_in, s->run[i], s->run[i + 1], SRT_ARENA + (uint32_t)c * SRT_CUR, SRT_CUR);
+        if (c)                           /* (its chain walked on from the run before it, not from the
+                                          * file's start: 15 such walks were a 6.4 ms slice at 30k) */
+            memcpy(s_cur[c].pl, s_cur[c - 1].pl, sizeof s_cur[c].pl);
         if (cur_ready(&s_cur[c]))
             s_heap[n++] = (uint8_t)c;
     }
@@ -245,8 +248,8 @@ int srt_step(lib_sort_t *s, uint64_t t_end)
                 s->phase = PH_FILL;
                 return 1;
             }
-            s->phase = PH_MSTART;
-            break;
+            s->phase = PH_MSTART;        /* (its close in a slice of its own: its last big write */
+            return 0;                    /* then comes first, not after this slice's work) */
         case PH_OPEN: {                  /* the first output: the old file of that name removed */
             char p[48];
 
@@ -271,8 +274,9 @@ int srt_step(lib_sort_t *s, uint64_t t_end)
             char p[48];
 
             tmp_name(p, sizeof p, s->tmp_out);
-            if (!lib_rm_step(p))
-                return 0;
+            if (!lib_rm_step(p) || lib_io_dirty())
+                return 0;                /* (the level's start, its 15 cursors' first reads, in a slice
+                                          * after the removal's writes: 6.4 ms together at 30k) */
             if (level_start(s) < 0)
                 return s->phase = PH_ERR, -1;
             s->phase = PH_MERGE;
@@ -309,8 +313,8 @@ int srt_step(lib_sort_t *s, uint64_t t_end)
                 s->tmp_in = s->tmp_out;
                 s->tmp_out = t;
             }
-            s->phase = PH_MSTART;
-            break;
+            s->phase = PH_MSTART;        /* (likewise) */
+            return 0;
         case PH_DONE:
             return 2;
         default:

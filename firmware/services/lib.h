@@ -33,6 +33,25 @@ void ap_lib_data_changed(void);      /* Settings > Library data: lists to the ne
 int ap_lib_np_fav(void);             /* 1 when the playing track is a favourite */
 enum { LIB_NP_FAV, LIB_NP_ADDPL };
 
+/* The job's two phases, each an overlay of its own in the library's phase window (OVL_LWALK: the
+ * walk, lib_scan.c and lib_dir.c; OVL_LBUILD: the build, lib_build.c and lib_sort.c). A job is in
+ * one phase at a time, so they share one window (services/ovl.c); lib_job.c's gate loads the one
+ * it needs (startup/ap_ovl.c has their tables). */
+struct lib_job;
+typedef struct {
+    int (*start)(struct lib_job *j);
+    int (*step)(struct lib_job *j, uint64_t t_end);
+    void (*abort)(struct lib_job *j);
+    void (*forget)(void);            /* its volume went: its own handles closed (the build's) */
+} lib_phase_api_t;
+int scan_start(struct lib_job *j);
+int scan_step(struct lib_job *j, uint64_t t_end);
+void scan_abort(struct lib_job *j);
+int build_start(struct lib_job *j);
+int build_step(struct lib_job *j, uint64_t t_end);
+void build_abort(struct lib_job *j);
+void build_forget(void);
+
 /* ---- in the overlay ---- */
 void lib_boot(void);
 int lib_step(void);

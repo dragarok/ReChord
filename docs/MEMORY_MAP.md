@@ -19,9 +19,10 @@ overlays in windows at 0x0307A008, 0x0307BF08, 0x0308B638). Sources: `firmware/f
 | 0x030283D8..0x0302FFC0 | 31 KiB | free (the heap, symbolically) | |
 | 0x0302FFC0..0x03030000 | 64 B | .noinit: the crash record `g_bootguard_rec`, the display trial's marker | firmware_ap.ld |
 | 0x03030000..0x03040000 | 64 KiB | the audio input ring (A writes, B reads) | audio/audio_shared.h AS_IN_RING |
-| **0x03040000..0x03048000** | **32 KiB** | **the overlay window (OVL_WIN)**: one overlay at a time | this change |
-| **0x03048000..0x0304C000** | **16 KiB** | **the second window (OVL_FS)**: the file-system writer's overlay (fsw) alone, never evicted | sd-rw |
-| 0x0304C000..0x0304F000 | 12 KiB | free | |
+| **0x03040000..0x03043800** | **14 KiB** | **the modes' window (OVL_WIN)**: one overlay at a time (usbdac, usbout, dev, libtag) | round6 |
+| **0x03043800..0x03045800** | **8 KiB** | **the file system's window (OVL_FS)**: the file-system writer's overlay (fsw) alone, never evicted | sd-rw, round6 |
+| **0x03045800..0x0304C000** | **26 KiB** | **the library's window (OVL_LIB)**: the music library (lib) alone, never evicted | library, round6; lib-slices (was 38 KiB to 0x0304F000) |
+| **0x0304C000..0x0304F000** | **12 KiB** | **the library's phase window (OVL_LPH)**: the library job's walk (lwalk) or its build (lbuild), swapped by the job only, between its phases | lib-slices (carved from the library's own 38 KiB) |
 | 0x0304F298.. | | the loaded image (IMG offset 0; the payload from 0x0304F490) | docs/HANDOVER.md "PHASE A AUDIT RESULT" |
 | 0x03050000..0x03077820 | 161824 B | FW_CODE: vectors, code, read-only data, the .data load image; executes in place | firmware_ap.ld |
 | 0x03077900..0x0308FF00 | 99840 B | the fonts window ("fonts" module, 92472 B, loaded at boot) | drivers/text_load.c |
@@ -60,6 +61,9 @@ go in an overlay (or free code) first, before the space is gone rather than afte
 | usbdac | ov_dac | the USB DAC (UAC2): `drivers/usb_uac_rknanoc.c`, the session in `startup/ap_ui.c` | the cable's mode, Home > USB > USB DAC |
 | usbout | ov_uout | USB-C earphones, the player as USB host: `drivers/usb_out_rknanoc.c`; and the Custom EQ bands (`ui/eq_page.c`), which would otherwise evict it at every pass while USB-C earphones are on | Settings (usb_out=on), every pass while no cable; Settings > Playback > EQ > Custom |
 | dev | ov_dev | the Developer tests: DAC test, USB console (`drivers/usb_cdc_rknanoc.c`), USB-C probe screen, USB detect, BT listen (`bt_jieli.c` bt_listen), HIFI probe (`audio/hifi_probe.c`; core B's side `coreb/b_hifi_probe.c`, docs/HIFI_PLAN.md), SD card test (`services/sd_selftest.c`) | Settings > System > Developer |
+| lib (library window) | ov_lib | the music library: its job's dispatcher, the views, the lists, the screens (`services/lib_*.c`, `ui/lib_ui.c`) | `startup/ap_ovl.c` ap_lib_* (boot, every pass, Home > Library) |
+| libtag | ov_ltag | the library's extended tag reader (`services/lib_tags.c`) | the walk, for a file's tags (the basic resident reader while USB-C earphones hold the window) |
+| lwalk, lbuild (phase window) | ov_lwalk, ov_lbld | the library job's walk (`services/lib_scan.c`, `lib_dir.c`) and build (`services/lib_build.c`, `lib_sort.c`): one at a time, its job in one phase at a time | `services/lib_job.c` phase(): at a phase's start (two loads a job: ~0.4 ms each in QEMU's eMMC, 1.3 ms SD NAND) |
 | fsw (second window) | ov_fsw | the file-system writer's cold half (`services/fs_write_ext.c`): exFAT writes, new long names on FAT, mkdir, rename, fs_remove, fs_stat | `services/fs_target.c` through `fsx_api()` (`startup/ap_ovl.c`), at the first write that needs it |
 
 How it works:

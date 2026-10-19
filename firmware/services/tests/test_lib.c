@@ -3,12 +3,15 @@
  * (lib_*.c, tags.c with TAGS_EXT, fs_target.c) over a disk image file. Driven by
  * tools/test_lib.py, which builds the images, changes them between runs and checks the output.
  *
- *   test_lib IMG [--vol 0|1] [--fail-after N] [--slice US] [--io-busy K] CMD...
+ *   test_lib IMG [--vol 0|1] [--fail-after N] [--vclock US] [--io-busy K] CMD...
  *     index [full]       run the job to the end (or to the failed write); one "stats" line
  *     rows SEC           every row of a section (ALBTRK ARTALB ARTISTS ALBUMS GENALB GENRES SONGS FOLDERS)
  *     letters SEC        its letter index
  *     view               the committed slot's trailer
  *     coll A B [artist]  lib_coll(A, B)
+ * --vclock US: a virtual clock, US microseconds on at every lib_now_us() (the slices end after a
+ * few tests of the time, whatever the host's speed: the pieces a slice is cut into are the device's).
+ * The stats line has the most sectors read in one lib_step() (maxrd).
  * --fail-after N: every block write after the N-th fails (a power cut: the image keeps what was
  * written before). --io-busy K: lib_io_ok() says no in every K-th pass (audio without headroom), and
  * lib_io_dirty() ends a loop every 7th test (a slice that queued blocks).
@@ -48,10 +51,15 @@ static int img_write(uint32_t lba, uint32_t count, const void *buf)
     return fseek(s_img, (long)lba * 512L, SEEK_SET) || fwrite(buf, 512, count, s_img) != count;
 }
 
+static long s_vclock;
+static uint64_t s_vt;
+
 uint64_t lib_now_us(void)
 {
     struct timespec t;
 
+    if (s_vclock)
+        return s_vt += (uint64_t)s_vclock;
     clock_gettime(CLOCK_MONOTONIC, &t);
     return (uint64_t)t.tv_sec * 1000000u + (uint64_t)t.tv_nsec / 1000u;
 }
@@ -66,7 +74,7 @@ int lib_io_dirty(void)
 {
     static unsigned long n;
 
-    return s_io_busy && ++n % 7u == 0;
+    return (s_io_busy && ++n % 7u == 0) || lib_wdue;
 }
 
 void lib_log(const char *fmt, ...)
@@ -155,7 +163,6 @@ static void print_row(int vol, int sec, uint32_t i)
 int main(int argc, char **argv)
 {
     int vol = 1, a = 1;
-    long slice = 0;
     const char *names[2] = { "Internal", "SD" };
 
     if (argc < 3)
@@ -174,8 +181,8 @@ int main(int argc, char **argv)
             vol = atoi(argv[a + 1]);
         else if (!strcmp(argv[a], "--fail-after"))
             s_fail_after = atol(argv[a + 1]);
-        else if (!strcmp(argv[a], "--slice"))
-            slice = atol(argv[a + 1]);
+        else if (!strcmp(argv[a], "--vclock"))
+            s_vclock = atol(argv[a + 1]);
         else if (!strcmp(argv[a], "--io-busy"))
             s_io_busy = atol(argv[a + 1]);
         else if (!strcmp(argv[a], "--tags-busy"))
@@ -183,7 +190,6 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[a], "--serial"))
             s_serial = (uint32_t)strtoul(argv[a + 1], 0, 16);
     }
-    (void)slice;
     if (fs_target_mount_rw(vol, names[vol], img_read, img_write, 0)) {
         printf("mount failed\n");
         return 2;
@@ -195,7 +201,7 @@ int main(int argc, char **argv)
     for (; a < argc; a++) {
         if (!strcmp(argv[a], "index")) {
             int full = a + 1 < argc && !strcmp(argv[a + 1], "full");
-            long r0 = s_reads, w0 = s_writes;
+            long r0 = s_reads, w0 = s_writes, maxrd = 0;
             unsigned long steps = 0;
 
             if (full)
@@ -206,16 +212,20 @@ int main(int argc, char **argv)
 
                 /* --io-busy K: storage off for every K-th pass (audio without headroom): the
                  * harness says so, not the job, so a pass that never asks is caught too */
+                long rs = s_reads;
+
                 s_io_no = s_io_busy && ++s_io_calls % (unsigned long)s_io_busy == 0;
                 more = lib_step();
                 s_io_no = 0;
+                if (s_reads - rs > maxrd)
+                    maxrd = s_reads - rs;
                 if (!more)
                     break;
                 steps++;
             }
-            printf("stats reads=%ld writes=%ld steps=%lu ok=%d tracks=%u seq=%u slot=%c io_viol=%ld\n", s_reads - r0, s_writes - w0,
-                   steps, g_lib_view[vol].ok, (unsigned)g_lib_view[vol].tr.ntracks, (unsigned)g_lib_view[vol].tr.seq,
-                   'A' + g_lib_view[vol].slot, s_io_viol);
+            printf("stats reads=%ld writes=%ld steps=%lu ok=%d tracks=%u seq=%u slot=%c io_viol=%ld maxrd=%ld\n", s_reads - r0,
+                   s_writes - w0, steps, g_lib_view[vol].ok, (unsigned)g_lib_view[vol].tr.ntracks, (unsigned)g_lib_view[vol].tr.seq,
+                   'A' + g_lib_view[vol].slot, s_io_viol, maxrd);
         } else if (!strcmp(argv[a], "rows") && a + 1 < argc) {
             int sec = sec_of(argv[++a]);
 

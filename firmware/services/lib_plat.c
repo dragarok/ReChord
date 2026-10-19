@@ -33,7 +33,7 @@ int lib_io_ok(void)
  * big write next would wait for each; drivers/emmc.h). */
 int lib_io_dirty(void)
 {
-    return emmc_wq_pending() != 0u || fs_target_nwr != lib_slice_wr;
+    return emmc_wq_pending() != 0u || fs_target_nwr != lib_slice_wr || lib_wdue;
 }
 
 static uint32_t s_serial;

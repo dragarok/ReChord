@@ -178,7 +178,8 @@ def main():
     ovls = [(s[5:], n) for s, n in sizes.items() if s.startswith(".ovl_")]
     win2 = [(n, s) for n, s in ovls if n == "fsw"]          # the file system's window (firmware_ap.ld OVL_FS)
     lib = [(n, s) for n, s in ovls if n == "lib"]           # the library's (OVL_LIB)
-    w1 = [(n, s) for n, s in ovls if n not in ("fsw", "lib")]
+    lph = [(n, s) for n, s in ovls if n in ("lwalk", "lbuild")]   # the library job's phases (OVL_LPH)
+    w1 = [(n, s) for n, s in ovls if n not in ("fsw", "lib", "lwalk", "lbuild")]
     if w1:
         head.append(f"core A overlays (window {win} B at 0x{sym['__ovl_win_start']:08X}): "
                     + ", ".join(f"{n} {s}" for n, s in w1)
@@ -191,6 +192,10 @@ def main():
         lw = sym.get("__ovl_lib_end", 0) - sym.get("__ovl_lib_start", 0)
         head.append(f"core A library window ({lw} B at 0x{sym['__ovl_lib_start']:08X}): lib {lib[0][1]} "
                     f"({lw - lib[0][1]} free)")
+    if lph:
+        pw = sym.get("__ovl_lph_end", 0) - sym.get("__ovl_lph_start", 0)
+        head.append(f"core A library phase window ({pw} B at 0x{sym['__ovl_lph_start']:08X}): "
+                    + ", ".join(f"{n} {s}" for n, s in lph) + f" (largest {pw - max(s for _, s in lph)} free)")
     if a.fonts and os.path.exists(a.fonts):
         fw = sym["__fonts_ram_end"] - sym["__fonts_ram_start"]
         fs = os.path.getsize(a.fonts)

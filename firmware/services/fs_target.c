@@ -103,8 +103,18 @@ uint8_t *sector(const vol_t *v, uint32_t lba)
 /* FAT sectors get their own cache: with the data path sharing one sector, a
  * file read re-fetched the FAT sector for every 1-sector cluster. Allocation
  * dirties it; fat_flush() writes it to every FAT copy. */
-static uint32_t s_fsec[128], s_fsec_lba;
-static const vol_t *s_fsec_vol;
+/* [1]: a second FAT sector, for lookups only (fat_next): read beside the cached one while that one is
+ * dirty, not over it. A file read while another is written in another part of the FAT then no longer
+ * writes the FAT sector out at every turn (two blocks, one per FAT, that the writer's next
+ * multi-block write waits for: m46 scale 30k, slices of 6.0-6.4 ms with 13 sectors written). It never
+ * holds the sector [0] holds: [0] taking a sector drops it from [1]. */
+static struct {
+    uint32_t b[128], lba;
+    const vol_t *v;
+} s_fc[2];
+#define s_fsec     s_fc[0].b
+#define s_fsec_lba s_fc[0].lba
+#define s_fsec_vol s_fc[0].v
 int s_fsec_dirty;
 
 /* (exFAT: its one FAT, or an allocation bitmap sector: nfats is 1) */
@@ -123,19 +133,31 @@ int fat_flush(void)
     return 0;
 }
 
+/* ro: a lookup (into [1] while [0] is dirty with another sector) */
+static uint8_t *fat_cache(const vol_t *v, uint32_t lba, int ro)
+{
+    int k = ro && s_fsec_dirty && (v != s_fsec_vol || lba != s_fsec_lba);
+
+    if (v != s_fc[k].v || lba != s_fc[k].lba) {
+        if (!k) {
+            if (fat_flush())
+                return NULL;
+            if (s_fc[1].lba == lba)
+                s_fc[1].v = NULL;            /* (this one is the copy that changes now) */
+        }
+        s_fc[k].v = NULL;
+        fs_target_nrd++;
+        if (blk(v->rd(v->base + lba, 1, s_fc[k].b)))
+            return NULL;
+        s_fc[k].v = v;
+        s_fc[k].lba = lba;
+    }
+    return (uint8_t *)s_fc[k].b;
+}
+
 uint8_t *fat_sector(const vol_t *v, uint32_t lba)
 {
-    if (v != s_fsec_vol || lba != s_fsec_lba) {
-        if (fat_flush())
-            return NULL;
-        s_fsec_vol = NULL;
-        fs_target_nrd++;
-        if (blk(v->rd(v->base + lba, 1, s_fsec)))
-            return NULL;
-        s_fsec_vol = v;
-        s_fsec_lba = lba;
-    }
-    return (uint8_t *)s_fsec;
+    return fat_cache(v, lba, 0);
 }
 
 /* Next cluster in the chain, 0 at the end or on error. */
@@ -144,11 +166,11 @@ uint32_t fat_next(const vol_t *v, uint32_t c)
     const uint8_t *b;
 
     if (v->type == T_FAT16) {
-        if (!(b = fat_sector(v, v->fat + c / 256u)))
+        if (!(b = fat_cache(v, v->fat + c / 256u, 1)))
             return 0;
         c = le16(b + c % 256u * 2u);
     } else {
-        if (!(b = fat_sector(v, v->fat + c / 128u)))
+        if (!(b = fat_cache(v, v->fat + c / 128u, 1)))
             return 0;
         c = le32(b + c % 128u * 4u);
         if (v->type == T_FAT32)
@@ -275,7 +297,7 @@ static int is_boot(const uint8_t *b)
 
 static void drop_caches(void)
 {
-    s_sec_vol = s_fsec_vol = NULL;
+    s_sec_vol = s_fc[0].v = s_fc[1].v = NULL;
     s_sec_dirty = s_fsec_dirty = 0;
 }
 
@@ -636,7 +658,7 @@ static int exfat_dir_read(cur_t *d, ent_t *e)
     return 0;
 }
 
-static int dir_read(cur_t *d, ent_t *e)
+int dir_read(cur_t *d, ent_t *e)
 {
     return d->v->type == T_EXFAT ? exfat_dir_read(d, e) : fat_dir_read(d, e);
 }
@@ -1322,7 +1344,8 @@ fs_file_t *fs_open_append_at(const char *path, uint32_t at)
 }
 
 /* Cluster for the byte at f->pos (a cluster boundary): the next free one
- * from the last, so files stay contiguous when they can. New clusters form
+ * from the last, so files stay contiguous when they can (when the next one is taken, from the
+ * volume's hint: the cluster after the last allocation). New clusters form
  * their own chain; it is hung onto the file's old chain only at close. */
 static int grow(struct fs_file *f)
 {
@@ -1334,7 +1357,13 @@ static int grow(struct fs_file *f)
 
         return x ? x->grow(f) : FS_ERR_IO;
     }
-    c = clus_alloc(v, f->clus ? f->clus + 1u : v->hint, f->head ? f->clus : 0u);
+    c = f->clus ? f->clus + 1u : v->hint;
+    if (c != v->hint && fat_get(v, c) != 0u)
+        c = v->hint;                         /* taken (another file grew there meanwhile: the library
+                                              * writes two at once): the next free one after the last
+                                              * allocation, not a scan over everything after this file
+                                              * (147 FAT sectors in one slice, m46 scale 30k) */
+    c = clus_alloc(v, c, f->head ? f->clus : 0u);
 
     if (!c)
         return FS_ERR_IO;

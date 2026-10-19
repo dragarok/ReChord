@@ -139,6 +139,7 @@ int fst_fsi_flush(vol_t *v);
 uint32_t fst_now_dt(void);
 void fst_cur_init(cur_t *d, const vol_t *v, const ent_t *dir);
 uint8_t *fst_cur_next(cur_t *d);
+int fst_dir_read(cur_t *d, ent_t *e);   /* the next entry into e: 1, or 0 at the end (lib_dir.c too) */
 uint8_t fst_sfn_sum(const uint8_t *p);
 const char *fst_component(const char *p, size_t *n);
 int fst_resolve(const char *path, const vol_t **pv);

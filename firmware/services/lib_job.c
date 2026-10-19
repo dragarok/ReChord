@@ -38,7 +38,7 @@ static int s_active = -1;            /* the volume being indexed, -1 */
 static uint8_t s_want[2];            /* 0, 1 refresh, 2 full */
 static uint8_t s_gone[2];            /* its volume went away under it */
 static uint32_t s_canary;
-static uint16_t s_clean;             /* files to remove when idle: bits 0..4 LIBT0..4.TMP, 8..11 the
+static uint16_t s_clean;             /* files to remove when idle: bits 0..5 LIBT0..5.TMP, 8..11 the
                                       * card's index at the other place */
 static char s_clean_dir[24];         /* where the temps are */
 static char s_dir[2][24];            /* data directory per volume, "" = not looked for yet */
@@ -123,10 +123,17 @@ void lib_tmp_path(char *out, int n)
 
 enum { J_IDLE, J_SCAN, J_BUILD };
 
-void scan_abort(lib_job_t *j);
-void build_abort(lib_job_t *j);
-void build_forget(void);
-void srt_forget(void);
+/* The phase's code: the walk (J_SCAN) or the build (J_BUILD), each an overlay of its own in the
+ * phase window (lib.h): loaded here, at a phase's start or when it is not in the window, never
+ * while code in it runs (nothing there calls back into this file). NULL: refused (damaged). */
+#ifdef LIB_HOST
+static const lib_phase_api_t k_phase[2] = {
+    { scan_start, scan_step, scan_abort, 0 }, { build_start, build_step, build_abort, build_forget } };
+#define phase(b) (&k_phase[b])
+#else
+#include "ovl.h"
+#define phase(b) ((const lib_phase_api_t *)ovl_get((b) ? OVL_LBUILD : OVL_LWALK))
+#endif
 
 static void job_end(int ok)
 {
@@ -153,6 +160,7 @@ static void job_end(int ok)
 static void job_abort(const char *why)
 {
     lib_job_t *j = &s_job;
+    const lib_phase_api_t *ph;
 
     if (s_active < 0)
         return;
@@ -160,17 +168,15 @@ static void job_abort(const char *why)
                                                      * (FS_ERR_GONE), closed only to free them */
         fs_close(j->raw.f), fs_close(j->trk.f), fs_close(j->idx.f), fs_close(j->in.f), fs_close(j->srt.w.f);
         j->raw.f = j->trk.f = j->idx.f = j->in.f = j->srt.w.f = 0;
-        srt_forget();
-        build_forget();
+        if (j->state == J_BUILD && (ph = phase(1)))   /* (the walk holds no handles of its own) */
+            ph->forget();
     }
     if (s_gone[strncmp(g_lib_view[j->vol].dir, "/SD", 3) == 0]) {
         fs_close(j->old.f), fs_close(j->otrk.f);
         j->old.f = j->otrk.f = 0;        /* (the previous walk's, read from the view's place) */
     }
-    if (j->state == J_SCAN)
-        scan_abort(j);
-    else if (j->state == J_BUILD)
-        build_abort(j);
+    if ((j->state == J_SCAN || j->state == J_BUILD) && (ph = phase(j->state == J_BUILD)))
+        ph->abort(j);
     lib_log("lib: %s indexing stopped: %s", vol_name(j->vol), why);
     j->state = J_IDLE;
     s_active = -1;
@@ -181,8 +187,13 @@ static int job_start(int vol, int full)
 {
     lib_job_t *j = &s_job;
     lib_view_t *v = &g_lib_view[vol];
+    const lib_phase_api_t *ph = phase(0);
     int r;
 
+    if (!ph) {
+        lib_log("lib: %s: the walk's code is not usable (ovl.c says why)", vol_name(vol));
+        return -1;
+    }
     memset(j, 0, sizeof *j);
     j->vol = vol;
     j->full = full;
@@ -196,9 +207,10 @@ static int job_start(int vol, int full)
     g_lib.busy = 1;
     g_lib.busy_vol = (uint8_t)vol;
     g_lib.pct = 0;
-    r = scan_start(j);
-    if (r == LIB_WALKED && build_start(j) == 0) {
+    r = ph->start(j);
+    if (r == LIB_WALKED) {               /* (the build starts in the next slice: its code loaded then) */
         j->state = J_BUILD;
+        j->bph = -1;
     } else if (r) {
         lib_log("lib: %s: cannot write its index in %s", vol_name(vol), j->dir);
         s_active = -1;
@@ -221,7 +233,7 @@ static void committed(void)
     if (idx_load(j->vol))
         lib_log("lib: %s: the new index does not read back", vol_name(j->vol));
     snprintf(s_clean_dir, sizeof s_clean_dir, "%s", j->dir);
-    s_clean |= 0x1Fu;
+    s_clean |= 0x3Fu;                    /* (LIBT0..5.TMP) */
     if (j->vol == 1)
         s_clean |= 0xF00u;               /* (an index the card had at its other place is stale now) */
     (void)dir, (void)base, (void)p;
@@ -294,7 +306,8 @@ int lib_step(void)
 {
     lib_job_t *j = &s_job;
     uint64_t t0, t_end, us;
-    int r;
+    uint32_t rd0;
+    int r, st0;
 
     if (CANARY != s_canary) {            /* someone else had the scratch buffer (it is ours now) */
         idx_cache_drop();
@@ -363,10 +376,18 @@ int lib_step(void)
     }
     t0 = lib_now_us();
     t_end = t0 + LIB_STEP_US;
+    st0 = j->state == J_SCAN ? j->wst : j->bph;
+    lib_wdue = 0;                        /* (a writer near full: its flush comes first in this slice) */
     {
-        uint32_t rd0 = fs_target_nrd, wr0 = lib_slice_wr = fs_target_nwr;
+        uint32_t wr0 = lib_slice_wr = fs_target_nwr;
 
-        r = j->state == J_SCAN ? scan_step(j, t_end) : j->bph < 0 ? (build_start(j) ? -1 : 0) : build_step(j, t_end);
+        rd0 = fs_target_nrd;
+        const lib_phase_api_t *ph = phase(j->state == J_BUILD);
+
+        if (!j->warm)                    /* (first the previous index's chain places: its random reads) */
+            j->warm = idx_warm(j->vol, t_end), r = 0;
+        else
+            r = !ph ? -1 : j->state == J_SCAN ? ph->step(j, t_end) : j->bph < 0 ? (ph->start(j) ? -1 : 0) : ph->step(j, t_end);
         j->nrd0 += fs_target_nrd - rd0;
         j->nwr0 += fs_target_nwr - wr0;
     }
@@ -407,9 +428,9 @@ int lib_step(void)
     j->steps++;
     if (us > j->worst_us)
         j->worst_us = (uint32_t)us;
-    if (us > 2u * LIB_STEP_US)           /* (a slice over its time: where, and its sectors, for the log and the tests) */
-        lib_log("lib: slice %u us in %s %d, %u sectors written", (unsigned)us, j->state == J_SCAN ? "walk" : "build",
-                j->state == J_SCAN ? j->wst : j->bph, (unsigned)(fs_target_nwr - lib_slice_wr));
+    if (us > 2u * LIB_STEP_US)           /* (a slice over its time: where it began and ended, its sectors, for the log and the tests) */
+        lib_log("lib: slice %u us in %s %d-%d, %u sectors read, %u written", (unsigned)us, j->state == J_SCAN ? "walk" : "build",
+                st0, j->state == J_SCAN ? j->wst : j->bph, (unsigned)(fs_target_nrd - rd0), (unsigned)(fs_target_nwr - lib_slice_wr));
     if (r < 0) {
         job_abort(j->state == J_SCAN ? "the walk failed (I/O)" : "the build failed (I/O)");
         return 1;
