@@ -86,9 +86,10 @@ static uint32_t whole_crc(unsigned w, uint32_t len)
     return fwu_crc(c, b + offsetof(ovl_hdr_t, crc) + 4u, len - offsetof(ovl_hdr_t, crc) - 4u);
 }
 
-static int in_window(uint32_t a)
+static int in_window(unsigned w, uint32_t a)   /* (window w's own range: evicting the library's phase
+                                               * code once cleared USB-C earphones' hook in window 0) */
 {
-    return a >= (uint32_t)__ovl_win_start && a < (uint32_t)__ovl_win_end;
+    return a >= (uint32_t)s_start[w] && a < (uint32_t)s_end[w];
 }
 
 /* The overlay in window w leaves it: its mode stopped, the window checked unchanged, the hooks
@@ -107,7 +108,7 @@ static void evict(unsigned w)
         whole_crc(w, len) != HDR(w)->crc)
         log_printf("ovl: %s changed while loaded (something else wrote the window)", ovl_desc[id].module);
     for (unsigned i = 0; ovl_hooks[i]; i++)
-        if (in_window((uint32_t)*ovl_hooks[i])) {
+        if (in_window(w, (uint32_t)*ovl_hooks[i])) {
             *ovl_hooks[i] = NULL;
             log_printf("ovl: %s left hook %u pointing into the window: cleared", ovl_desc[id].module, i);
         }
