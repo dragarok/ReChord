@@ -757,6 +757,27 @@ static void vop_reset(void)
     s_vop_hz = 0;
 }
 
+/* Does the VOP answer: TIMING for the core clock written and read back (only while no byte goes out).
+ * Device 2026-10-19 (round4): the DMA and the VOP read 0 and dropped writes; STATUS read 0 ("idle"),
+ * so the trial, judged by its own frame count, passed with nothing on the panel. And the DMA, for the
+ * dma path: its channel's SAR written and read back while the channel is off. */
+static int vop_answers(void)
+{
+    uint32_t hz = clock_core_hz(), t = vop_timing_for(hz);
+
+    VOP_R(VOP_TIMING) = t;
+    if (VOP_R(VOP_TIMING) != t)
+        return 0;
+    s_vop_hz = hz;
+    return 1;
+}
+
+static int dma_answers(void)
+{
+    CH_R(0x00) = 0x0300A5A8u;
+    return CH_R(0x00) == 0x0300A5A8u;
+}
+
 static void vop_send_cmd(uint8_t cmd)
 {
     vop_con(CON_CMD);
@@ -897,6 +918,12 @@ static void dma_wait(void)
             s_path = PANEL_PATH_VOP;
             (void)vop_idle();
             vop_reset();
+            if (!vop_answers()) {
+                log_printf("display: the VOP does not answer either (TIMING reads %x)", (unsigned)VOP_R(VOP_TIMING));
+                to_gpio("does not answer", 1);
+                gpio_blit(s_dma_x0, s_dma_y0, s_dma_x1, s_dma_y1, s_dma_src, s_dma_x1 - s_dma_x0 + 1);
+                return;
+            }
             if (vop_blit(s_dma_x0, s_dma_y0, s_dma_x1, s_dma_y1, s_dma_src, s_dma_x1 - s_dma_x0 + 1))
                 to_gpio("stayed busy after a DMA timeout", 1);
             return;
@@ -981,7 +1008,7 @@ const uint32_t *panel_io_counters(void)
 
 int panel_io_select(int path)
 {
-    uint32_t m = mark_get();
+    uint32_t m = mark_get(), step;
 
     if (path == PANEL_PATH_AUTO)
         path = PANEL_PATH_DEFAULT;
@@ -1006,6 +1033,7 @@ int panel_io_select(int path)
         log_printf("display: %s refused: no watchdog to end a hang", path == PANEL_PATH_DMA ? "dma" : "vop");
         return s_path;
     }
+    step = bootcrumb_step();
     mark_set(MARK_TRIAL);
     bootcrumb(BC_DISPLAY_TRIAL);
     s_trial_ms = time_stamp(time_ms());
@@ -1018,6 +1046,17 @@ int panel_io_select(int path)
     vop_reset();                                     /* (LCDC_SRST pulse) */
     vop_con(CON_CMD);
     vop_timing();
+    if (!vop_answers() || (path == PANEL_PATH_DMA && !dma_answers())) {
+        mark_set(MARK_FAIL);                         /* (no hang: the trail's step as it was) */
+        bootcrumb(step);
+        s_trial_ms = 0;
+        log_printf("display: %s refused: the %s does not answer (TIMING reads %x, the DMA's SAR %x); GPIO "
+                   "until power-off", path == PANEL_PATH_DMA ? "dma" : "vop",
+                   VOP_R(VOP_TIMING) == vop_timing_for(clock_core_hz()) ? "DMA" : "VOP",
+                   (unsigned)VOP_R(VOP_TIMING), (unsigned)CH_R(0x00));
+        vop_reset();
+        return s_path;
+    }
     pins_to(1);
     s_path = path;
     return s_path;
@@ -1027,6 +1066,11 @@ void panel_io_poll(void)
 {
     if (s_trial_ms && s_trial_frames && time_ms() - s_trial_ms >= TRIAL_MS) {
         s_trial_ms = 0;
+        if (s_path != PANEL_PATH_PIO && (!s_vop_hz || VOP_R(VOP_TIMING) != vop_timing_for(s_vop_hz))) {
+            log_printf("display: the %s trial ends with TIMING reading %x, not %x", panel_io_path(),
+                       (unsigned)VOP_R(VOP_TIMING), (unsigned)vop_timing_for(s_vop_hz));
+            to_gpio("does not read back its TIMING", 1);
+        }
         if (mark_get() == MARK_TRIAL)
             mark_set(0);
         if (bootcrumb_step() == BC_DISPLAY_TRIAL)

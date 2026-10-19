@@ -30,6 +30,9 @@ unsigned cpuclk_point_for(const as_track_t *t, uint32_t extra, int usb_out);
 /* Main loop, before the first FLAC track of the boot is queued: the record marked "in flight" on
  * the eMMC (a boot that dies in the switch or the self-test leaves it). 0 = the point may be used. */
 int cpuclk_arm(void);
+/* At a track's queue (main loop): once a boot, with cpu_b=auto|stock, the boot gating the FLAC point
+ * needs (drivers/clock_rknanoc.c clock_periph_init, probed), while the I2S DMA is off; else nothing. */
+void cpuclk_prepare(void);
 /* Core B holds at a track open asking for want: 1 = switch now, 0 = no (stay), -1 = not yet. */
 int cpuclk_may(unsigned want);
 /* The switch to want, core B quiet (held, b_held = 1, or in reset). The first FLAC switch of a boot

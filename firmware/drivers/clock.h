@@ -74,7 +74,16 @@ enum { CLOCK_SW_BAD = -1, CLOCK_SW_OK = 0, CLOCK_SW_NOLOCK = 1 /* back at the ol
 int clock_periph_check(uint32_t pll_hz);
 /* Boot: stock's CpuClockGateInit (B2h, MINIV390 0x0307a214) where it applies, and the PLL-fed
  * peripheral clocks ReChord keeps moved to the crystal (clock_rknanoc.c lists each). */
-void clock_periph_init(void);
+int clock_periph_init(void);
+/* Each of those writes is probed (the system DMA and the VOP written and read back); one after which
+ * either stops answering is undone (device 2026-10-19: both dead after round4's writes, which ran at
+ * boot; now services/cpuclk.c runs them at the first play with cpu_b=auto|stock, the I2S DMA off).
+ * The result; the steps undone; the log lines that name them. */
+enum { CLOCK_PERIPH_OK = 0, CLOCK_PERIPH_UNDONE = 1 /* alive, some steps undone */,
+       CLOCK_PERIPH_DEAD = -1 /* dead after the steps: all rolled back */,
+       CLOCK_PERIPH_DEAD_BEFORE = -2 /* dead before any step: none made */ };
+int clock_periph_undone(void);
+void clock_periph_log(void (*pr)(const char *fmt, ...));
 /* The 24 MHz timer (TIMER0, SDK hw_timer.h, 0x400E0000): opened and started, read, closed. The tick
  * count between two readings does not depend on which way it counts. */
 void clock_timer_open(void);

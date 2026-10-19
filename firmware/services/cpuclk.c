@@ -32,6 +32,7 @@
  * in flight (a boot that ends then is found by the next: ST_DIED). */
 #define REC_TAG      0xC1000000u
 #define REC_ARMED    (0xA1000000u | ST_ARMED)
+#define REC_PERIPH   (0xA1000000u | ST_PERIPH)   /* the boot gating in flight (cpuclk_prepare) */
 
 static uint32_t s_rec;                     /* the status word as now */
 static int s_armed;                        /* this boot: the record says "in flight", the point may be used */
@@ -50,6 +51,7 @@ static volatile uint32_t s_retime;         /* switches whose pclk users are not 
 static volatile uint32_t s_deny_seq, s_deny_logged;
 static volatile unsigned s_deny_why;
 static volatile int s_deny_gate;           /* the clock (SDK gate id) that was too fast */
+static volatile int s_off_boot;            /* refused for a too fast peripheral clock: off for this boot */
 
 /* the self-test's numbers, for its log line */
 static struct {
@@ -64,6 +66,7 @@ static const char *const k_stage[ST_N] = {
     "the PLL lost lock", "core A's datapath", "core B's datapath", "core A's LOW RAM",
     "core B's HIGH RAM", "core B's LOW RAM", "core A's code", "core B's code",
     "core B did not finish", "core B did not come back", "a boot died in the test",
+    "the boot gating",
 };
 
 static const char *const k_why[] = {
@@ -131,8 +134,9 @@ void cpuclk_boot(void)
     uint32_t st = bootcrumb_hp(0), armed = bootcrumb_hp(1);
 
     s_rec = (st & 0xFF000000u) == REC_TAG ? st : rec_make(0, 0, 0);
-    if (armed == REC_ARMED) {                /* the last boot ended inside a switch or its self-test */
-        s_rec = rec_make(ST_DIED, rec_passed(s_rec), rec_tried(s_rec));
+    if (armed == REC_ARMED || armed == REC_PERIPH) {   /* the last boot ended inside a switch, its
+                                                        * self-test, or the boot gating */
+        s_rec = rec_make(armed == REC_PERIPH ? ST_PERIPH : ST_DIED, rec_passed(s_rec), rec_tried(s_rec));
         if (bootcrumb_hp_set(s_rec, 0) != 0)
             log_printf("cpuclk: the record could not be written");
     }
@@ -159,6 +163,8 @@ int cpuclk_arm(void)
         why = 2;
     else if (!bootcrumb_ok())
         why = 3;
+    else if (s_off_boot)
+        why = 5;                             /* (refused for it once this boot: cpuclk_poll) */
     if (!why) {
         s_a_code_words = (uint32_t)(_data_load_start - (const uint32_t *)0x03050000u);
         s_a_code_ref = st_sum((const volatile uint32_t *)0x03050000u, s_a_code_words);
@@ -188,6 +194,44 @@ void cpuclk_b_loaded(uint32_t n)
     s_b_code_ref = st_sum((const volatile uint32_t *)AS_B_RAM, n / 4u);
 }
 
+/* ---- the boot gating, before the FLAC point needs it ------------------------------
+ * Device 2026-10-19 (round4): with stock's boot gates and the PLL-fed peripheral clocks moved to the
+ * crystal at boot, the system DMA and the VOP read 0 (no sound, no picture); at the UI point the
+ * ROM's PLL/8 clocks are 12 MHz and harmless, as round3 ran them. The FLAC point (PLL 1344) does need
+ * them moved or gated (clock_periph_check), so they are, once a boot, at its first play: only with
+ * cpu_b=auto|stock and no failure on record, the watchdog on (a hang ends in a reset), the I2S DMA
+ * off (before the output starts: no gating step can stop a running block), the display idle, and
+ * the gating in flight on the eMMC (a boot that ends inside it: ST_PERIPH at the next). Each step is
+ * probed and undone if the DMA or the VOP stops answering (drivers/clock_rknanoc.c); dead anyway at
+ * the end: everything rolled back, and the FLAC point off for this build (ST_PERIPH). */
+#define DMA_CHEN (*(volatile uint32_t *)0x600003A0u)
+
+static int s_periph;                       /* the gating ran this boot (whatever came of it) */
+
+void cpuclk_prepare(void)
+{
+    int r;
+
+    if (s_periph || g_cfg.cpu_b == CFG_CPU_B_96 || s_failed || !bootcrumb_ok() || !watchdog_running() ||
+        (DMA_CHEN & (1u << I2S_DMA_CH)))
+        return;                              /* (not now: the next track's queue tries again) */
+    s_periph = 1;
+    if (bootcrumb_hp_set(s_rec, REC_PERIPH) != 0) {
+        log_printf("cpuclk: the gating's record could not be written: no gating (the FLAC point stays off)");
+        return;
+    }
+    panel_io_sync();
+    r = clock_periph_init();
+    clock_periph_log(log_printf);
+    if (r < 0) {
+        s_failed = ST_PERIPH;
+        s_rec = rec_make(ST_PERIPH, rec_passed(s_rec), rec_tried(s_rec));
+        log_printf("cpuclk: failed at %u (%s): the FLAC point off for this build", ST_PERIPH, k_stage[ST_PERIPH]);
+    }
+    if (bootcrumb_hp_set(s_rec, 0) != 0)
+        log_printf("cpuclk: the record could not be written");
+}
+
 /* ---- may we --------------------------------------------------------------------- */
 
 static void deny(unsigned why)
@@ -200,6 +244,10 @@ int cpuclk_may(unsigned want)
 {
     if (want == CLOCK_POINT_UI || want >= CLOCK_POINTS)
         return want == CLOCK_POINT_UI;
+    if (s_off_boot) {                        /* (refused once this boot: the record cleared, s_armed 0) */
+        deny(5);
+        return 0;
+    }
     if (g_cfg.cpu_b == CFG_CPU_B_96 || s_failed || !s_armed || !bootcrumb_ok()) {
         deny(g_cfg.cpu_b == CFG_CPU_B_96 ? 1u : s_failed ? 2u : 3u);
         return 0;
@@ -216,6 +264,7 @@ int cpuclk_may(unsigned want)
     }
     s_wait_ms = 0;
     if ((s_deny_gate = clock_periph_check(1344000000u)) >= 0) {
+        s_off_boot = 1;
         deny(5);
         return 0;
     }
@@ -439,6 +488,12 @@ void cpuclk_poll(void)
                    s_deny_why == 5u ? (s_deny_gate == 16 ? " (I2S1)" : s_deny_gate == 29 ? " (UART1)" : " (see the gate id)") : "");
         if (s_deny_why == 5u)
             log_printf("cpuclk: the clock of SDK gate %d", s_deny_gate);
+    }
+    if (s_off_boot && s_armed) {               /* no switch will come this boot: nothing in flight (the
+                                                * next boot would take the record for a boot that died) */
+        s_armed = 0;
+        if (bootcrumb_hp_set(s_rec, 0) != 0)
+            log_printf("cpuclk: the record could not be written");
     }
     if (s_retime) {                            /* pclk's users that are not re-timed in the switch */
         s_retime = 0;

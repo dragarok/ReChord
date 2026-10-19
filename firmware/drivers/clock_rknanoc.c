@@ -464,12 +464,14 @@ uint32_t clock_pclk_hz(void)   { return s_pclk_hz; }
 #define TMR(o) (*(volatile uint32_t *)(0x400E0000u + (o)))
 
 static int s_tmr_open;
+static uint32_t s_tmr_gates;               /* CLK_TIMER0 and PCLK_TIMER's gate bits at the open */
 
 void clock_timer_open(void)
 {
     if (s_tmr_open)
         return;                                /* (running: a reading in progress stays valid) */
     s_tmr_open = 1;
+    s_tmr_gates = (CRU(CLKGATE(0)) & (1u << 11)) | (CRU(CLKGATE(8)) & (1u << 14)) << 16;
     CRU(CLKGATE(0)) = 1u << (11 + 16);         /* CLK_TIMER0 on */
     CRU(CLKGATE(8)) = 1u << (14 + 16);         /* PCLK_TIMER on */
     CRU(CLKSEL2) = 0x009F0000u;                /* TIMER0: the crystal, /1 */
@@ -495,8 +497,10 @@ void clock_timer_close(void)
 {
     s_tmr_open = 0;
     TMR(0x10) = 0;
-    CRU(CLKGATE(0)) = 0x08000800u;             /* stock's boot state: both gated (B2h) */
-    CRU(CLKGATE(8)) = 0x40004000u;
+    /* as the open found them: gated after the boot gating (stock's B2h state), open without it, or
+     * when its probe undid one of them (a gate the DMA or the VOP could not do without) */
+    CRU(CLKGATE(0)) = 1u << (11 + 16) | (s_tmr_gates & (1u << 11));
+    CRU(CLKGATE(8)) = 1u << (14 + 16) | (s_tmr_gates >> 16 & (1u << 14));
 }
 
 /* ---- DMA suspend (stock DmaSuspend 0x03060B06 / DmaResume 0x03060B44) -------
@@ -573,7 +577,7 @@ int clock_periph_check(uint32_t pll_hz)
     return -1;
 }
 
-/* Boot (after clock_init): stock's CpuClockGateInit (B2h, 0x0307a214..0x0307a23e: CLKGATE0..9 =
+/* The steps (k_psteps above), from stock's CpuClockGateInit (B2h, 0x0307a214..0x0307a23e: CLKGATE0..9 =
  * 0x7FFF1FA4, 0xFFFFCF9F, 0x00070007, 0x03FF03FF, 0x1FFF1FFF, 0x07EF0606, 0xFFFFEC00, 0xFFFF4000,
  * 0xFFFFFCFE, 0x01FF0004; work/stock_boot/01_entry_init.md) for every block ReChord never uses, and
  * the PLL-fed function clocks of the ones it keeps moved to the crystal first.
@@ -599,22 +603,149 @@ int clock_periph_check(uint32_t pll_hz)
  * (CLKSEL9 [15]), UART1 (CLKSEL9 [7:6] = 1: the ROM's value, before the BT driver's own), UART2 (CLKSEL10 [7], what stock's DebugInit writes: 0x00800080), SFC (CLKSEL10
  * [15], the ROM's), UART3 (CLKSEL11 [15]), UART4/5 (CLKSEL12 [7], [15]), SPI0/1 (CLKSEL8 [7], [15]),
  * I2S0 (CLKSEL4 [9:8] = 2: the 12 MHz crystal path). EBC has no crystal source: gated only. */
-void clock_periph_init(void)
+/* Device 2026-10-19 (round4, work/device/2026-10-19_round4_pio): after these writes the system DMA
+ * and the VOP read 0 and drop writes (the I2S DMA never took a block, VOP TIMING read 0 after 0x1041;
+ * the eMMC and USB on the same AHB went on), in round3, without them, both worked. Every gate here is
+ * one stock gates too (B2h), but stock holds each block in soft reset first (B2g) and moves none of
+ * these function clocks but UART2's. Which write it is, the model cannot say. So:
+ *  - nothing here runs at boot any more: at the UI point (PLL 96) the ROM's PLL/8 peripheral clocks
+ *    are 12 MHz, as round3 ran them; only the FLAC point (PLL 1344) needs them moved or gated, so
+ *    services/cpuclk.c runs this at the first play of a boot with cpu_b=auto|stock, the watchdog on,
+ *    the I2S DMA off, the display idle, and an in-flight record on the eMMC (a hang: off for the build);
+ *  - each write is one step (a field or a gate bit), and after each the DMA and the VOP are probed (a
+ *    register written and read back); a step after which either reads wrong is undone at once and
+ *    logged (clock_periph_log); dead after the last step anyway: every step rolled back. */
+typedef struct {
+    uint8_t off;                   /* CRU register */
+    uint16_t mask, val;            /* the field (write-masked: mask << 16 | val) */
+    const char *name;
+} periph_step_t;
+
+static const periph_step_t k_psteps[] = {
+    { 0x24u, 0x0300u, 0x0200u, "CLKSEL4 I2S0 12M" },
+    { 0x34u, 0x0080u, 0x0080u, "CLKSEL8 SPI0 24M" },
+    { 0x34u, 0x8000u, 0x8000u, "CLKSEL8 SPI1 24M" },
+    { 0x38u, 0x8000u, 0x8000u, "CLKSEL9 UART0 24M" },
+    { 0x38u, 0x00C0u, 0x0040u, "CLKSEL9 UART1 24M" },     /* (as the ROM leaves it, 0x740) */
+    { 0x3Cu, 0x0080u, 0x0080u, "CLKSEL10 UART2 24M" },    /* (stock's DebugInit writes it too) */
+    { 0x3Cu, 0x8000u, 0x8000u, "CLKSEL10 SFC 24M" },      /* (the ROM's) */
+    { 0x40u, 0x8000u, 0x8000u, "CLKSEL11 UART3 24M" },
+    { 0x44u, 0x0080u, 0x0080u, "CLKSEL12 UART4 24M" },
+    { 0x44u, 0x8000u, 0x8000u, "CLKSEL12 UART5 24M" },
+#define G(id, nm) { (uint8_t)CLKGATE((id) / 16), (uint16_t)(1u << ((id) % 16)), (uint16_t)(1u << ((id) % 16)), nm }
+    G(8, "gate 8 CLK_SFC"), G(11, "gate 11 CLK_TIMER0"), G(12, "gate 12 CLK_TIMER1"),
+    G(20, "gate 20 CLK_I2S0_SRC"), G(23, "gate 23 DCLK_EBC"), G(26, "gate 26 CLK_SPI0"),
+    G(27, "gate 27 CLK_SPI1"), G(30, "gate 30 CLK_UART2"), G(31, "gate 31 CLK_TEST"),
+    G(32, "gate 32 CLK_UART3"), G(33, "gate 33 CLK_UART4"), G(34, "gate 34 CLK_UART5"),
+    G(90, "gate 90 PVTM"),
+    G(109, "gate 109 HCLK_EBC"), G(110, "gate 110 HCLK_SYNTH"), G(111, "gate 111 HCLK_SFC"),
+    G(126, "gate 126 HCLK_IMDCT"),
+    G(129, "gate 129 PCLK_I2S0"), G(132, "gate 132 PCLK_I2C1"), G(133, "gate 133 PCLK_I2C2"),
+    G(134, "gate 134 PCLK_SPI0"), G(135, "gate 135 PCLK_SPI1"), G(138, "gate 138 PCLK_UART2"),
+    G(139, "gate 139 PCLK_UART3"), G(140, "gate 140 PCLK_UART4"), G(141, "gate 141 PCLK_UART5"),
+    G(142, "gate 142 PCLK_TIMER"),
+#undef G
+};
+#define PSTEPS (sizeof k_psteps / sizeof k_psteps[0])
+
+/* The probe: the VOP's TIMING (0x60070008, read back 0x1041 on the device in round3) and DMA channel
+ * 2's SAR (no ReChord user: the panel has 0, audio 5), each written twice and read back, then put
+ * back. The panel's pins are GPIOs here, so TIMING moves no byte. 0 = both answer; bit 0 the DMA
+ * does not, bit 1 the VOP does not. */
+#define PROBE_VOP_TIMING (*(volatile uint32_t *)0x60070008u)
+#define PROBE_DMA_SAR2   (*(volatile uint32_t *)(0x60000000u + 2u * 0x58u))
+
+static unsigned periph_probe(void)
 {
-    CRU(0x24u) = 0x03000200u;              /* CLKSEL4: I2S0 from the 12 MHz crystal path */
-    CRU(0x34u) = 0x80808080u;              /* CLKSEL8: SPI0, SPI1 from the crystal */
-    CRU(0x38u) = 0x80C08040u;              /* CLKSEL9: UART0 and UART1 from the crystal (UART1: as the
-                                            * ROM leaves it, 0x740, and bt_jieli.c sets it again) */
-    CRU(0x3Cu) = 0x80808080u;              /* CLKSEL10: UART2, SFC from the crystal */
-    CRU(0x40u) = 0x80008000u;              /* CLKSEL11: UART3 */
-    CRU(0x44u) = 0x80808080u;              /* CLKSEL12: UART4, UART5 */
-    CRU(CLKGATE(0)) = 0x19001900u;         /* SFC, TIMER0, TIMER1 */
-    CRU(CLKGATE(1)) = 0xCC90CC90u;         /* I2S0 src, EBC dclk, SPI0, SPI1, UART2, TEST */
-    CRU(CLKGATE(2)) = 0x00070007u;         /* UART3, UART4, UART5 */
-    CRU(CLKGATE(5)) = 0x04000400u;         /* PVTM */
-    CRU(CLKGATE(6)) = 0xE000E000u;         /* HCLK_EBC, HCLK_SYNTH, HCLK_SFC */
-    CRU(CLKGATE(7)) = 0x40004000u;         /* HCLK_IMDCT */
-    CRU(CLKGATE(8)) = 0x7CF27CF2u;         /* PCLK I2S0, I2C1, I2C2, SPI0, SPI1, UART2-5, TIMER */
+    static const uint32_t k_vop[2] = { 0x1041u, 0x2062u }, k_dma[2] = { 0x03004000u, 0x0300A5A8u };
+    uint32_t v = PROBE_VOP_TIMING, d = PROBE_DMA_SAR2;
+    unsigned bad = 0;
+
+    for (unsigned i = 0; i < 2u; i++) {
+        PROBE_DMA_SAR2 = k_dma[i];
+        PROBE_VOP_TIMING = k_vop[i];
+        if (PROBE_DMA_SAR2 != k_dma[i])
+            bad |= 1u;
+        if (PROBE_VOP_TIMING != k_vop[i])
+            bad |= 2u;
+    }
+    PROBE_DMA_SAR2 = d;
+    PROBE_VOP_TIMING = v;
+    return bad;
+}
+
+static uint8_t s_pp_base = 0xFFu;          /* the probe before any step (0xFF: never ran) */
+/* per step: bits 0-1 the probe after it, bit 2 undone, bits 4-5 the probe after the undo */
+static uint8_t s_pp_bad[PSTEPS];
+static uint16_t s_pp_old[PSTEPS];          /* each field as it was before its step */
+static uint8_t s_pp_end, s_pp_rolled;      /* the probe after the last step; all rolled back (then its probe | 0x80) */
+
+int clock_periph_init(void)
+{
+    s_pp_rolled = 0;
+    s_pp_base = (uint8_t)periph_probe();
+    if (s_pp_base)
+        return CLOCK_PERIPH_DEAD_BEFORE;           /* (nothing to learn, and nothing to add to it) */
+    for (unsigned i = 0; i < PSTEPS; i++) {
+        const periph_step_t *s = &k_psteps[i];
+        unsigned bad;
+
+        s_pp_old[i] = (uint16_t)(CRU(s->off) & s->mask);
+        CRU(s->off) = (uint32_t)s->mask << 16 | s->val;
+        bad = periph_probe();
+        if (bad) {
+            CRU(s->off) = (uint32_t)s->mask << 16 | s_pp_old[i];
+            bad |= 4u | periph_probe() << 4;
+        }
+        s_pp_bad[i] = (uint8_t)bad;
+    }
+    s_pp_end = (uint8_t)periph_probe();
+    if (!s_pp_end)
+        return clock_periph_undone() ? CLOCK_PERIPH_UNDONE : CLOCK_PERIPH_OK;
+    for (unsigned i = PSTEPS; i-- > 0;)            /* still dead: every field as the ROM left it */
+        CRU(k_psteps[i].off) = (uint32_t)k_psteps[i].mask << 16 | s_pp_old[i];
+    s_pp_rolled = (uint8_t)(0x80u | periph_probe());
+    return CLOCK_PERIPH_DEAD;
+}
+
+int clock_periph_undone(void)
+{
+    int n = 0;
+
+    for (unsigned i = 0; i < PSTEPS; i++)
+        n += (s_pp_bad[i] & 4u) != 0;
+    return n;
+}
+
+static const char *pp_what(unsigned bad)
+{
+    return (bad & 3u) == 3u ? "the DMA and the VOP" : bad & 1u ? "the DMA" : bad & 2u ? "the VOP" : "nothing";
+}
+
+void clock_periph_log(void (*pr)(const char *fmt, ...))
+{
+    unsigned undone = 0;
+
+    if (s_pp_base == 0xFFu) {
+        pr("periph: not run (the ROM's peripheral clocks)");
+        return;
+    }
+    if (s_pp_base) {
+        pr("periph: %s did not answer before any step: no step made", pp_what(s_pp_base));
+        return;
+    }
+    for (unsigned i = 0; i < PSTEPS; i++) {
+        if (!(s_pp_bad[i] & 4u))
+            continue;
+        undone++;
+        pr("periph: step %u '%s' stopped %s (a write not read back): undone; after the undo %s dead",
+           i, k_psteps[i].name, pp_what(s_pp_bad[i]), pp_what(s_pp_bad[i] >> 4));
+    }
+    if (s_pp_rolled)
+        pr("periph: %s dead after the last step: every step rolled back; then %s dead", pp_what(s_pp_end),
+           pp_what(s_pp_rolled & 3u));
+    pr("periph: %u steps, %u undone; dead before them: nothing; dead now: %s", (unsigned)PSTEPS, undone,
+       pp_what(periph_probe()));
 }
 
 /* ---- the operating point switch ----------------------------------------- */

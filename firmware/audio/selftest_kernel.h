@@ -41,6 +41,8 @@ enum {
     ST_B_TIMEOUT = 14,     /* core B did not finish its part in time */
     ST_B_RESUME = 15,      /* core B did not come back after the switch (a stall) */
     ST_DIED = 16,          /* a boot ended between ST_ARMED and the result (found at the next boot) */
+    ST_PERIPH = 17,        /* the boot gating (clock_periph_init) left the DMA or the VOP dead, or a boot
+                            * ended inside it (services/cpuclk.c cpuclk_prepare) */
     ST_N
 };
 

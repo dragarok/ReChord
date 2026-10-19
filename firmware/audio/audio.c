@@ -69,6 +69,7 @@ static uint32_t s_seq;
 static int s_b_up, s_dac_up, s_dma_on, s_playing, s_paused;
 static int s_usb;                    /* the output is USB audio (usb_out.h), not the jack */
 static uint32_t s_underruns, s_underrun_log;   /* B's count when last seen; ms of the last log */
+static uint32_t s_out_seen, s_out_seen_at;     /* pcm_played when last seen to move; when */
 static uint32_t s_rate, s_rate_changes;
 static audio_track_t s_tracks[AS_QUEUE];   /* titles/durations by seq, for the UI */
 static uint32_t s_rd_bps;                  /* bytes per second of the track being read (headroom) */
@@ -811,6 +812,7 @@ static int open_next(void)
             u->name[sizeof u->name - 1] = 0;
         }
         /* the CPU point it plays at (services/cpuclk.c); the FLAC point armed on the eMMC first */
+        cpuclk_prepare();                    /* (the boot gating: once, before the I2S DMA runs) */
         t.clk = cpuclk_point_for(&t, s_clk_extra, s_usb);
         if (t.clk != CLOCK_POINT_UI && cpuclk_arm() != 0)
             t.clk = CLOCK_POINT_UI;
@@ -1777,6 +1779,21 @@ void audio_poll(void)
         }
         log_printf("audio: output on, %u blocks ready, B at %u MHz%s", (unsigned)AS->pcm_wr,
                    (unsigned)(AS->b_hz / 1000000u), s_paused ? ", paused" : "");
+    }
+    /* The I2S DMA takes the blocks (pcm_played moves). Device 2026-10-19 (round4): the DMA read 0 and
+     * dropped writes; the ring stayed full, which the supervisor counts as waiting for good reason, so
+     * the player sat at 0:00 with no line in the log. One second without a block taken while the
+     * output runs and blocks wait: the channel's registers logged (all 0: the DMA does not answer), and
+     * stopped. (Not out_running(): it reads CHEN, which a dead DMA reads as 0.) */
+    if (!s_dma_on || s_paused || s_usb || AS->pcm_played == AS->pcm_wr || AS->pcm_played != s_out_seen) {
+        s_out_seen = AS->pcm_played;
+        s_out_seen_at = time_stamp(time_ms());
+    } else if (time_ms() - s_out_seen_at > 1000u) {
+        log_printf("audio: the I2S DMA took no block in 1 s (ch%u CHEN %x SAR %x DAR %x CTL %x CFG %x): stopped",
+                   (unsigned)DMA_CH, (unsigned)DMA_CHEN, (unsigned)DMA_CHR(0x00), (unsigned)DMA_CHR(0x08),
+                   (unsigned)DMA_CHR(0x18), (unsigned)DMA_CHR(0x40));
+        halt();
+        return;
     }
     /* B ended the DMA chain: once the last block has played and been recycled,
      * either the stream is over, or the next track needs another sample rate */
