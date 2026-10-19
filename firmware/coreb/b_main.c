@@ -655,7 +655,7 @@ static int produce(void)
             dst[2 * i] = dst[2 * i + 1] = dst[i];
     }
     /* the EQ (b_eq.c), in place: in bypass only this test runs */
-    if (got && (b_eq.on || AS->eq_seq != b_eq_seq || b_trk.eq != b_eq_trk)) {
+    if (got && (b_eq.on || AS->eq_seq != b_eq_seq || b_eq_dirty)) {
         uint32_t c0 = rt_cycles();
 
         b_eq_step(dst, got);

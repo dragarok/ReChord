@@ -12,7 +12,8 @@
 #include "eq.h"
 
 eq_t b_eq;
-uint32_t b_eq_seq, b_eq_trk;            /* the AS->eq_seq and b_trk.eq the engine has */
+uint32_t b_eq_seq;                      /* the AS->eq_seq the engine has */
+uint32_t b_eq_dirty;                    /* a track opened: its room (its point, its format) taken again */
 uint64_t b_eq_cyc;                      /* the track's EQ cycles (b_main.c) */
 static uint32_t s_frames;               /* the track's frames through the EQ */
 
@@ -66,11 +67,13 @@ static void said(const char *what)
               (unsigned)b_eq.rate, (unsigned)b->n, (unsigned)(b->pre_milli >= 1000 ? 999 : b->pre_milli));
 }
 
-/* the track has opened (b_main.c track_open): a stream starting at its rate */
+/* the track has opened (b_main.c track_open): a stream starting at its rate starts from zero; at the
+ * same rate (a gapless join) the next decode step takes the curve again, for this track's room */
 void b_eq_open(void)
 {
     s_frames = 0;
     b_eq_cyc = 0;
+    b_eq_dirty = 1;
     if (b_trk.rate != b_eq.rate) {
         int8_t g[EQ_BANDS];
         uint32_t seq = AS->eq_seq;
@@ -80,7 +83,7 @@ void b_eq_open(void)
         m = target(g);
         eq_restart(&b_eq, b_trk.rate, m, g);
         b_eq_seq = seq;
-        b_eq_trk = b_trk.eq;
+        b_eq_dirty = 0;
         AS->eq_ack = seq;
         if (s_mode)
             said("start");
@@ -90,7 +93,7 @@ void b_eq_open(void)
 /* a decode step's frames (stereo words), before they count as written */
 void b_eq_step(int32_t *dst, uint32_t frames)
 {
-    if (AS->eq_seq != b_eq_seq || b_trk.eq != b_eq_trk) {
+    if (AS->eq_seq != b_eq_seq || b_eq_dirty) {
         int8_t g[EQ_BANDS];
         uint32_t seq = AS->eq_seq;
         int r;
@@ -99,7 +102,7 @@ void b_eq_step(int32_t *dst, uint32_t frames)
         r = eq_set(&b_eq, target(g), g);
         if (r >= 0) {                              /* (-1: a crossfade runs; the next step asks again) */
             b_eq_seq = seq;
-            b_eq_trk = b_trk.eq;
+            b_eq_dirty = 0;
             AS->eq_ack = seq;
             if (r)
                 said("to");
