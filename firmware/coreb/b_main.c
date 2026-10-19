@@ -136,6 +136,8 @@ static uint32_t rt_since(uint32_t c0)
 
 static uint64_t s_trk_cyc;               /* decode cycles of the track open (b_trk) */
 
+uint64_t b_dec_cycles(void) { return s_trk_cyc; }   /* (b_eq.c: the EQ's room from what decoding costs) */
+
 static void cpu_idle(void)
 {
     uint32_t v0, v1, t0, t1;
@@ -654,8 +656,8 @@ static int produce(void)
         for (uint32_t i = got; i-- > 0; )
             dst[2 * i] = dst[2 * i + 1] = dst[i];
     }
-    /* the EQ (b_eq.c), in place: in bypass only this test runs */
-    if (got && (b_eq.on || AS->eq_seq != b_eq_seq || b_eq_dirty)) {
+    /* the EQ (b_eq.c), in place: with no curve set only this test runs */
+    if (got && (b_eq.on || b_eq_watch || AS->eq_seq != b_eq_seq || b_eq_dirty)) {
         uint32_t c0 = rt_cycles();
 
         b_eq_step(dst, got);
