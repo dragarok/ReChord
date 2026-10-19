@@ -62,6 +62,5 @@ int sd_bus_width(void);
 int sd_read(uint32_t lba, uint32_t count, void *buf);
 int sd_write(uint32_t lba, uint32_t count, const void *buf);
 uint32_t sd_written(void);
-int sd_bounced(void);                /* 1 once after sd_read/sd_write refused for SD_ERR_NOCARD */
 
 #endif

@@ -48,19 +48,12 @@ static uint32_t (*s_clock)(void);
 static int s_blk_err;                /* the last failed block call's answer (FS_BLK_GONE: medium gone) */
 static fs_stat_t s_stat;             /* fs_scan_stat(): the entry a scan reports */
 
-/* A block call's answer, remembered: the last error (io_err) and whether the volume's medium is
- * gone now (FS_BLK_GONE; any answer of its next call clears that: fs_target_gone). */
-static int __attribute__((noinline)) blk(const vol_t *v, int r)
+/* A block call's answer, the last error remembered (io_err). */
+static int blk(int r)
 {
     if (r)
         s_blk_err = r;
-    ((vol_t *)v)->gone = r == FS_BLK_GONE;
     return r;
-}
-
-int fs_target_gone(int idx)
-{
-    return idx >= 0 && idx < FS_VOLUMES && s_vol[idx].gone;
 }
 
 /* FS_ERR_GONE when the last block call failed because the medium went away, else FS_ERR_IO. */
@@ -74,7 +67,7 @@ int sec_flush(void)
 {
     if (s_sec_dirty) {
         s_sec_dirty = 0;
-        if (blk(s_sec_vol, s_sec_vol->wr(s_sec_vol->base + s_sec_lba, 1, s_sec))) {
+        if (blk(s_sec_vol->wr(s_sec_vol->base + s_sec_lba, 1, s_sec))) {
             s_sec_vol = NULL;
             return FS_ERR_IO;
         }
@@ -91,7 +84,7 @@ uint8_t *sector(const vol_t *v, uint32_t lba)
         if (sec_flush())
             return NULL;
         s_sec_vol = NULL;
-        if (blk(v, v->rd(v->base + lba, 1, s_sec)))
+        if (blk(v->rd(v->base + lba, 1, s_sec)))
             return NULL;
         s_sec_vol = v;
         s_sec_lba = lba;
@@ -116,7 +109,7 @@ int fat_flush(void)
 
         s_fsec_dirty = 0;
         for (uint32_t k = 0; k < v->nfats; k++)
-            if (blk(v, v->wr(v->base + s_fsec_lba + k * v->fatsz, 1, s_fsec))) {
+            if (blk(v->wr(v->base + s_fsec_lba + k * v->fatsz, 1, s_fsec))) {
                 s_fsec_vol = NULL;
                 return FS_ERR_IO;
             }
@@ -130,7 +123,7 @@ uint8_t *fat_sector(const vol_t *v, uint32_t lba)
         if (fat_flush())
             return NULL;
         s_fsec_vol = NULL;
-        if (blk(v, v->rd(v->base + lba, 1, s_fsec)))
+        if (blk(v->rd(v->base + lba, 1, s_fsec)))
             return NULL;
         s_fsec_vol = v;
         s_fsec_lba = lba;
@@ -766,8 +759,6 @@ static struct fs_file *handle_new(const vol_t *v)
         f->gen = v->gen;
         f->dlba = s_ent.dlba;
         f->doff = (uint16_t)s_ent.doff;
-        f->ecur = s_ent.lfn;
-        f->nset = s_ent.nlfn;
         return f;
     }
     return NULL;
@@ -898,21 +889,6 @@ static void stat_of(fs_stat_t *st, const ent_t *e)
     st->clus = e->clus;
     st->is_dir = (uint8_t)e->is_dir;
     st->attr = e->attr;
-}
-
-int fs_stat(const char *path, fs_stat_t *st)
-{
-    const vol_t *v;
-    int r = resolve(path, &v);
-
-    if (r < 0)
-        return r;
-    if (!st)
-        return FS_ERR_ARG;
-    if (r == 1)
-        memset(&s_ent, 0, sizeof s_ent), s_ent.is_dir = 1, s_ent.attr = 0x10;
-    stat_of(st, &s_ent);
-    return 0;
 }
 
 const fs_stat_t *fs_scan_stat(void)
@@ -1066,10 +1042,10 @@ long fs_read(fs_file_t *f, void *buf, unsigned long cap)
             f->clus = f->contig ? f->clus + 1u : fat_next(f->v, f->clus);
             f->cidx++;
             if (!f->clus)
-                return io_err();
+                goto err;
         }
         if (f->clus < 2u)
-            return FS_ERR_IO;
+            goto err;
         /* whole sectors into a word-aligned buffer: one multi-block read per run
          * of contiguous clusters (at most 64 KiB), no copy through the cache */
         if (off == 0u && !((uintptr_t)(o + n) & 3u) && cap - n >= 512u && f->size - f->pos >= 512u) {
@@ -1092,9 +1068,9 @@ long fs_read(fs_file_t *f, void *buf, unsigned long cap)
             if (secs > want)
                 secs = want;
             if (s_sec_dirty && sec_flush())  /* a writer's sector may be in range */
-                return io_err();
-            if (blk(f->v, f->v->rd(f->v->base + clus_lba(f->v, f->clus) + f->pos % cl / 512u, secs, o + n)))
-                return io_err();
+                goto err;
+            if (blk(f->v->rd(f->v->base + clus_lba(f->v, f->clus) + f->pos % cl / 512u, secs, o + n)))
+                goto err;
             n += secs * 512u;
             f->pos += secs * 512u;
             f->clus = c;
@@ -1102,7 +1078,7 @@ long fs_read(fs_file_t *f, void *buf, unsigned long cap)
             continue;
         }
         if (!(b = sector(f->v, clus_lba(f->v, f->clus) + f->pos % cl / 512u)))
-            return io_err();
+            goto err;
         k = 512u - off;
         if (k > cap - n)
             k = (uint32_t)(cap - n);
@@ -1113,6 +1089,8 @@ long fs_read(fs_file_t *f, void *buf, unsigned long cap)
         f->pos += k;
     }
     return (long)n;
+err:                                         /* what was read stands (f->pos is past it): the error */
+    return n ? (long)n : io_err();           /* comes on the next call, which starts there */
 }
 
 long fs_file_size(fs_file_t *f)
@@ -1261,7 +1239,7 @@ static fs_file_t *open_write(const char *path, int append)
                 if (x->create(v, leaf, ln, 0x20, 0) || !(f = handle_new(v)))
                     return NULL;
                 f->sum = sfn_sum(s_ent.raw);
-                f->contig = 1;               /* (exFAT: NoFatChain while it stays contiguous) */
+                x->open(f, 2);               /* (exFAT: NoFatChain while it stays contiguous) */
                 f->wr = 1;
                 return f;
             }
@@ -1380,7 +1358,7 @@ long fs_write(fs_file_t *f, const void *buf, unsigned long len)
                 s_sec_vol = NULL;            /* cached copy is stale now */
                 s_sec_dirty = 0;
             }
-            if (blk(v, v->wr(v->base + lba, secs, s + n)))
+            if (blk(v->wr(v->base + lba, secs, s + n)))
                 break;
             k = secs * 512u;
         } else {
@@ -1412,24 +1390,16 @@ long fs_write(fs_file_t *f, const void *buf, unsigned long len)
 
 /* ---- the overlay's own calls (fs_write_ext.c) ---- */
 
-/* (cold: the screenshot's error path is its only caller; FAT and exFAT in fs_write_ext.c) */
-int fs_remove(const char *path)
+/* The calls with a path only (fs_remove: the screenshot's error path is its only caller; fs_stat:
+ * the library's) run in fs_write_ext.c. */
+static int path_op(int op, const char *a, const char *b, fs_stat_t *st)
 {
     const fsx_api_t *x = fsx_api();
 
-    return x ? x->remove(path) : FS_ERR_UNSUPPORTED;
+    return x ? x->path(op, a, b, st) : FS_ERR_UNSUPPORTED;
 }
 
-int fs_mkdir(const char *path)
-{
-    const fsx_api_t *x = fsx_api();
-
-    return x ? x->mkdir(path) : FS_ERR_UNSUPPORTED;
-}
-
-int fs_rename(const char *from, const char *to)
-{
-    const fsx_api_t *x = fsx_api();
-
-    return x ? x->rename(from, to) : FS_ERR_UNSUPPORTED;
-}
+int fs_remove(const char *path) { return path_op(FSX_REMOVE, path, NULL, NULL); }
+int fs_mkdir(const char *path) { return path_op(FSX_MKDIR, path, NULL, NULL); }
+int fs_rename(const char *from, const char *to) { return path_op(FSX_RENAME, from, to, NULL); }
+int fs_stat(const char *path, fs_stat_t *st) { return path_op(FSX_STAT, path, NULL, st); }

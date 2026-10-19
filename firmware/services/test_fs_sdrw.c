@@ -6,6 +6,7 @@
  *   test_fs_sdrw IMG [--cut N] [--ro] CMD...
  *     w:PATH:SIZE:SEED:CHUNK[:MIS]  create/truncate, SIZE pattern bytes in CHUNK-byte fs_write calls
  *     a:PATH:SIZE:SEED:CHUNK[:MIS]  same, append mode
+ *     put:HOSTFILE:PATH             a real file copied in
  *     rm:PATH  ex:PATH  cat:PATH  md:PATH  mv:FROM:TO (a ':' in names: use '|' instead)
  *     st:PATH  (size, write time, attributes)    ls:PATH (every name, in order)
  *     sync     (fs_target_sync)                    busy:PATH (second write open must fail)
@@ -161,6 +162,21 @@ int main(int argc, char **argv)
             do_write(a + 2, 0);
         } else if (!strncmp(a, "a:", 2)) {
             do_write(a + 2, 1);
+        } else if (!strncmp(a, "put:", 4)) {      /* put:HOSTFILE:PATH -- a real file copied in */
+            char *host = strtok(a + 4, ":"), *path = unbar(strtok(NULL, ":"));
+            FILE *in = fopen(host, "rb");
+            fs_file_t *f = in ? fs_open_write(path) : NULL;
+            static uint32_t buf[16384];
+            size_t n, total = 0;
+            int ok = f != NULL;
+
+            while (ok && (n = fread(buf, 1, sizeof buf, in)) > 0) {
+                ok = fs_write(f, buf, n) == (long)n;
+                total += n;
+            }
+            printf("put %s %s %zu %s\n", host, path, total, ok && !fs_close(f) ? "ok" : "FAIL");
+            if (in)
+                fclose(in);
         } else if (!strncmp(a, "rm:", 3)) {
             printf("rm %s %d\n", a + 3, fs_remove(unbar(a + 3)));
         } else if (!strncmp(a, "ex:", 3)) {

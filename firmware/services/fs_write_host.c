@@ -9,13 +9,10 @@ int fsx_create(vol_t *v, const char *leaf, size_t n, uint8_t attr, uint32_t clus
 int fsx_grow(struct fs_file *f);
 int fsx_close(struct fs_file *f);
 int fsx_open(struct fs_file *f, int append);
-int fsx_remove(const char *path);
-int fsx_mkdir(const char *path);
-int fsx_rename(const char *from, const char *to);
+int fsx_path(int op, const char *a, const char *b, fs_stat_t *st);
 int fsx_clean(vol_t *v);
 
-static const fsx_api_t k_fsx = { fsx_create, fsx_grow, fsx_close, fsx_open, fsx_remove, fsx_mkdir, fsx_rename,
-                                 fsx_clean };
+static const fsx_api_t k_fsx = { fsx_create, fsx_grow, fsx_close, fsx_open, fsx_path, fsx_clean };
 
 const fsx_api_t *fsx_api(void)
 {

@@ -38,7 +38,6 @@ typedef struct {
     uint16_t mnt;                    /* +1 at every mount: the overlay's caches of it are stale */
     uint8_t xdirty;                  /* exFAT: we set VolumeDirty on the card (cleared at the last close) */
     uint8_t xbad;                    /* exFAT: its bitmap / up-case table could not be used: read-only */
-    uint8_t gone;                    /* its last block call answered FS_BLK_GONE (the medium went) */
     uint32_t bmp;                    /* exFAT: allocation bitmap's first sector (volume LBA; 0 = not found yet) */
     uint32_t upc, upc_len;           /* exFAT: up-case table's first cluster, bytes */
 } vol_t;
@@ -81,14 +80,14 @@ struct fs_file {
 };
 
 /* The overlay's entry points (fs_write_ext.c), reached through fsx_api() (NULL: refused). */
+enum { FSX_REMOVE, FSX_MKDIR, FSX_RENAME, FSX_STAT };
 typedef struct {
     int (*create)(vol_t *v, const char *leaf, size_t n, uint8_t attr, uint32_t clus);
     int (*grow)(struct fs_file *f);
     int (*close)(struct fs_file *f);
-    int (*open)(struct fs_file *f, int append);
-    int (*remove)(const char *path);
-    int (*mkdir)(const char *path);
-    int (*rename)(const char *from, const char *to);
+    int (*open)(struct fs_file *f, int mode);   /* exFAT write handle on s_ent: 0 rewrite, 1 append,
+                                                 * 2 just created (FAT: nothing to do) */
+    int (*path)(int op, const char *a, const char *b, fs_stat_t *st);   /* FSX_*: fs_remove .. fs_stat */
     int (*clean)(vol_t *v);
 } fsx_api_t;
 const fsx_api_t *fsx_api(void);

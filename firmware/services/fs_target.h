@@ -42,10 +42,6 @@ int fs_target_sync(int idx);
  * not mounted. */
 uint32_t fs_target_serial(int idx);
 
-/* 1 when the volume's last block call found its medium gone (FS_BLK_GONE): the SD card was
- * pulled and the debounce has not unmounted it yet (services/sdcard.c). */
-int fs_target_gone(int idx);
-
 /* "FAT32" / "exFAT" / "FAT16", or NULL when not mounted. */
 const char *fs_target_type(int idx);
 

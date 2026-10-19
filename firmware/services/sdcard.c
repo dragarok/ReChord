@@ -17,8 +17,8 @@
  * open on it go dead: FS_ERR_GONE until closed); one log line; SD_EV_REMOVED. While the pin says
  * "out" and the debounce has not answered yet, the driver refuses every SD command at once
  * (SD_ERR_NOCARD, no bus traffic) and the audio refill waits instead of filling zeros, so a glitch
- * on the contact shorter than the debounce costs nothing; the card is initialised again after one
- * (its supply may have dropped).
+ * on the detect contact shorter than the debounce costs nothing. (If a glitch also dropped the
+ * card's supply, its reads fail until it is pushed in again: a device question, MERGE_NOTES_sdrw.)
  */
 #include <stdio.h>
 #include <string.h>
@@ -109,11 +109,8 @@ int sdcard_tick(void)
             s_same = 0;
             return 0;
         }
-        if (in == s_state) {             /* steady; a command refused in between was a glitch: */
-            if (in && sd_bounced())      /* the card initialised again (its supply may have dropped) */
-                log_printf("sd: card-detect glitch: init %d", sd_init());
-            return 0;
-        }
+        if (in == s_state)               /* steady (a glitch between two samples: commands refused */
+            return 0;                    /* for its length, the audio waited) */
         if (++s_same < 2u)
             return 0;
     }

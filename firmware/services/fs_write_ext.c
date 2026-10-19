@@ -844,6 +844,14 @@ int fsx_open(struct fs_file *f, int append)
     vol_t *v = (vol_t *)f->v;
     uint32_t cl = clus_bytes(v);
 
+    if (v->type != T_EXFAT)
+        return 0;
+    f->ecur = s_ent.lfn;                     /* (fsx_close finds its set there) */
+    f->nset = s_ent.nlfn;
+    if (append == 2) {                       /* just created (fsx_create) */
+        f->contig = 1;
+        return 0;
+    }
     if (x_locate(v) || s_ent.size == 0xFFFFFFFFu || s_ent.nlfn < 3u)
         return FS_ERR_UNSUPPORTED;
     if (append && s_ent.size && s_ent.clus) {
@@ -947,7 +955,7 @@ int fsx_close(struct fs_file *f)
  * sector back as the cursor leaves it), then the 8.3 entry -- a cut in between leaves the file
  * under its 8.3 name -- then its chain, then FSInfo. exFAT: its set not in use any more (the
  * primary first), then its clusters free. */
-int fsx_remove(const char *path)
+static int x_remove(const char *path)
 {
     const vol_t *cv;
     vol_t *v;
@@ -989,7 +997,7 @@ int fsx_remove(const char *path)
     return x_clean(v, NULL);
 }
 
-int fsx_mkdir(const char *path)
+static int x_mkdir(const char *path)
 {
     const vol_t *cv;
     vol_t *v;
@@ -1065,7 +1073,7 @@ static int inside(const char *a, const char *b)
     return b[i] == '\0' || b[i] == '/' || b[i] == '\\';
 }
 
-int fsx_rename(const char *from, const char *to)
+static int x_rename(const char *from, const char *to)
 {
     static ent_t src;
     const vol_t *cv, *cv2;
@@ -1156,5 +1164,39 @@ int fsx_rename(const char *from, const char *to)
                 return FS_ERR_IO;
         }
         return f_create(v, (unsigned)len, src.attr, src.clus, src.size, keep);
+    }
+}
+
+static int x_stat(const char *path, fs_stat_t *st)
+{
+    const vol_t *v;
+    int r = resolve(path, &v);
+
+    if (r < 0)
+        return r;
+    if (!st)
+        return FS_ERR_ARG;
+    memset(st, 0, sizeof *st);
+    if (r == 1) {                            /* "/": the list of volumes */
+        st->is_dir = 1;
+        st->attr = 0x10;
+        return 0;
+    }
+    st->size = s_ent.size;
+    st->wtime = s_ent.wtime;
+    st->clus = s_ent.clus;
+    st->is_dir = (uint8_t)s_ent.is_dir;
+    st->attr = s_ent.attr;
+    return 0;
+}
+
+/* fs_remove, fs_mkdir, fs_rename, fs_stat (fs_target.c path_op). */
+int fsx_path(int op, const char *a, const char *b, fs_stat_t *st)
+{
+    switch (op) {
+    case FSX_REMOVE: return x_remove(a);
+    case FSX_MKDIR:  return x_mkdir(a);
+    case FSX_RENAME: return x_rename(a, b);
+    default:         return x_stat(a, st);
     }
 }

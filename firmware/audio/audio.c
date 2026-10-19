@@ -28,7 +28,6 @@
 #include "drivers/usb_out.h"
 #include "drivers/usb_msc.h"
 #include "services/fs.h"
-#include "services/fs_target.h"
 #include "services/log.h"
 #include "services/modules.h"
 #include "services/dirlist.h"
@@ -724,7 +723,7 @@ static int open_next(void)
 
         if (queue_take(&ref, &kind, &pos) != 0)
             return -1;
-        if (fs_target_gone(ref.vol))
+        if (ref.vol == 1 && !sd_present())
             return -2;                       /* the SD card is being pulled: services/sdcard.c stops us */
         if (fs_ref_name(&ref, name, sizeof name) != 0)
             strcpy(name, "?");
