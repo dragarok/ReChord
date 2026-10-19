@@ -1,0 +1,1032 @@
+/*
+ * lib_scan.c -- the walk: every folder of a volume, its playable files' tags, into a new RAW
+ * (lib_int.h: a folders file and a tracks file), reading only what changed since the last one.
+ *
+ * Change detection (docs/LIBRARY.md 2): a folder's signature is an FNV-1a over its playable files
+ * and subfolders as its directory entries describe them (name, slot, size, first cluster, and
+ * the write time when the FS layer gives it: fs_scan_wtime). A folder whose signature matches the
+ * previous walk's costs its directory sectors and nothing else: its tracks are copied as they
+ * were. In a folder that changed, a file whose name, size, first cluster and write time match a
+ * track it had is copied too; only new or changed files are opened for their tags.
+ *
+ * Order: depth first, a folder's subfolders in reverse on-disk order (a stack; the order only has
+ * to be the same each time). The previous walk's folders file is read alongside: when nothing
+ * moved, the next folder of the walk is the next record there (no lookups); otherwise the old
+ * index's folder table (by first cluster) finds it. While every folder so far matched, nothing
+ * is written ("lazy"): the first difference copies the matched prefix and the walk goes on
+ * writing; a walk with no difference ends with LIB_UNCHANGED and writes nothing at all.
+ *
+ * Every step is bounded: one directory scan, one file's tags, or records until the slice ends.
+ * A writing walk checkpoints every LIB_CKPT_TAGS files read (the stack and the counters, both
+ * files closed), so a power cut costs the tag reads since then: the next start resumes there.
+ *
+ * Scratch (32 KiB) while walking: both writers and both old readers, the tags, the batch of files
+ * being read, the previous folder's tracks (a hash table), the folder stack and its names.
+ */
+#include <stdio.h>
+#include <string.h>
+
+#define TAGS_EXT 1
+#include "tags.h"
+#include "lib_int.h"
+#include "dirlist.h"
+#include "audio/mp3_info.h"
+#include "audio/ape_info.h"
+
+#define S8          ((uint8_t *)lib_scratch)             /* (its first LIB_JOB_SCRATCH bytes) */
+#define W_FBUF      (S8 + 0)                              /* the folders writer: 1024 */
+#define W_TBUF      (S8 + 1024)                           /* the tracks writer: 2048 */
+#define W_OFBUF     (S8 + 3072)                           /* the old folders reader: 1024 */
+#define W_OTBUF     (S8 + 4096)                           /* the old tracks reader: 1536 */
+#define W_TAGS      ((tag_info_t *)(void *)(S8 + 5632))  /* 1100 */
+#define W_BATCH     ((lib_bent_t *)(void *)(S8 + 6784))
+#define W_NBATCH    64u                                   /* x 32 */
+#define W_BPOOL     (S8 + 8832)
+#define W_BPOOLCAP  1920u
+#define W_MATCH     ((lib_match_t *)(void *)(S8 + 10752))
+#define W_NMATCH    384u                                  /* x 16 */
+#define W_PEND      ((lib_pend_t *)(void *)(S8 + 16896))  /* LIB_PEND x 32 */
+#define W_NAMES     (S8 + 16896 + LIB_PEND * 32u)
+#define W_NAMESCAP  (27392u - 16896u - LIB_PEND * 32u)
+#define W_CURNAME   ((char *)(S8 + 27392))                /* 256 */
+#define W_MP3       ((mp3_info_t *)(void *)(S8 + 27648))  /* <= 1024, to LIB_JOB_SCRATCH */
+
+#define LIB_CKPT_TAGS 256u
+#define NAME_ASK 0xFFFEu                 /* a pending folder whose name did not fit: fs_ref_name */
+#define CONT     0xFFFFu                 /* a continuation: more subfolders of folder `parent` */
+#define F_FIX    44u                     /* a folder record without its name */
+
+typedef struct {
+    fs_ref_t ref;
+    uint32_t nh, wt;
+    uint16_t name;
+    uint8_t nlen, kind;
+} lib_bent_t;
+
+typedef struct {
+    uint32_t nh, clus, size, off;    /* off: the old 'T' record + 1 in the old tracks file, 0 = free */
+} lib_match_t;
+
+enum { WS_POP, WS_SIG, WS_PREFIX, WS_DECIDE, WS_COPY, WS_MATCH, WS_BATCH, WS_FILES, WS_FEND, WS_CONT,
+       WS_END, WS_DONE };
+
+extern uint32_t fs_scan_wtime(void) __attribute__((weak));   /* sdrw: the entry's write time */
+
+static uint32_t wtime(void)
+{
+    return fs_scan_wtime ? fs_scan_wtime() : 0u;
+}
+
+static uint32_t name_hash(const char *s, uint32_t n)
+{
+    uint32_t h = LIB_FNV0;
+
+    for (uint32_t i = 0; i < n; i++) {   /* (case folded: FAT matches names that way) */
+        uint8_t c = (uint8_t)s[i];
+
+        h = (h ^ (c >= 'A' && c <= 'Z' ? c + 32u : c)) * 16777619u;
+    }
+    return h;
+}
+
+/* ---- records ---- */
+
+static void rec_hdr(lw_t *w, int type, uint32_t len)
+{
+    lw_u8(w, (uint32_t)type);
+    lw_u8(w, 0);
+    lw_u16(w, len);
+}
+
+static uint32_t cut(const char *s, uint32_t cap)
+{
+    uint32_t n = (uint32_t)strlen(s);
+
+    if (n > cap) {                       /* at a character boundary */
+        n = cap;
+        while (n && ((uint8_t)s[n] & 0xC0u) == 0x80u)
+            n--;
+    }
+    return n;
+}
+
+static void put_str(lw_t *w, const char *s, uint32_t cap)
+{
+    uint32_t n = cut(s, cap);
+
+    lw_u8(w, n);
+    lw_put(w, s, n);
+}
+
+static void write_folder(lib_job_t *j)
+{
+    lib_cur_t *c = &j->cur;
+
+    rec_hdr(&j->raw, LIB_RAW_F, F_FIX + 1u + c->nlen);
+    lw_u32(&j->raw, c->ref.clus);
+    lw_u32(&j->raw, c->ref.size);
+    lw_u32(&j->raw, c->ref.pclus);
+    lw_u32(&j->raw, c->ref.psize);
+    lw_u16(&j->raw, c->ref.slot);
+    lw_u8(&j->raw, c->ref.flags);
+    lw_u8(&j->raw, c->depth);
+    lw_u32(&j->raw, c->sig);
+    lw_u32(&j->raw, c->parent);
+    lw_u32(&j->raw, c->toff);
+    lw_u32(&j->raw, c->tcount);
+    lw_u32(&j->raw, j->trk.pos - c->toff);
+    lw_u8(&j->raw, c->nlen);
+    lw_put(&j->raw, W_CURNAME, c->nlen);
+}
+
+/* ---- the stack ---- */
+
+/* 1 pushed, 0 left out for good (too deep), -1 no room (a continuation will take it) */
+static int push(lib_job_t *j, const char *name, const fs_ref_t *r, uint32_t limit)
+{
+    lib_pend_t *e;
+    uint32_t n = (uint32_t)strlen(name);
+
+    if (j->cur.depth + 1u > LIB_DEPTH) {
+        j->warn |= LIBW_DEPTH;
+        return 0;
+    }
+    if (j->sp >= limit)
+        return -1;
+    e = &W_PEND[j->sp++];
+    e->ref = *r;
+    e->parent = j->cur.idx;
+    e->cont = 0;
+    e->depth = (uint8_t)(j->cur.depth + 1u);
+    e->name = (uint16_t)j->names;
+    if (n > 255u || j->names + n > W_NAMESCAP) {
+        e->nlen = NAME_ASK;              /* (asked of the FS when it is visited) */
+        j->warn |= LIBW_NAMES;
+    } else {
+        e->nlen = (uint16_t)n;
+        memcpy(W_NAMES + j->names, name, n);
+        j->names += n;
+    }
+    return 1;
+}
+
+/* this scan's pushes start at base: more subfolders after `slot` wait in a continuation below them */
+static void push_cont(lib_job_t *j, uint32_t base, int32_t slot)
+{
+    lib_pend_t *e;
+    uint16_t names = base < j->sp ? W_PEND[base].name : (uint16_t)j->names;
+
+    memmove(&W_PEND[base + 1u], &W_PEND[base], (j->sp - base) * sizeof(lib_pend_t));
+    j->sp++;
+    e = &W_PEND[base];
+    memset(e, 0, sizeof *e);
+    e->ref = j->cur.ref;
+    e->parent = j->cur.idx;
+    e->name = names;                     /* (the name stack's top once those above are gone) */
+    e->nlen = CONT;
+    e->cont = (uint16_t)(slot < 0 ? 0xFFFFu : (uint32_t)slot);
+    e->depth = j->cur.depth;
+    e->pad = j->cur.root;
+}
+
+/* ---- directory scans ---- */
+
+static int skipped(const lib_job_t *j, const char *name)
+{
+    static const char *const k_skip[] = { "RECHORD", "System Volume Information", "$RECYCLE.BIN", 0 };
+
+    if (name[0] == '.')
+        return 1;                        /* .Trashes, .Spotlight-V100, macOS "._" files */
+    if (j->cur.depth == 0)
+        for (int i = 0; k_skip[i]; i++) {
+            const char *a = name, *b = k_skip[i];
+
+            while (*a && (*a | 0x20) == (*b | 0x20))
+                a++, b++;
+            if (!*a && !*b)
+                return 1;
+        }
+    return 0;
+}
+
+typedef struct {
+    lib_job_t *j;
+    uint32_t base, pushed, limit;
+    int32_t last;                    /* the last pushed subfolder's slot */
+    int cont, more;                  /* a continuation's scan; subfolders left for a continuation */
+} scan_t;
+
+static int sig_cb(void *u, const char *name, const fs_ref_t *r)
+{
+    scan_t *s = u;
+    lib_job_t *j = s->j;
+    lib_cur_t *c = &j->cur;
+    int dir = (r->flags & FS_REF_DIR) != 0, kind = dir ? 0 : dirlist_kind(name);
+    uint32_t v[4];
+
+    if (c->root && !c->ref.clus) {
+        c->ref.clus = r->pclus;          /* the root's own cluster, from its first entry */
+        c->ref.size = r->psize;
+        c->ref.flags = (uint8_t)(FS_REF_DIR | (r->flags & FS_REF_PCONTIG ? FS_REF_CONTIG : 0));
+    }
+    if ((!dir && !kind) || skipped(j, name))
+        return 0;
+    if (!s->cont) {
+        v[0] = (uint32_t)dir | (uint32_t)r->slot << 8;
+        v[1] = dir ? 0u : r->size;
+        v[2] = r->clus;
+        v[3] = wtime();
+        c->sig = lib_fnv(lib_fnv(c->sig, name, (uint32_t)strlen(name) + 1u), v, sizeof v);
+        if (kind)
+            c->nfiles++;
+    }
+    if (dir && !s->more && (!s->cont || c->cont_slot < 0 || r->slot > (uint32_t)c->cont_slot)) {
+        int p = s->pushed < LIB_SUBS_MAX ? push(j, name, r, s->limit) : -1;
+
+        if (p < 0)
+            s->more = 1;                 /* the rest: a continuation */
+        else if (p > 0) {
+            s->pushed++;
+            s->last = (int32_t)r->slot;
+        }
+        if (s->more && s->cont)
+            return 1;                    /* (no signature to finish) */
+    }
+    return 0;
+}
+
+static int scan_dir(lib_job_t *j, fs_scan_cb cb, void *u)
+{
+    if (j->cur.root)
+        return fs_scan(j->root, cb, u);
+    return fs_scan_ref(&j->cur.ref, cb, u);
+}
+
+/* the next batch of playable files after last_slot */
+typedef struct {
+    lib_job_t *j;
+    int any;
+} batch_t;
+
+static int batch_cb(void *u, const char *name, const fs_ref_t *r)
+{
+    batch_t *b = u;
+    lib_job_t *j = b->j;
+    lib_bent_t *e;
+    uint32_t n = (uint32_t)strlen(name);
+    int kind;
+
+    if ((r->flags & FS_REF_DIR) || !(kind = dirlist_kind(name)) || skipped(j, name))
+        return 0;
+    if (b->any && r->slot <= j->cur.last_slot)
+        return 0;
+    if (j->nbatch == W_NBATCH || j->bpool + n > W_BPOOLCAP || n > 255u)
+        return j->nbatch > 0;            /* full: the rest in the next batch */
+    e = &W_BATCH[j->nbatch++];
+    e->ref = *r;
+    e->nh = name_hash(name, n);
+    e->wt = wtime();
+    e->name = (uint16_t)j->bpool;
+    e->nlen = (uint8_t)n;
+    e->kind = (uint8_t)kind;
+    memcpy(W_BPOOL + j->bpool, name, n);
+    j->bpool += n;
+    return 0;
+}
+
+/* ---- the previous walk ---- */
+
+/* The record at the old folders cursor, past checkpoints; NULL at its end. *at: its offset. */
+static const uint8_t *old_next(lib_job_t *j, uint32_t *at)
+{
+    for (;;) {
+        const uint8_t *p;
+        uint32_t len;
+
+        *at = lr_tell(&j->old);
+        if (!(p = lr_peek(&j->old, 4)) || p[0] == LIB_RAW_E || (len = lib_le16(p + 2)) < 4u)
+            return 0;
+        if (p[0] == LIB_RAW_C) {
+            lr_seek(&j->old, *at + len); /* (a checkpoint: bigger than the buffer, never read) */
+            continue;
+        }
+        if (!(p = lr_peek(&j->old, len)))
+            return 0;
+        j->old.i += len;
+        return p;
+    }
+}
+
+int idx_folder_find(int vol, uint32_t clus, uint32_t *raw_off);   /* lib_idx.c */
+
+/* The previous walk's record of this folder: at the cursor (the usual case), else from the old
+ * index's folder table. Found: the cursor after it; not found: the cursor where it was. */
+static void old_find(lib_job_t *j)
+{
+    lib_cur_t *c = &j->cur;
+    uint32_t at, off;
+    const uint8_t *p;
+
+    c->old = c->at_cursor = 0;
+    if (!j->old_ok)
+        return;
+    c->before = lr_tell(&j->old);
+    p = old_next(j, &at);
+    if (p && p[0] == LIB_RAW_F && lib_le32(p + 4) == c->ref.clus && (c->root ? p[23] == 0 : p[23] != 0)) {
+        c->at_cursor = 1;
+    } else {
+        if (c->root || idx_folder_find(j->vol, c->ref.clus, &off) != 0) {
+            lr_seek(&j->old, c->before);
+            return;
+        }
+        lr_seek(&j->old, off);
+        p = old_next(j, &at);
+        if (!p || p[0] != LIB_RAW_F || lib_le32(p + 4) != c->ref.clus) {
+            lr_seek(&j->old, c->before);
+            return;
+        }
+    }
+    c->old = 1;
+    c->old_off = at;
+    c->old_sig = lib_le32(p + 24);
+    c->old_toff = lib_le32(p + 32);
+    c->tcount = lib_le32(p + 36);        /* (the old count: what a copy brings) */
+    c->old_tlen = lib_le32(p + 40);
+}
+
+/* ---- tags ---- */
+
+static uint32_t rd_at(void *u, uint32_t off, void *buf, uint32_t n)
+{
+    long got;
+
+    if (fs_seek((fs_file_t *)u, (long)off) < 0)
+        return 0;
+    got = fs_read((fs_file_t *)u, buf, n);
+    return got > 0 ? (uint32_t)got : 0u;
+}
+
+static int tag_kind(int k)
+{
+    switch (k) {
+    case DL_FLAC: return TAGS_FLAC;
+    case DL_WAV:  return TAGS_WAV;
+    case DL_M4A:  return TAGS_MP4;
+    case DL_OGG:
+    case DL_OPUS: return TAGS_OGG;
+    case DL_WMA:  return TAGS_WMA;
+    case DL_DSF:  return TAGS_DSF;
+    case DL_AIFF: return TAGS_AIFF;
+    case DL_WV:   return TAGS_WV;
+    case DL_APE:  return TAGS_APE;
+    case DL_DFF:  return -1;
+    default:      return TAGS_MP3;
+    }
+}
+
+static void read_tags(lib_job_t *j, const lib_bent_t *e, tag_info_t *t)
+{
+    fs_file_t *f = fs_open_ref(&e->ref);
+    int k = tag_kind(e->kind);
+
+    memset(t, 0, sizeof *t);
+    j->read_tags++;
+    j->since_ckpt++;
+    if (!f)
+        return;
+    if (k >= 0)
+        tags_read_ext(rd_at, f, e->ref.size, k, t);
+    if (!t->dur_ms && e->kind == DL_MP3) {
+        mp3_info_t *mi = W_MP3;
+
+        if (mp3_info(rd_at, f, e->ref.size, mi) == 0 && mi->rate) {
+            if (mi->frames)
+                t->dur_ms = (uint32_t)((uint64_t)mi->frames * 1000u / mi->rate);
+            else if (mi->bitrate)
+                t->dur_ms = (uint32_t)((uint64_t)(mi->data_end - mi->data_off) * 8u / mi->bitrate);
+        }
+    } else if (!t->dur_ms && e->kind == DL_APE) {
+        ape_info_t ai;
+
+        if (ape_info(rd_at, f, e->ref.size, &ai) == 0 && ai.rate)
+            t->dur_ms = (uint32_t)((uint64_t)ai.samples * 1000u / ai.rate);
+    }
+    fs_close(f);
+}
+
+/* A track record for e: from its tags, the file name standing in for a missing title (and its
+ * leading number for a missing track number), the folder's name for a missing album. */
+static void write_track(lib_job_t *j, const lib_bent_t *e, tag_info_t *t)
+{
+    char fn[256];
+    uint32_t len;
+
+    memcpy(fn, W_BPOOL + e->name, e->nlen);
+    fn[e->nlen] = 0;
+    if (!t->title[0]) {
+        char *dot = strrchr(fn, '.');
+
+        if (dot && dot != fn)
+            *dot = 0;
+        memcpy(t->title, fn, strlen(fn) + 1u);
+    }
+    if (!t->track) {
+        uint32_t n = 0, d = 0;
+
+        while (d < 3u && fn[d] >= '0' && fn[d] <= '9')
+            n = n * 10u + (uint32_t)(fn[d++] - '0');
+        if (d && (fn[d] == ' ' || fn[d] == '.' || fn[d] == '-' || fn[d] == '_'))
+            t->track = (uint16_t)n;
+    }
+    if (!t->album[0] && !j->cur.root) {
+        memcpy(t->album, W_CURNAME, j->cur.nlen);
+        t->album[j->cur.nlen] = 0;
+    }
+    len = 32u + 5u + cut(t->title, 255) + cut(t->artist, 255) + cut(t->album, 255) + cut(t->aartist, 255) +
+          cut(t->genre, 63);
+    rec_hdr(&j->trk, LIB_RAW_T, len);
+    lw_u32(&j->trk, e->nh);
+    lw_u32(&j->trk, e->ref.clus);
+    lw_u32(&j->trk, e->ref.size);
+    lw_u32(&j->trk, e->wt);
+    lw_u16(&j->trk, e->ref.slot);
+    lw_u8(&j->trk, e->ref.flags);
+    lw_u8(&j->trk, e->kind);
+    lw_u16(&j->trk, t->track);
+    lw_u8(&j->trk, t->disc);
+    lw_u8(&j->trk, 0);
+    lw_u16(&j->trk, t->year);
+    lw_u16(&j->trk, t->dur_ms / 1000u > 0xFFFFu ? 0xFFFFu : t->dur_ms / 1000u);
+    put_str(&j->trk, t->title, 255);
+    put_str(&j->trk, t->artist, 255);
+    put_str(&j->trk, t->album, 255);
+    put_str(&j->trk, t->aartist, 255);
+    put_str(&j->trk, t->genre, 63);
+    j->ntracks++;
+    j->cur.tcount++;
+}
+
+/* ---- matching a changed folder's files against the tracks it had ---- */
+
+static lib_match_t *match_slot(uint32_t nh, uint32_t clus)
+{
+    uint32_t i = (nh ^ clus * 2654435761u) % W_NMATCH;
+
+    for (uint32_t k = 0; k < W_NMATCH; k++, i = (i + 1u) % W_NMATCH) {
+        lib_match_t *m = &W_MATCH[i];
+
+        if (!m->off || (m->nh == nh && m->clus == clus))
+            return m;
+    }
+    return 0;
+}
+
+/* ---- files ---- */
+
+static void raw_path(char *p, int n, const char *dir, const char *base, int t, int slot)
+{
+    snprintf(p, (unsigned)n, "%s/%s.R%c%c", dir, base, t ? 'T' : 'W', 'A' + slot);
+}
+
+static int open_writers(lib_job_t *j, int append)
+{
+    char p[48];
+
+    raw_path(p, sizeof p, j->dir, j->base, 0, j->slot);
+    if (lw_open(&j->raw, p, W_FBUF, 1024u, append))
+        return -1;
+    raw_path(p, sizeof p, j->dir, j->base, 1, j->slot);
+    if (lw_open(&j->trk, p, W_TBUF, 2048u, append)) {
+        lw_abort(&j->raw);
+        return -1;
+    }
+    return 0;
+}
+
+/* ---- checkpoints ---- */
+
+static void ckpt_write(lib_job_t *j)
+{
+    lib_ckpt_hdr_t h;
+    uint32_t len = 4u + (uint32_t)sizeof h + j->sp * (uint32_t)sizeof(lib_pend_t) + j->names + 8u;
+    uint32_t fcrc, tcrc;
+    int e;
+
+    memset(&h, 0, sizeof h);
+    h.seq = j->seq;
+    h.nfolders = j->nfolders;
+    h.ntracks = j->ntracks;
+    h.old_off = j->old_ok ? lr_tell(&j->old) : 0u;
+    h.crc = j->raw.crc;
+    h.tsize = j->trk.pos;
+    h.tcrc = j->trk.crc;
+    h.read_tags = j->read_tags;
+    h.root_sig = j->root_sig;
+    h.sp = (uint16_t)j->sp;
+    h.names = (uint16_t)j->names;
+    rec_hdr(&j->raw, LIB_RAW_C, len);
+    lw_put(&j->raw, &h, sizeof h);
+    lw_put(&j->raw, W_PEND, j->sp * (uint32_t)sizeof(lib_pend_t));
+    lw_put(&j->raw, W_NAMES, j->names);
+    lw_u32(&j->raw, len);
+    lw_u32(&j->raw, LIB_CKPT_MAGIC);
+    fcrc = j->raw.crc;
+    tcrc = j->trk.crc;
+    e = lw_close(&j->trk);               /* (the tracks first: the checkpoint names their size) */
+    e |= lw_close(&j->raw);
+    if (e || open_writers(j, 1)) {
+        j->raw.err = FS_ERR_IO;
+        return;
+    }
+    j->raw.crc = fcrc;
+    j->trk.crc = tcrc;
+    j->since_ckpt = 0;
+    lib_log("lib: %s checkpoint: %u folders, %u tracks, %u read", j->base, (unsigned)j->nfolders,
+            (unsigned)j->ntracks, (unsigned)j->read_tags);
+}
+
+/* A walk of this seq cut short (power): its last checkpoint. 1 = resumed, 0 = start afresh. */
+static int ckpt_resume(lib_job_t *j)
+{
+    lib_ckpt_hdr_t h;
+    lr_t r;
+    uint8_t t[8];
+    uint32_t size, len;
+    char p[48];
+    int ok = 0;
+
+    raw_path(p, sizeof p, j->dir, j->base, 0, j->slot);
+    if (lr_open(&r, p, W_OFBUF, 1024u))
+        return 0;
+    size = r.end;
+    if (size < 12u + sizeof h)
+        goto out;
+    lr_seek(&r, size - 8u);
+    if (lr_get(&r, t, 8) || lib_le32(t + 4) != LIB_CKPT_MAGIC || (len = lib_le32(t)) > size || len < 12u + sizeof h)
+        goto out;
+    lr_seek(&r, size - len + 4u);
+    if (lr_get(&r, &h, sizeof h) || h.seq != j->seq || h.sp > LIB_PEND || h.names > W_NAMESCAP ||
+        len != 12u + sizeof h + h.sp * (uint32_t)sizeof(lib_pend_t) + h.names ||
+        lr_get(&r, W_PEND, h.sp * (uint32_t)sizeof(lib_pend_t)) || lr_get(&r, W_NAMES, h.names))
+        goto out;
+    lr_close(&r);
+    raw_path(p, sizeof p, j->dir, j->base, 1, j->slot);
+    if (lr_open(&r, p, W_OTBUF, 1536u))
+        return 0;
+    if (r.end != h.tsize)                /* (its tracks file is not the one it named) */
+        goto out;
+    j->nfolders = h.nfolders;
+    j->ntracks = h.ntracks;
+    j->read_tags = h.read_tags;
+    j->root_sig = h.root_sig;
+    j->sp = h.sp;
+    j->names = h.names;
+    {   /* the CRC so far: up to the checkpoint, then the checkpoint record itself */
+        uint8_t hd[4] = { LIB_RAW_C, 0, 0, 0 };
+        uint32_t crc = h.crc;
+
+        lib_put16(hd + 2, len);
+        crc = lib_crc(crc, hd, 4);
+        crc = lib_crc(crc, &h, sizeof h);
+        crc = lib_crc(crc, W_PEND, h.sp * (uint32_t)sizeof(lib_pend_t));
+        crc = lib_crc(crc, W_NAMES, h.names);
+        j->raw.crc = lib_crc(crc, t, 8);
+        j->trk.crc = h.tcrc;
+    }
+    if (j->old_ok && h.old_off)
+        lr_seek(&j->old, h.old_off);
+    ok = 1;
+out:
+    lr_close(&r);
+    return ok;
+}
+
+/* The walk of this seq ended before a power cut, the build did not: 1, its counts restored. */
+static int raw_whole(lib_job_t *j)
+{
+    lib_rawend_t e;
+    lr_t r;
+    uint8_t t[8];
+    uint32_t size;
+    char p[48];
+    int ok = 0;
+
+    raw_path(p, sizeof p, j->dir, j->base, 0, j->slot);
+    if (lr_open(&r, p, W_OFBUF, 1024u))
+        return 0;
+    size = r.end;
+    lr_seek(&r, size >= 8u ? size - 8u : 0u);
+    if (size >= 40u && lr_get(&r, t, 8) == 0 && lib_le32(t + 4) == LIB_END_MAGIC && lib_le32(t) == 40u) {
+        lr_seek(&r, size - 36u);
+        if (lr_get(&r, &e, sizeof e) == 0 && e.seq == j->seq) {
+            lr_close(&r);
+            raw_path(p, sizeof p, j->dir, j->base, 1, j->slot);
+            if (lr_open(&r, p, W_OTBUF, 1536u))
+                return 0;
+            if (r.end == e.tsize) {
+                j->raw.pos = size;
+                j->raw_end_crc = e.crc;
+                j->trk.pos = e.tsize;
+                j->nfolders = e.nfolders;
+                j->ntracks = e.ntracks;
+                j->root_sig = e.root_sig;
+                ok = 1;
+            }
+        }
+    }
+    lr_close(&r);
+    return ok;
+}
+
+/* ---- the walk ---- */
+
+static void scan_close(lib_job_t *j);
+
+int scan_start(lib_job_t *j)
+{
+    char p[48];
+    lib_view_t *v = &g_lib_view[j->vol];
+    int resumed = 0;
+
+    j->nfolders = j->ntracks = j->read_tags = j->reused = j->copied = j->since_ckpt = 0;
+    j->sp = j->names = 0;
+    j->warn = 0;
+    j->old_ok = 0;
+    j->t_sync = 0;
+    if (!j->full && v->ok) {             /* the previous walk, to compare with and copy from */
+        raw_path(p, sizeof p, v->dir, v->base, 0, v->slot);
+        if (lr_open(&j->old, p, W_OFBUF, 1024u) == 0) {
+            raw_path(p, sizeof p, v->dir, v->base, 1, v->slot);
+            if (j->old.end == v->tr.raw_size && lr_open(&j->otrk, p, W_OTBUF, 1536u) == 0) {
+                if (j->otrk.end == v->tr.trk_size)
+                    j->old_ok = 1;
+                else
+                    lr_close(&j->otrk);
+            }
+            if (!j->old_ok)
+                lr_close(&j->old);
+        }
+    }
+    if (!j->full && raw_whole(j)) {      /* cut short in the build: the walk is done */
+        scan_close(j);
+        lib_log("lib: %s build resumed: the walk of seq %u was whole", j->base, (unsigned)j->seq);
+        return LIB_WALKED;
+    }
+    if (!j->full)
+        resumed = ckpt_resume(j);
+    j->reads0 = j->read_tags;
+    j->lazy = j->old_ok && !resumed;
+    if (!j->lazy) {
+        uint32_t fc = j->raw.crc, tc = j->trk.crc;
+
+        if (open_writers(j, resumed)) {
+            if (j->old_ok)
+                lr_close(&j->old), lr_close(&j->otrk);
+            return -1;
+        }
+        if (resumed) {
+            j->raw.crc = fc;
+            j->trk.crc = tc;
+        }
+    }
+    if (resumed) {
+        j->wst = WS_POP;
+        lib_log("lib: %s walk resumed: %u folders, %u tracks so far, %u to visit", j->base,
+                (unsigned)j->nfolders, (unsigned)j->ntracks, (unsigned)j->sp);
+        return 0;
+    }
+    memset(&j->cur, 0, sizeof j->cur);
+    j->cur.root = 1;
+    j->wst = WS_SIG;
+    return 0;
+}
+
+static void scan_close(lib_job_t *j)
+{
+    if (j->old_ok) {
+        lr_close(&j->old);
+        lr_close(&j->otrk);
+    }
+    j->old_ok = 0;
+}
+
+/* Leave the lazy walk at the first difference: what matched so far is copied, then it writes. */
+static int unlazy(lib_job_t *j, uint32_t fend, int next)
+{
+    j->lazy = 0;
+    j->pfx = j->tpfx = 0;
+    j->pfx_end = fend;
+    j->tpfx_end = j->t_sync;
+    j->wnext = (uint32_t)next;
+    if (open_writers(j, 0))
+        return -1;
+    j->wst = WS_PREFIX;
+    return 0;
+}
+
+/* Copy the old tracks file from *off to end into the new one, a slice at a time: 1 when done. */
+static int copy_trk(lib_job_t *j, uint32_t *off, uint32_t end, uint64_t t_end)
+{
+    while (*off < end) {
+        uint32_t k = end - *off < 1024u ? end - *off : 1024u;
+        const uint8_t *p;
+
+        lr_seek(&j->otrk, *off);
+        if (!(p = lr_peek(&j->otrk, k)))
+            return -1;
+        lw_put(&j->trk, p, k);
+        *off += k;
+        if (lib_now_us() >= t_end)
+            return *off >= end;
+    }
+    return 1;
+}
+
+int scan_step(lib_job_t *j, uint64_t t_end)
+{
+    lib_cur_t *c = &j->cur;
+
+    while (lib_now_us() < t_end) {
+        if (j->raw.err || j->trk.err) {
+            scan_abort(j);
+            return -1;
+        }
+        switch (j->wst) {
+        case WS_POP: {
+            lib_pend_t *e;
+
+            if (!j->lazy && j->since_ckpt >= LIB_CKPT_TAGS) {
+                ckpt_write(j);
+                return 0;                /* (a slice of its own) */
+            }
+            if (!j->sp) {
+                j->wst = WS_END;
+                break;
+            }
+            e = &W_PEND[--j->sp];
+            memset(c, 0, sizeof *c);
+            c->ref = e->ref;
+            c->depth = e->depth;
+            j->names = e->name;
+            if (e->nlen == CONT) {       /* more subfolders of a folder already visited */
+                c->idx = e->parent;
+                c->root = e->pad;
+                c->cont = 1;
+                c->cont_slot = e->cont == 0xFFFFu ? -1 : (int32_t)e->cont;
+                j->wst = WS_CONT;
+                break;
+            }
+            if (e->nlen == NAME_ASK) {
+                if (fs_ref_name(&c->ref, W_CURNAME, 256) != 0)
+                    break;               /* (gone since: skip it) */
+                c->nlen = (uint16_t)cut(W_CURNAME, 255);
+            } else {
+                c->nlen = e->nlen;
+                memcpy(W_CURNAME, W_NAMES + e->name, e->nlen);
+            }
+            c->parent = e->parent;
+            j->wst = WS_SIG;
+            break;
+        }
+        case WS_SIG: {                    /* one directory scan */
+            scan_t s;
+
+            c->idx = j->nfolders;
+            c->sig = LIB_FNV0;
+            memset(&s, 0, sizeof s);
+            s.j = j;
+            s.base = j->sp;
+            s.last = -1;
+            s.limit = LIB_PEND - 2u;
+            if (scan_dir(j, sig_cb, &s) < 0) {
+                if (c->root)
+                    return -2;           /* the volume itself: gone */
+                j->sp = s.base;          /* (a folder that vanished: skip it) */
+                j->wst = WS_POP;
+                break;
+            }
+            if (s.more)
+                push_cont(j, s.base, s.last);
+            if (c->root)
+                j->root_sig = c->sig;
+            j->nfolders++;
+            old_find(j);
+            if (j->lazy) {
+                if (c->old && c->at_cursor && c->sig == c->old_sig) {
+                    j->ntracks += c->tcount;     /* the same as last time: nothing to write */
+                    j->copied += c->tcount;
+                    j->t_sync = c->old_toff + c->old_tlen;
+                    j->wst = WS_POP;
+                    break;
+                }
+                if (unlazy(j, c->before, WS_DECIDE))
+                    return -1;
+                break;
+            }
+            j->wst = WS_DECIDE;
+            break;
+        }
+        case WS_PREFIX: {                 /* the matched folders' records, then their tracks */
+            uint32_t at;
+            const uint8_t *p;
+
+            if (j->pfx < j->pfx_end) {
+                lr_seek(&j->old, j->pfx);
+                if (!(p = old_next(j, &at)) || at >= j->pfx_end) {
+                    j->pfx = j->pfx_end;
+                    break;
+                }
+                lw_put(&j->raw, p, lib_le16(p + 2));
+                j->pfx = lr_tell(&j->old);
+                break;
+            }
+            {
+                int r = copy_trk(j, &j->tpfx, j->tpfx_end, t_end);
+
+                if (r < 0)
+                    return -1;
+                if (!r)
+                    return 0;
+            }
+            if (j->wnext == WS_DECIDE && c->old)  /* the old cursor where this folder left it */
+                lr_seek(&j->old, c->old_off), old_next(j, &at);
+            else if (j->wnext == WS_DECIDE)
+                lr_seek(&j->old, c->before);
+            j->wst = (int)j->wnext;
+            break;
+        }
+        case WS_DECIDE:
+            c->toff = j->trk.pos;
+            j->pfx = c->old_toff;
+            if (c->old && c->old_sig == c->sig) {
+                j->wst = WS_COPY;
+            } else {
+                c->tcount = 0;
+                j->nmatch = 0;
+                memset(W_MATCH, 0, W_NMATCH * sizeof(lib_match_t));
+                c->last_slot = 0;
+                c->done_files = 0;
+                j->wst = c->old ? WS_MATCH : c->nfiles ? WS_BATCH : WS_FEND;
+            }
+            break;
+        case WS_COPY: {                   /* an unchanged folder: its tracks as they were */
+            int r = copy_trk(j, &j->pfx, c->old_toff + c->old_tlen, t_end);
+
+            if (r < 0)
+                return -1;
+            if (!r)
+                return 0;
+            j->ntracks += c->tcount;
+            j->copied += c->tcount;
+            j->wst = WS_FEND;
+            break;
+        }
+        case WS_MATCH: {                  /* a changed folder: what it had, to match file by file */
+            const uint8_t *p;
+            lib_match_t *m;
+
+            if (j->pfx >= c->old_toff + c->old_tlen) {
+                j->wst = c->nfiles ? WS_BATCH : WS_FEND;
+                break;
+            }
+            lr_seek(&j->otrk, j->pfx);
+            if (!(p = lr_rec(&j->otrk)) || p[0] != LIB_RAW_T) {
+                j->pfx = c->old_toff + c->old_tlen;
+                break;
+            }
+            if (j->nmatch < W_NMATCH * 3u / 4u && (m = match_slot(lib_le32(p + 4), lib_le32(p + 8))) && !m->off) {
+                m->nh = lib_le32(p + 4);
+                m->clus = lib_le32(p + 8);
+                m->size = lib_le32(p + 12);
+                m->off = j->pfx + 1u;
+                j->nmatch++;
+            }
+            j->pfx += lib_le16(p + 2);
+            break;
+        }
+        case WS_BATCH: {                  /* one directory scan: the next files to read */
+            batch_t b;
+
+            j->nbatch = j->bi = j->bpool = 0;
+            b.j = j;
+            b.any = c->done_files;
+            if (scan_dir(j, batch_cb, &b) < 0 || !j->nbatch) {
+                j->wst = WS_FEND;
+                break;
+            }
+            j->wst = WS_FILES;
+            break;
+        }
+        case WS_FILES: {                  /* one file: copied, or its tags read */
+            lib_bent_t *e = &W_BATCH[j->bi];
+            lib_match_t *m = j->nmatch ? match_slot(e->nh, e->ref.clus) : 0;
+            int reused = 0;
+
+            if (m && m->off && m->size == e->ref.size) {
+                const uint8_t *p;
+
+                lr_seek(&j->otrk, m->off - 1u);
+                p = lr_rec(&j->otrk);
+                if (p && p[0] == LIB_RAW_T && lib_le32(p + 16) == e->wt) {
+                    uint8_t hd[24];
+
+                    memcpy(hd, p, sizeof hd);
+                    lib_put16(hd + 20, e->ref.slot);
+                    lw_put(&j->trk, hd, sizeof hd);
+                    lw_put(&j->trk, p + sizeof hd, lib_le16(p + 2) - (uint32_t)sizeof hd);
+                    j->ntracks++;
+                    c->tcount++;
+                    j->reused++;
+                    reused = 1;
+                }
+            }
+            if (!reused) {
+                if ((int64_t)(t_end - lib_now_us()) < 1000)
+                    return 0;            /* (a file's tags take ~1-2 ms: in the next slice) */
+                read_tags(j, e, W_TAGS);
+                write_track(j, e, W_TAGS);
+            }
+            c->last_slot = e->ref.slot;
+            c->done_files = 1;
+            if (++j->bi == j->nbatch)
+                j->wst = WS_BATCH;
+            if (j->ntracks >= LIB_MAX_TRACKS) {
+                j->warn |= LIBW_MAX;
+                j->sp = 0;
+                j->wst = WS_FEND;
+            }
+            break;
+        }
+        case WS_FEND:                     /* the folder's record, now that its tracks are out */
+            write_folder(j);
+            j->wst = WS_POP;
+            break;
+        case WS_CONT: {                   /* one directory scan: more subfolders */
+            scan_t s;
+
+            memset(&s, 0, sizeof s);
+            s.j = j;
+            s.base = j->sp;
+            s.last = c->cont_slot;
+            s.cont = 1;
+            s.limit = LIB_PEND - 1u;
+            if (scan_dir(j, sig_cb, &s) >= 0 && s.more)
+                push_cont(j, s.base, s.last);
+            j->wst = WS_POP;
+            break;
+        }
+        case WS_END: {
+            uint32_t at, crc;
+
+            if (j->lazy) {               /* nothing differed so far: and nothing after? */
+                if (old_next(j, &at)) {  /* (folders gone at the end: written without them) */
+                    if (unlazy(j, at, WS_END))
+                        return -1;
+                    break;
+                }
+                scan_close(j);
+                j->wst = WS_DONE;
+                return LIB_UNCHANGED;
+            }
+            crc = j->raw_end_crc = j->raw.crc;
+            rec_hdr(&j->raw, LIB_RAW_E, 4u + (uint32_t)sizeof(lib_rawend_t) + 8u);
+            lw_u32(&j->raw, j->seq);
+            lw_u32(&j->raw, j->nfolders);
+            lw_u32(&j->raw, j->ntracks);
+            lw_u32(&j->raw, j->root_sig);
+            lw_u32(&j->raw, crc);
+            lw_u32(&j->raw, j->trk.pos);
+            lw_u32(&j->raw, j->trk.crc);
+            lw_u32(&j->raw, 4u + (uint32_t)sizeof(lib_rawend_t) + 8u);
+            lw_u32(&j->raw, LIB_END_MAGIC);
+            scan_close(j);
+            if (lw_close(&j->trk))
+                return -1;
+            j->wst = WS_DONE + 1;        /* the folders file: closed in the next slice */
+            return 0;
+        }
+        case WS_DONE + 1: {
+            if (lw_close(&j->raw))
+                return -1;
+            if (j->warn)
+                lib_log("lib: %s walk:%s%s%s", j->base, j->warn & LIBW_DEPTH ? " folders deeper than 32 left out" : "",
+                        j->warn & LIBW_NAMES ? " (some folder names asked of the FS again)" : "",
+                        j->warn & LIBW_MAX ? " over 65535 tracks: the rest not indexed" : "");
+            j->wst = WS_DONE;
+            return 1;
+        }
+        default:
+            return 1;
+        }
+    }
+    return 0;
+}
+
+void scan_abort(lib_job_t *j)
+{
+    scan_close(j);
+    if (j->raw.f)
+        lw_abort(&j->raw);
+    if (j->trk.f)
+        lw_abort(&j->trk);
+}

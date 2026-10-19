@@ -74,7 +74,13 @@ struct fs_file {
 };
 
 static vol_t s_vol[FS_VOLUMES];
-static struct fs_file s_files[4];
+/* Open files at once: the audio engine holds two (the track and the next), the library's job up to
+ * four while it indexes (old and new folders and tracks files, or a sorter's input and output and
+ * the index being written), its views one, and a passing log append, settings save or tag read. */
+#ifndef FS_HANDLES
+#define FS_HANDLES 8
+#endif
+static struct fs_file s_files[FS_HANDLES];
 static uint32_t s_sec[128], s_sec_lba;
 static const vol_t *s_sec_vol;
 static int s_sec_dirty;

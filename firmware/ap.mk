@@ -61,7 +61,8 @@ AP_UI_SRCS := \
   firmware/ui/ui.c \
   firmware/ui/frame.c \
   firmware/ui/nav.c \
-  firmware/ui/screens.c
+  firmware/ui/screens.c \
+  firmware/ui/lib_ui.c
 
 # Drivers: the TARGET panel backend + the panel init sequence tables
 # (same set as $(DRIVERS_TARGET_SRCS) in firmware/drivers/drivers.mk,
@@ -110,7 +111,17 @@ AP_SERVICE_SRCS := \
   firmware/services/bt_proto.c \
   firmware/services/keyseq.c \
   firmware/services/bt_keys.c \
-  firmware/services/ovl.c
+  firmware/services/ovl.c \
+  firmware/services/lib_coll.c \
+  firmware/services/lib_io.c \
+  firmware/services/lib_sort.c \
+  firmware/services/lib_scan.c \
+  firmware/services/lib_build.c \
+  firmware/services/lib_idx.c \
+  firmware/services/lib_job.c \
+  firmware/services/lib_m3u.c \
+  firmware/services/lib_tags.c \
+  firmware/services/lib_plat.c
 
 # Theme module (same set as $(THEME_SRCS) in firmware/theme/theme.mk).
 AP_THEME_SRCS := \
@@ -177,7 +188,7 @@ AP_CFLAGS := $(AP_ARCH_FLAGS) -Os -Wall \
   -Wno-builtin-declaration-mismatch -Wno-incompatible-pointer-types \
   -Wno-return-mismatch -Wno-int-conversion -Wno-return-type \
   -ffunction-sections -fdata-sections -MMD -MP -fcommon \
-  -DRECHORD_AP_BUILD -DBOARD=$(BOARD_ID) \
+  -DRECHORD_AP_BUILD -DBOARD=$(BOARD_ID) $(if $(LIB_SD_SHIM),-DLIB_SD_SHIM) \
   $(addprefix -I,$(AP_INCLUDE_DIRS)) \
   -include firmware/rockchip/include/armcc_compat.h
 
@@ -186,7 +197,7 @@ AP_CFLAGS := $(AP_ARCH_FLAGS) -Os -Wall \
 # holds: firmware_ap.ld (its OVERLAY list). AP_OVLS: output section -> module name in the image.
 # AP_OVL_WRAP: the overlays' functions resident code calls by name; each call from another object
 # reaches a gate (__wrap_<name>, firmware/startup/ap_ovl.c) that loads or checks the overlay.
-AP_OVLS := usbdac:ov_dac usbout:ov_uout dev:ov_dev
+AP_OVLS := usbdac:ov_dac usbout:ov_uout dev:ov_dev lib:ov_lib
 comma := ,
 AP_OVL_WRAP := $(addprefix -Wl$(comma)--wrap=,usb_uac_key \
   usb_out_active usb_out_status usb_out_start usb_out_stop usb_out_poll usb_out_set_format \
@@ -199,6 +210,9 @@ AP_OVL_WRAP := $(addprefix -Wl$(comma)--wrap=,usb_uac_key \
 # resident code grew 96.9 KB, per commit median 880 B, 75th percentile 2552 B, 90th 6956 B; 4 KiB
 # lets any ordinary change land and stops a feature-sized one that belongs in an overlay.
 AP_MIN_FREE ?= 4096
+
+# LIB_SD_SHIM=1: a test build whose SD card takes writes (drivers/emmc_rknanoc.c's stand-in sd_write,
+# until the sd-rw branch's driver is merged). Never for an image that ships.
 
 # Link: no toolchain libc/startup -- the firmware provides its own libc
 # sources (AP_LIBC_SRCS); -lgcc supplies the compiler runtime

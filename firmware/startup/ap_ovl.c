@@ -26,6 +26,8 @@
 #include "audio/audio.h"
 #include "ui/frame.h"
 #include "ui/nav.h"
+#include "services/lib.h"
+#include "services/fs_target.h"
 
 extern const char __ovl_abi[];       /* absolute: this link's ABI (Makefile) */
 
@@ -48,6 +50,7 @@ const ovl_desc_t ovl_desc[OVL_COUNT] = {
     [OVL_USBDAC] = { "ov_dac", "USB DAC", NULL },
     [OVL_USBOUT] = { "ov_uout", "USB-C out", usbout_stop },
     [OVL_DEV]    = { "ov_dev", "Developer test", NULL },
+    [OVL_LIB]    = { "ov_lib", "Library", NULL, 1 },
 };
 
 /* The USB interrupt goes wherever usb_irq_hook points (drivers/usb_msc_rknanoc.c): the USB DAC's
@@ -242,3 +245,90 @@ void ap_usb_detect(void) { dev_run(DEV_USB_DETECT); }
 void ap_bt_listen(void) { dev_run(DEV_BT_LISTEN); }
 void ap_te_probe(void) { dev_run(DEV_TE_PROBE); }
 void ap_hifi_probe(void) { dev_run(DEV_HIFI_PROBE); }
+
+/* ---- lib: the music library (services/lib.h; the library's own window, never replaced) -------- */
+
+lib_status_t g_lib;                  /* resident: the overlay and the screens read it */
+
+typedef struct {
+    void (*boot)(void);
+    int (*step)(void);
+    void (*volume)(int vol, int ev);
+    void (*open)(void);
+    int (*home_value)(char *out, int n);
+    void (*np)(int what);
+    int (*np_fav)(void);
+    void (*data_changed)(void);
+} lib_api_t;
+
+static const lib_api_t k_lib OVL_API(lib) = {
+    lib_boot, lib_step, lib_vol_event, lib_ui_open, lib_ui_home_value, lib_ui_np, lib_ui_np_fav, lib_data_changed,
+};
+OVL_HEADER(lib, OVL_LIB, &k_lib);
+
+#define LIB_CALL(T, dflt, call) ({ const lib_api_t *a_ = ovl_if(OVL_LIB); a_ ? a_->call : (dflt); })
+#define LIB_CALL_V(call) do { const lib_api_t *a_ = ovl_if(OVL_LIB); if (a_) a_->call; } while (0)
+
+static void lib_state(void)          /* what the volumes are now, for the library */
+{
+    for (int v = 0; v < 2; v++) {
+        g_lib.mounted[v] = fs_target_type(v) != NULL;
+        g_lib.writable[v] = (uint8_t)fs_target_writable(v);
+    }
+}
+
+void ap_lib_boot(void)
+{
+    const lib_api_t *a;
+
+    lib_state();
+    if ((a = ovl_get(OVL_LIB)) != NULL)
+        a->boot();
+}
+
+void ap_lib_poll(void)
+{
+    LIB_CALL_V(step());
+}
+
+void ap_lib_volume(int vol, int ev)
+{
+    lib_state();
+    LIB_CALL_V(volume(vol, ev));
+}
+
+void ap_lib_open(void)
+{
+    const lib_api_t *a = ovl_get(OVL_LIB);
+
+    if (!a)
+        refused(OVL_LIB);
+    else
+        a->open();
+}
+
+int ap_lib_home_value(char *out, int n)
+{
+    out[0] = 0;
+    return LIB_CALL(int, 0, home_value(out, n));
+}
+
+void ap_lib_np(int what)
+{
+    const lib_api_t *a = ovl_get(OVL_LIB);
+
+    if (!a)
+        refused(OVL_LIB);
+    else
+        a->np(what);
+}
+
+int ap_lib_np_fav(void)
+{
+    return LIB_CALL(int, 0, np_fav());
+}
+
+void ap_lib_data_changed(void)
+{
+    LIB_CALL_V(data_changed());
+}

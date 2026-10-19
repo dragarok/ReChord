@@ -20,7 +20,8 @@ from make_fw1 import rknano_crc32  # noqa: E402
 
 OVL_MAGIC = 0x314C564F            # "OVL1"
 HDR = 24                          # magic, abi, id, len, crc, api
-IDS = {"usbdac": 1, "usbout": 2, "dev": 3}   # services/ovl.h OVL_*
+IDS = {"usbdac": 1, "usbout": 2, "dev": 3, "lib": 4}   # services/ovl.h OVL_*
+WINDOW = {"lib": "__ovl_lib_start"}         # the library's own window; the others: __ovl_win_start
 
 
 def sections(d):
@@ -58,9 +59,10 @@ def main():
     d = open(a.elf, "rb").read()
     secs, hdrs = sections(d)
     sym = symbols(d, hdrs)
-    abi, win = sym["__ovl_abi"], sym["__ovl_win_start"]
+    abi = sym["__ovl_abi"]
     for spec in a.ovl:
         name, module = spec.split(":")
+        win = sym[WINDOW.get(name, "__ovl_win_start")]
         s = secs.get(".ovl_" + name)
         if not s:
             raise SystemExit(f"ovl_pack: no section .ovl_{name} in {a.elf}")

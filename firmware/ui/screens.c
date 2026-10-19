@@ -5,8 +5,10 @@
  * questions (cable, power menu, restore defaults) and the viewers (About, Diagnostics, Battery,
  * the USB disk session). Bluetooth's screen is startup/ap_bt.c.
  *
- * Not built yet, so not in the tree (no dead rows): Library (needs the tag index), EQ,
- * ReplayGain, volume limit, sleep timer, clock, Visualizer, Key guide, letter jumps.
+ * The Library's own screens are in the library overlay (ui/lib_ui.c); its Home row, Now Playing's
+ * favourite / playlist rows and the Library data setting are here.
+ * Not built yet, so not in the tree (no dead rows): EQ, ReplayGain, volume limit, sleep timer,
+ * clock, Visualizer, Key guide.
  */
 #include <stdio.h>
 #include <string.h>
@@ -23,6 +25,7 @@
 #include "services/log.h"
 #include "services/power.h"
 #include "services/queue.h"
+#include "services/lib.h"
 #include "player.h"
 
 /* ap_ui.c */
@@ -45,7 +48,7 @@ const char *bt_state_text(bt_state_t st);   /* ap_bt.c */
 
 #define LIST_MOVE { KEY_UP, IG_DOWN, A_UP, "UP" }, { KEY_UP, IG_REPEAT, A_UP, NULL }, \
                   { KEY_DOWN, IG_DOWN, A_DOWN, "DOWN" }, { KEY_DOWN, IG_REPEAT, A_DOWN, NULL }
-static const keydef_t k_list[] = {
+const keydef_t k_list[] = {
     LIST_MOVE,
     { KEY_SELECT, IG_TAP, A_OPEN, VERB }, { KEY_SELECT, IG_HOLD, A_OPEN_HOLD, VERB },
     { KEY_MENU, IG_TAP, A_NP, "PLAYING" }, { KEY_MENU, IG_HOLD, A_OPTIONS, "OPTIONS" },
@@ -66,7 +69,7 @@ static const keydef_t k_home[] = {
     { KEY_MENU, IG_TAP, A_NP, "PLAYING" }, { KEY_MENU, IG_HOLD, A_OPTIONS, "OPTIONS" },
     { 0 }
 };
-static const keydef_t k_opts[] = {
+const keydef_t k_opts[] = {
     LIST_MOVE,
     { KEY_SELECT, IG_TAP, A_OPEN, "CHOOSE" },
     { KEY_MENU, IG_TAP, A_NP, "PLAYING" }, { KEY_MENU, IG_HOLD, A_CLOSE, "CLOSE" },
@@ -80,7 +83,7 @@ static const keydef_t k_choice[] = {
     { KEY_BACK, IG_TAP, A_CANCEL, "BACK" }, { KEY_BACK, IG_HOLD, A_HOME, "HOME" },
     { 0 }
 };
-static const keydef_t k_question[] = {
+const keydef_t k_question[] = {
     LIST_MOVE,
     { KEY_SELECT, IG_TAP, A_OPEN, "CHOOSE" },
     { KEY_BACK, IG_TAP, A_SAFE, VERB },
@@ -240,7 +243,7 @@ void nav_header(hdr_t *h)
 
 /* ---- Home --------------------------------------------------------------------------------------- */
 
-enum { H_NP, H_FOLDERS, H_QUEUE, H_BT, H_USB, H_SETTINGS, H_N };
+enum { H_NP, H_FOLDERS, H_LIB, H_QUEUE, H_BT, H_USB, H_SETTINGS, H_N };
 extern const page_t pg_vols, pg_queue, pg_set;
 enum { G_ROOT, G_PLAYBACK, G_DISPLAY, G_POWER, G_USB, G_SYSTEM, G_DEV };
 
@@ -265,8 +268,8 @@ static void np_title(char *o, int cap);
 
 static void home_row(int i, row_t *r)
 {
-    static const uint8_t icons[H_N] = { ICON_PLAY, ICON_FOLDER, ICON_QUEUE, ICON_BT, ICON_USB, ICON_GEAR };
-    static const char *const names[H_N] = { "Now Playing", "Folders", "Queue", "Bluetooth", "USB", "Settings" };
+    static const uint8_t icons[H_N] = { ICON_PLAY, ICON_FOLDER, ICON_LIBRARY, ICON_QUEUE, ICON_BT, ICON_USB, ICON_GEAR };
+    static const char *const names[H_N] = { "Now Playing", "Folders", "Library", "Queue", "Bluetooth", "USB", "Settings" };
     uint8_t ids[H_N];
     int id;
 
@@ -279,6 +282,9 @@ static void home_row(int i, row_t *r)
     switch (id) {
     case H_NP:
         np_title(r->value, sizeof r->value);
+        break;
+    case H_LIB:
+        ap_lib_home_value(r->value, sizeof r->value);
         break;
     case H_QUEUE: {
         audio_status_t st;
@@ -309,6 +315,7 @@ static void home_act(int a, int i)
     switch (ids[i]) {
     case H_NP:       nav_push(&pg_np, 0); break;
     case H_FOLDERS:  nav_push(&pg_vols, 0); break;
+    case H_LIB:      ap_lib_open(); break;
     case H_QUEUE:    nav_push(&pg_queue, 0); break;
     case H_BT:       nav_push(&pg_bt, 0); break;
     case H_USB:      nav_push(&pg_set, G_USB); break;
@@ -423,8 +430,8 @@ static void vols_enter(int first)
 
 /* PLAY on a track or a folder: Now Playing at once, named from the row (DESIGN 4.1: within 100 ms);
  * the queue and the decoder start after that frame (nav_after()), as tags and format fill in. */
-static struct { uint8_t kind, later; uint32_t old_seq; char path[300]; } s_pend;
-enum { PEND_FILE = 1, PEND_TREE };
+static struct { uint8_t kind, later; uint32_t old_seq; char path[300]; int (*fn)(void); } s_pend;
+enum { PEND_FILE = 1, PEND_TREE, PEND_FN };
 
 static void np_pending(const char *name);
 
@@ -442,6 +449,14 @@ static void play_later(int kind, const char *path, const char *name)
     else
         nav_pop_to(nav_find(&pg_np) + 1);
     np_pending(name);
+}
+
+/* The library's way to play (ui/lib_ui.c): Now Playing named at once, the queue made by fn after
+ * the frame, as a folder's is (PLAYER_OK or not). */
+void np_play_fn(const char *name, int (*fn)(void))
+{
+    play_later(PEND_FN, "", name);
+    s_pend.fn = fn;
 }
 
 static long s_seek_go = -1;                /* a seek to start after the frame (np_act A_SEEK_GO), ms */
@@ -466,7 +481,7 @@ void nav_after(void)
         return;
     }
     s_pend.kind = 0;
-    rc = k == PEND_FILE ? player_open(s_pend.path) : player_open_tree(s_pend.path);
+    rc = k == PEND_FILE ? player_open(s_pend.path) : k == PEND_TREE ? player_open_tree(s_pend.path) : s_pend.fn();
     if (rc == PLAYER_OK)
         rc = player_play();
     if (rc != PLAYER_OK) {
@@ -1230,8 +1245,8 @@ const page_t pg_dac = {
 
 /* ---- Options (MENU hold): the thing's verbs, then the listening rows ---------------------------- */
 
-enum { O_PREV, O_QUEUE, O_INFO, O_FOLDER, O_PLAYF, O_SHUF, O_LOCK, O_MODE };
-static const uint8_t k_np_o[] = { O_PREV, O_QUEUE, O_INFO, O_FOLDER, O_LOCK, O_MODE };
+enum { O_PREV, O_QUEUE, O_INFO, O_FOLDER, O_PLAYF, O_SHUF, O_LOCK, O_MODE, O_LFAV, O_LADD };
+static const uint8_t k_np_o[] = { O_PREV, O_QUEUE, O_INFO, O_FOLDER, O_LFAV, O_LADD, O_LOCK, O_MODE };
 static const uint8_t k_br_o[] = { O_PLAYF, O_SHUF, O_LOCK, O_MODE };
 static const uint8_t k_gen_o[] = { O_LOCK, O_MODE };
 extern const page_t pg_info;
@@ -1263,15 +1278,16 @@ static int opt_count(void)
 static void opt_row(int i, row_t *r)
 {
     static const char *const names[] = { "Previous track", "Queue", "Track info", "Go to folder", "Play folder",
-                                         "Shuffle folder", "Lock keys", "Play mode" };
+                                         "Shuffle folder", "Lock keys", "Play mode", "Add to favourites",
+                                         "Add to playlist" };
     static const uint8_t icons[] = { ICON_PREV, ICON_QUEUE, ICON_INFO, ICON_FOLDER, ICON_PLAY, ICON_SHUFFLE,
-                                     ICON_LOCK, ICON_REPEAT };
+                                     ICON_LOCK, ICON_REPEAT, ICON_CHECK, ICON_QUEUE };
     int n, id = opt_ids(&n)[i];
 
     r->id = (uint16_t)id;
     r->icon = icons[id];
-    snprintf(r->text, sizeof r->text, "%s", names[id]);
-    if (id == O_QUEUE || id == O_INFO || id == O_FOLDER)
+    snprintf(r->text, sizeof r->text, "%s", id == O_LFAV && ap_lib_np_fav() ? "Remove from favourites" : names[id]);
+    if (id == O_QUEUE || id == O_INFO || id == O_FOLDER || id == O_LADD)
         r->flags = R_CHEV;
     if (id == O_MODE)
         snprintf(r->value, sizeof r->value, "%s", k_modes[queue_mode() % 4]);
@@ -1342,6 +1358,10 @@ static void opt_act(int a, int i)
         nav_toast(mode_icon() == NO_ICON ? ICON_REPEAT : mode_icon(), TOAST_TEXT, "Play mode: %s",
                   k_modes[player_cycle_mode() % 4]);
         list_row_changed(i);
+        break;
+    case O_LFAV:
+    case O_LADD:
+        ap_lib_np(id == O_LFAV ? LIB_NP_FAV : LIB_NP_ADDPL);
         break;
     }
 }
@@ -1616,6 +1636,10 @@ static const char *const n_cpu[] = { "Auto", "Max" };
 static const char *const n_usb[] = { "Ask", "USB disk", "USB DAC", "Charge only" };
 static const char *const n_vbus[] = { "Port", "GPIO2.1" };
 static const char *const n_dacp[] = { "Battery", "Charge", "Power only" };
+/* -- library (one block: docs/MERGE_NOTES_library.md) -- */
+static const char *const n_libdata[] = { "SD card", "Internal" };
+static void apply_libdata(void) { g_lib.data = g_cfg.libdata; ap_lib_data_changed(); }
+/* -- end library -- */
 
 static const set_t g_root[] = {
     { ICON_PLAY, S_OPEN, 0, 0, "Playback", 0, 0, 0, &pg_set, G_PLAYBACK },
@@ -1629,6 +1653,7 @@ static const set_t g_playback[] = {
     { ICON_REPEAT, S_CYCLE, 4, Q_NORMAL, "Play mode", &g_cfg.play, k_modes, apply_play },
     { ICON_PLAY, S_CYCLE, 3, CFG_RESUME_FOLDER, "Resume at power-on", &g_cfg.resume, n_resume },
     { ICON_NOTE, S_CYCLE, 2, 1, "Show", &g_cfg.tags, n_show },
+    { ICON_LIBRARY, S_CYCLE, 2, LIB_DATA_SD, "Library data", &g_cfg.libdata, n_libdata, apply_libdata },   /* library */
 };
 static const set_t g_display[] = {
     { ICON_SUN, S_THEME, 0, 0, "Theme", &g_cfg.theme },
@@ -1668,7 +1693,7 @@ static const set_t g_dev[] = {
     { ICON_SUN, S_DO, 0, 0, "Panel TE (test)", 0, 0, ap_te_probe },
 };
 static const struct { const char *title; uint8_t icon, n; const set_t *rows; } k_groups[] = {
-    { "Settings", ICON_GEAR, 6, g_root }, { "Playback", ICON_PLAY, 3, g_playback },
+    { "Settings", ICON_GEAR, 6, g_root }, { "Playback", ICON_PLAY, 4, g_playback },
     { "Display", ICON_SUN, 3, g_display }, { "Power", ICON_POWER, 3, g_power },
     { "USB", ICON_USB, 6, g_usb }, { "System", ICON_INFO, 4, g_system }, { "Developer", ICON_BUG, 10, g_dev },
 };

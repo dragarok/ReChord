@@ -176,10 +176,16 @@ def main():
             f"RAM {ram_used}/{ram_top - ram_lo} B ({ram_free} free)"]
     win = sym.get("__ovl_win_end", 0) - sym.get("__ovl_win_start", 0)
     ovls = [(s[5:], n) for s, n in sizes.items() if s.startswith(".ovl_")]
-    if ovls:
+    lib = [(n, s) for n, s in ovls if n == "lib"]
+    modes = [(n, s) for n, s in ovls if n != "lib"]
+    if modes:
         head.append(f"core A overlays (window {win} B at 0x{sym['__ovl_win_start']:08X}): "
-                    + ", ".join(f"{n} {s}" for n, s in ovls)
-                    + f" (largest {win - max(s for _, s in ovls)} free)")
+                    + ", ".join(f"{n} {s}" for n, s in modes)
+                    + f" (largest {win - max(s for _, s in modes)} free)")
+    if lib:
+        lw = sym.get("__ovl_lib_end", 0) - sym.get("__ovl_lib_start", 0)
+        head.append(f"core A library window ({lw} B at 0x{sym['__ovl_lib_start']:08X}): lib {lib[0][1]} "
+                    f"({lw - lib[0][1]} free)")
     if a.fonts and os.path.exists(a.fonts):
         fw = sym["__fonts_ram_end"] - sym["__fonts_ram_start"]
         fs = os.path.getsize(a.fonts)

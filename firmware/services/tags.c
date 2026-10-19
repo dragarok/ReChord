@@ -25,10 +25,14 @@
 
 #define TAGS_WIN  512u                 /* the window; every get() asks for <= this */
 #define TEXT_MAX  256u                 /* bytes of a value we look at: fills title[] from UTF-16 */
-#define ALL       0x0Fu                /* all four fields known */
 #define NONE      0xFFFFFFFFu
 
-enum { F_TITLE, F_ARTIST, F_ALBUM, F_TRACK };
+#ifdef TAGS_EXT
+enum { F_TITLE, F_ARTIST, F_ALBUM, F_TRACK, F_AARTIST, F_GENRE, F_DISC, F_YEAR, NF };
+#else
+enum { F_TITLE, F_ARTIST, F_ALBUM, F_TRACK, NF };
+#endif
+#define ALL       ((1u << NF) - 1u)    /* every field known */
 enum { E_LATIN1, E_UTF8, E_UTF16BE, E_UTF16LE };
 
 typedef struct {
@@ -42,12 +46,25 @@ typedef struct {
     uint8_t win[TAGS_WIN];             /* last, with no padding after it: ASan sees an overrun */
 } ctx_t;
 
+#ifdef TAGS_EXT
+/* Lower-case names per source in F_* order ("" where a source has none), NULL-terminated; an
+ * alias after them starts with its field + 1 (a control character). */
+static const char *const k_id3v22[] = { "tt2", "tp1", "tal", "trk", "tp2", "tco", "tpa", "tye", 0 };
+static const char *const k_id3v23[] = { "tit2", "tpe1", "talb", "trck", "tpe2", "tcon", "tpos", "tyer",
+                                        "\x08tdrc", 0 };
+static const char *const k_ape[] = { "title", "artist", "album", "track", "album artist", "genre", "disc",
+                                     "year", "\x05albumartist", 0 };
+static const char *const k_vorbis[] = { "title", "artist", "album", "tracknumber", "albumartist", "genre",
+                                        "discnumber", "date", "\x05album artist", "\x08year", 0 };
+static const char *const k_riff[] = { "inam", "iart", "iprd", "itrk", "", "ignr", "", "icrd", "\x04iprt", 0 };
+#else
 /* Lower-case names per source, NULL-terminated; an index past F_TRACK is the track. */
 static const char *const k_id3v22[] = { "tt2", "tp1", "tal", "trk", 0 };
 static const char *const k_id3v23[] = { "tit2", "tpe1", "talb", "trck", 0 };
 static const char *const k_ape[] = { "title", "artist", "album", "track", 0 };
 static const char *const k_vorbis[] = { "title", "artist", "album", "tracknumber", 0 };
 static const char *const k_riff[] = { "inam", "iart", "iprd", "itrk", "iprt", 0 };
+#endif
 
 static uint32_t be16(const uint8_t *p) { return (uint32_t)p[0] << 8 | p[1]; }
 static uint32_t be24(const uint8_t *p) { return (uint32_t)p[0] << 16 | (uint32_t)p[1] << 8 | p[2]; }
@@ -91,10 +108,19 @@ static int field(const uint8_t *k, uint32_t n, const char *const *names)
         const char *s = names[f];
         uint32_t i = 0;
 
+#ifdef TAGS_EXT
+        if (f >= NF)
+            s++;
+#endif
         while (i < n && s[i] && (k[i] | 0x20) == (uint8_t)s[i])
             i++;
+#ifdef TAGS_EXT
+        if (i == n && !s[i] && n)      /* ("" placeholders never match) */
+            return f >= NF ? names[f][0] - 1 : f;
+#else
         if (i == n && !s[i])
             return f > F_TRACK ? F_TRACK : f;
+#endif
     }
     return -1;
 }
@@ -188,6 +214,97 @@ static void set_track(ctx_t *c, uint32_t t)
     c->out->found |= c->src;
 }
 
+#ifdef TAGS_EXT
+/* ID3v1's genre numbers 0..79 (ID3v2 TCON "(17)", MP4 gnre, ID3v1's byte); Winamp's later ones
+ * (80 and up) are left as their number's text would be: not used */
+static const char *const k_genres[] = {
+    "Blues", "Classic Rock", "Country", "Dance", "Disco", "Funk", "Grunge", "Hip-Hop", "Jazz", "Metal",
+    "New Age", "Oldies", "Other", "Pop", "R&B", "Rap", "Reggae", "Rock", "Techno", "Industrial",
+    "Alternative", "Ska", "Death Metal", "Pranks", "Soundtrack", "Euro-Techno", "Ambient", "Trip-Hop",
+    "Vocal", "Jazz+Funk", "Fusion", "Trance", "Classical", "Instrumental", "Acid", "House", "Game",
+    "Sound Clip", "Gospel", "Noise", "Alternative Rock", "Bass", "Soul", "Punk", "Space", "Meditative",
+    "Instrumental Pop", "Instrumental Rock", "Ethnic", "Gothic", "Darkwave", "Techno-Industrial",
+    "Electronic", "Pop-Folk", "Eurodance", "Dream", "Southern Rock", "Comedy", "Cult", "Gangsta",
+    "Top 40", "Christian Rap", "Pop/Funk", "Jungle", "Native American", "Cabaret", "New Wave",
+    "Psychedelic", "Rave", "Showtunes", "Trailer", "Lo-Fi", "Tribal", "Acid Punk", "Acid Jazz", "Polka",
+    "Retro", "Musical", "Rock & Roll", "Hard Rock",
+};
+
+static void set_genre_num(ctx_t *c, uint32_t g)
+{
+    const char *s = g < sizeof k_genres / sizeof k_genres[0] ? k_genres[g] : 0;
+
+    if (s && !(c->have & 1u << F_GENRE)) {
+        put_text(c->out->genre, sizeof c->out->genre, (const uint8_t *)s, (uint32_t)strlen(s), E_LATIN1);
+        c->have |= 1u << F_GENRE;
+        c->out->found |= c->src;
+    }
+}
+
+/* Field f from text p[0..n): first source wins; empty text and numbers 0 do not count. Years:
+ * the first number from 1000 on ("2003-05-01"); genres "(17)" / "17" by the ID3v1 table. */
+static void set(ctx_t *c, int f, const uint8_t *p, uint32_t n, int enc)
+{
+    char *dst;
+    uint32_t cap;
+
+    if (c->have & 1u << f)
+        return;
+    if (f == F_TRACK || f == F_DISC || f == F_YEAR) {
+        char num[24];
+        uint32_t t = 0;
+        const char *q = num;
+
+        put_text(num, sizeof num, p, n, enc);
+        for (;;) {
+            while (*q && (*q < '0' || *q > '9'))
+                q++;
+            for (t = 0; *q >= '0' && *q <= '9' && t < 0x10000u; q++)
+                t = t * 10u + (uint32_t)(*q - '0');
+            if (f != F_YEAR || !*q || (t >= 1000u && t < 3000u))
+                break;
+        }
+        if (f == F_YEAR && (t < 1000u || t >= 3000u))
+            return;
+        if (f == F_TRACK && num[0] != ' ' && (num[0] < '0' || num[0] > '9'))
+            return;                    /* (a track "A1" is not a number) */
+        if (!t)
+            return;
+        if (f == F_TRACK)
+            c->out->track = (uint16_t)(t > 0xFFFFu ? 0xFFFFu : t);
+        else if (f == F_DISC)
+            c->out->disc = (uint8_t)(t > 255u ? 255u : t);
+        else
+            c->out->year = (uint16_t)t;
+        c->have |= 1u << f;
+        c->out->found |= c->src;
+        return;
+    }
+    dst = f == F_TITLE ? c->out->title : f == F_ARTIST ? c->out->artist : f == F_ALBUM ? c->out->album :
+          f == F_AARTIST ? c->out->aartist : c->out->genre;
+    cap = f == F_GENRE ? sizeof c->out->genre : sizeof c->out->title;
+    put_text(dst, cap, p, n, enc);
+    if (f == F_GENRE && (dst[0] == '(' || (dst[0] >= '0' && dst[0] <= '9'))) {
+        const char *q = dst + (dst[0] == '(');
+        uint32_t g = 0;
+
+        while (*q >= '0' && *q <= '9' && g < 1000u)
+            g = g * 10u + (uint32_t)(*q++ - '0');
+        if ((dst[0] == '(' && *q == ')' && !q[1]) || (dst[0] != '(' && !*q)) {
+            dst[0] = 0;                /* "(17)" or "17": the number's name */
+            set_genre_num(c, g);
+            return;
+        }
+        if (dst[0] == '(' && *q == ')' && q[1]) {   /* "(17)Rock": the text */
+            memmove(dst, q + 1, strlen(q + 1) + 1);
+        }
+    }
+    if (*dst) {
+        c->have |= 1u << f;
+        c->out->found |= c->src;
+    }
+}
+#else
 /* Field f from text p[0..n): first source wins; empty text and track 0 do not count. */
 static void set(ctx_t *c, int f, const uint8_t *p, uint32_t n, int enc)
 {
@@ -215,6 +332,7 @@ static void set(ctx_t *c, int f, const uint8_t *p, uint32_t n, int enc)
         c->out->found |= c->src;
     }
 }
+#endif
 
 /* ID3v2 text frame body: encoding byte, then the (first) string. */
 static void id3_text(ctx_t *c, int f, const uint8_t *p, uint32_t n)
@@ -327,6 +445,10 @@ static void id3v1(ctx_t *c, uint32_t pos)
     set(c, F_ALBUM, t + 63, 30, E_LATIN1);
     if (!t[125] && t[126])             /* ID3v1.1 */
         set_track(c, t[126]);
+#ifdef TAGS_EXT
+    set(c, F_YEAR, t + 93, 4, E_LATIN1);
+    set_genre_num(c, t[127]);
+#endif
 }
 
 /* APEv2 (or v1): cnt items from p up to the footer at foot, each a value
@@ -450,6 +572,15 @@ static void flac(ctx_t *c, uint32_t pos)
         pos += 4u;
         if (len > c->size - pos)
             return;
+#ifdef TAGS_EXT
+        if (type == 0u && len >= 18u && (b = get(c, pos, 18)) != 0) {    /* STREAMINFO */
+            uint32_t rate = (uint32_t)b[10] << 12 | (uint32_t)b[11] << 4 | b[12] >> 4;
+            uint64_t n = (uint64_t)(b[13] & 0x0Fu) << 32 | be32(b + 14);
+
+            if (rate)
+                c->out->dur_ms = (uint32_t)(n * 1000u / rate);
+        }
+#endif
         if (type == 4u) {
             vorbis(c, pos, pos + len);
             return;
@@ -469,6 +600,22 @@ static void wav(ctx_t *c)
     if (!b || memcmp(b, "RIFF", 4) || memcmp(b + 8, "WAVE", 4))
         return;
     end = le32(b + 4) >= 4u && le32(b + 4) <= c->size - 8u ? le32(b + 4) + 8u : c->size;
+#ifdef TAGS_EXT
+    {
+        uint32_t bps = 0;
+
+    while (end - p >= 8u && (b = get(c, p, 8)) != 0) {    /* (every chunk: the length is at "data") */
+        uint32_t n = le32(b + 4), q, e;
+        int list = !memcmp(b, "LIST", 4), id3 = !memcmp(b, "id3 ", 4) || !memcmp(b, "ID3 ", 4);
+
+        if (!memcmp(b, "data", 4) && bps)
+            c->out->dur_ms = (uint32_t)((uint64_t)min32(n, end - p - 8u) * 1000u / bps);
+        else if (!memcmp(b, "fmt ", 4) && n >= 16u && (b = get(c, p + 8u, 16)) != 0)
+            bps = le32(b + 8);
+        p += 8u;
+        if (n > end - p)
+            n = end - p;                /* a truncated last chunk */
+#else
     while (c->have != ALL && end - p >= 8u && (b = get(c, p, 8)) != 0) {
         uint32_t n = le32(b + 4), q, e;
         int list = !memcmp(b, "LIST", 4), id3 = !memcmp(b, "id3 ", 4) || !memcmp(b, "ID3 ", 4);
@@ -476,6 +623,7 @@ static void wav(ctx_t *c)
         p += 8u;
         if (n > end - p)
             n = end - p;                /* a truncated last chunk */
+#endif
         if (list && n >= 4u && (b = get(c, p, 4)) && !memcmp(b, "INFO", 4)) {
             c->src = TAGS_SRC_RIFF;
             for (q = p + 4u, e = p + n; c->have != ALL && e - q >= 8u && (b = get(c, q, 8)) != 0; ) {
@@ -498,6 +646,9 @@ static void wav(ctx_t *c)
             break;
         p += n + (n & 1u);
     }
+#ifdef TAGS_EXT
+    }
+#endif
 }
 
 /* ---- MP4 (M4A, ALAC): moov/udta/meta/ilst ------------------------------ */
@@ -532,10 +683,30 @@ static int mp4_child(ctx_t *c, uint32_t p, uint32_t end, const char *t, uint32_t
 
 static void mp4(ctx_t *c)
 {
+#ifdef TAGS_EXT
+    static const char k_item[9][5] = { "\xa9nam", "\xa9" "ART", "\xa9" "alb", "trkn", "aART", "\xa9gen",
+                                       "disk", "\xa9" "day", "gnre" };
+#define MP4_ITEMS 9
+#else
     static const char k_item[4][5] = { "\xa9nam", "\xa9" "ART", "\xa9" "alb", "trkn" };
+#define MP4_ITEMS 4
+#endif
     uint32_t b, e, p, end;
     const uint8_t *h;
 
+#ifdef TAGS_EXT
+    if (!mp4_child(c, 0, c->size, "moov", &b, &e)) {
+        uint32_t mb, me;
+
+        if (!mp4_child(c, b, e, "mvhd", &mb, &me) && me - mb >= 32u && (h = get(c, mb, 32)) != 0) {
+            uint32_t ts = h[0] == 1 ? be32(h + 20) : be32(h + 12);
+            uint64_t d = h[0] == 1 ? (uint64_t)be32(h + 24) << 32 | be32(h + 28) : be32(h + 16);
+
+            if (ts)
+                c->out->dur_ms = (uint32_t)(d * 1000u / ts);
+        }
+    }
+#endif
     if (mp4_child(c, 0, c->size, "moov", &b, &e) || mp4_child(c, b, e, "udta", &b, &e) ||
         mp4_child(c, b, e, "meta", &b, &e) || e - b < 4u ||
         mp4_child(c, b + 4u, e, "ilst", &p, &end))   /* meta is a full box: 4 bytes of version/flags */
@@ -547,7 +718,7 @@ static void mp4(ctx_t *c)
 
         if (n < 8u || n > end - p)
             return;
-        for (int i = 0; i < 4; i++)
+        for (int i = 0; i < MP4_ITEMS; i++)
             if (!memcmp(h + 4, k_item[i], 4))
                 f = i;
         /* the value: a "data" box, 8 bytes of type and locale, then the bytes */
@@ -557,7 +728,16 @@ static void mp4(ctx_t *c)
 
             if (v && f == F_TRACK && len >= 4u)
                 set_track(c, be16(v + 2));                 /* 0, track, total */
+#ifdef TAGS_EXT
+            else if (v && f == F_DISC && len >= 4u && be16(v + 2) && !(c->have & 1u << F_DISC)) {
+                c->out->disc = (uint8_t)min32(be16(v + 2), 255u);
+                c->have |= 1u << F_DISC;
+            } else if (v && f == 8 && len >= 2u)
+                set_genre_num(c, be16(v) - 1u);           /* gnre: ID3v1 + 1 */
+            else if (v && f != F_TRACK && f < NF && f != F_DISC)
+#else
             else if (v && f != F_TRACK)
+#endif
                 set(c, f, v, len, E_UTF8);
         }
         p += n;
@@ -574,6 +754,9 @@ typedef struct {
     tags_read_at_t rd;
     void *u;
     uint32_t n, off[OGG_SPANS], len[OGG_SPANS];
+#ifdef TAGS_EXT
+    uint32_t size;                     /* the file's (c->size is the packet's while it is read) */
+#endif
 } ogg_map_t;
 
 static uint32_t ogg_rd(void *u, uint32_t off, void *buf, uint32_t n)
@@ -595,16 +778,49 @@ static uint32_t ogg_rd(void *u, uint32_t off, void *buf, uint32_t n)
     return got;
 }
 
+#ifdef TAGS_EXT
+static uint64_t le64(const uint8_t *p) { return (uint64_t)le32(p + 4) << 32 | le32(p); }
+
+/* The last page of the stream: its granule position is the length (in samples of rate). */
+static void ogg_length(ctx_t *c, uint32_t serial, uint32_t rate, uint32_t skip)
+{
+    for (uint32_t back = 0; back < 2u * (TAGS_WIN - 32u) && rate; back += TAGS_WIN - 32u) {
+        uint32_t lo = c->size > back + TAGS_WIN ? c->size - back - TAGS_WIN : 0;
+        const uint8_t *w = get(c, lo, min32(TAGS_WIN, c->size - lo));
+
+        for (uint32_t i = w ? min32(TAGS_WIN, c->size - lo) : 0u; i >= 27u + 1u; i--) {
+            const uint8_t *g = w + i - 28u;
+
+            if (!memcmp(g, "OggS", 4) && le32(g + 14) == serial) {
+                uint64_t n = le64(g + 6);
+
+                if (n != ~(uint64_t)0 && n > skip)
+                    c->out->dur_ms = (uint32_t)((n - skip) * 1000u / rate);
+                return;
+            }
+        }
+        if (!lo)
+            return;
+    }
+}
+#endif
+
 static void ogg(ctx_t *c)
 {
     ogg_map_t m;
     uint32_t pos = 0, packet = 0, total = 0, serial = 0;
     int pages = 0;
     const uint8_t *h;
+#ifdef TAGS_EXT
+    uint32_t rate = 0, skip = 0;
+#endif
 
     m.rd = c->rd;
     m.u = c->u;
     m.n = 0;
+#ifdef TAGS_EXT
+    m.size = c->size;
+#endif
     while (packet < 2u && pages++ < 64 && (h = get(c, pos, 27)) != 0 && !memcmp(h, "OggS", 4)) {
         uint32_t nseg = h[26], data, sz = 0;
         const uint8_t *lace;
@@ -616,6 +832,20 @@ static void ogg(ctx_t *c)
         if (!(lace = get(c, pos + 27u, nseg)))
             break;
         data = pos + 27u + nseg;
+#ifdef TAGS_EXT
+        if (pages == 1) {
+            const uint8_t *id = get(c, data, 19);
+
+            if (id && !memcmp(id, "\x01vorbis", 7))
+                rate = le32(id + 12);
+            else if (id && !memcmp(id, "OpusHead", 8)) {
+                rate = 48000u;
+                skip = (uint32_t)id[10] | (uint32_t)id[11] << 8;
+            }
+            if (!(lace = get(c, pos + 27u, nseg)))
+                break;
+        }
+#endif
         for (uint32_t i = 0; i < nseg; sz += lace[i++]) {
             if (lace[i] > c->size - data || sz > c->size - data - lace[i]) {
                 packet = 2u;           /* the page runs past the end of the file */
@@ -638,8 +868,12 @@ static void ogg(ctx_t *c)
         }
         pos = data + sz;
     }
-    if (!m.n)
+    if (!m.n) {
+#ifdef TAGS_EXT
+        ogg_length(c, serial, rate, skip);
+#endif
         return;
+    }
     /* the packet: "\x03vorbis" or "OpusTags", then the Vorbis comment structure */
     c->rd = ogg_rd;
     c->u = &m;
@@ -654,7 +888,148 @@ static void ogg(ctx_t *c)
     }
     c->rd = m.rd;
     c->u = m.u;
+#ifdef TAGS_EXT
+    c->size = m.size;
+    c->woff = c->wlen = 0;
+    ogg_length(c, serial, rate, skip);
+#endif
 }
+
+#ifdef TAGS_EXT
+/* ---- the library's other kinds: WMA (ASF), DSF, AIFF; WavPack's length --------------------- */
+
+static int asf_name(const uint8_t *p, uint32_t n, const char *a)   /* UTF-16LE name == ASCII a */
+{
+    uint32_t i = 0;
+
+    for (; a[i] && 2u * i + 1u < n; i++)
+        if (p[2u * i] != (uint8_t)a[i] || p[2u * i + 1u])
+            return 0;
+    return !a[i] && (2u * i == n || (2u * i + 2u == n && !p[2u * i] && !p[2u * i + 1u]));
+}
+
+static void asf(ctx_t *c)
+{
+    static const uint8_t k_hdr[16] = { 0x30, 0x26, 0xB2, 0x75, 0x8E, 0x66, 0xCF, 0x11, 0xA6, 0xD9, 0x00, 0xAA,
+                                       0x00, 0x62, 0xCE, 0x6C };
+    static const uint8_t k_file[4] = { 0xA1, 0xDC, 0xAB, 0x8C }, k_cd[4] = { 0x33, 0x26, 0xB2, 0x75 },
+                         k_ecd[4] = { 0x40, 0xA4, 0xD0, 0xD2 };
+    static const char *const k_wm[] = { 0, 0, "WM/AlbumTitle", "WM/TrackNumber", "WM/AlbumArtist", "WM/Genre",
+                                        "WM/PartOfSet", "WM/Year" };
+    const uint8_t *h = get(c, 0, 30);
+    uint32_t p = 30, end;
+
+    if (!h || memcmp(h, k_hdr, 16) || le32(h + 20))
+        return;
+    end = min32(le32(h + 16), c->size);
+    c->src = TAGS_SRC_ID3V2;
+    while (end - p >= 24u && (h = get(c, p, 24)) != 0) {
+        uint32_t n = le32(h + 16);
+
+        if (le32(h + 20) || n < 24u || n > end - p)
+            return;
+        if (!memcmp(h, k_file, 4) && n >= 88u && (h = get(c, p + 64u, 24)) != 0) {
+            uint64_t d = (uint64_t)le32(h + 4) << 32 | le32(h), pre = le32(h + 16);
+
+            c->out->dur_ms = d / 10000u > pre ? (uint32_t)(d / 10000u - pre) : 0u;
+        } else if (!memcmp(h, k_cd, 4) && n >= 34u && (h = get(c, p + 24u, 10)) != 0) {
+            uint32_t tl = h[0] | h[1] << 8, al = h[2] | h[3] << 8, q = p + 34u;
+            const uint8_t *v;
+
+            if (tl && tl <= n - 34u && (v = get(c, q, min32(tl, TEXT_MAX))) != 0)
+                set(c, F_TITLE, v, min32(tl, TEXT_MAX), E_UTF16LE);
+            if (al && tl + al <= n - 34u && (v = get(c, q + tl, min32(al, TEXT_MAX))) != 0)
+                set(c, F_ARTIST, v, min32(al, TEXT_MAX), E_UTF16LE);
+        } else if (!memcmp(h, k_ecd, 4) && n >= 26u && (h = get(c, p + 24u, 2)) != 0) {
+            uint32_t cnt = h[0] | h[1] << 8, q = p + 26u, e = p + n;
+
+            while (cnt-- && e - q >= 6u && (h = get(c, q, 2)) != 0) {
+                uint32_t nl = h[0] | h[1] << 8, t, vl;
+                int f = -1;
+                const uint8_t *k, *v;
+
+                if (nl > e - q - 6u || nl > 64u || !(k = get(c, q + 2u, nl + 4u)))
+                    return;
+                t = k[nl] | k[nl + 1] << 8;
+                vl = k[nl + 2] | k[nl + 3] << 8;
+                for (int i = 2; i < NF; i++)
+                    if (asf_name(k, nl, k_wm[i]))
+                        f = i;
+                q += 2u + nl + 4u;
+                if (vl > e - q)
+                    return;
+                if (f >= 0 && !(c->have & 1u << f) && (v = get(c, q, min32(vl, TEXT_MAX))) != 0) {
+                    if (t == 0u)
+                        set(c, f, v, min32(vl, TEXT_MAX), E_UTF16LE);
+                    else if ((t == 3u && vl >= 4u) || (t == 5u && vl >= 2u)) {
+                        uint32_t x = t == 3u ? le32(v) : (uint32_t)(v[0] | v[1] << 8);
+                        char d[12];
+                        int k2 = 11;
+
+                        d[11] = 0;
+                        do d[--k2] = (char)('0' + x % 10u); while ((x /= 10u) && k2);
+                        set(c, f, (const uint8_t *)d + k2, (uint32_t)(11 - k2), E_LATIN1);
+                    }
+                }
+                q += vl;
+            }
+        }
+        p += n;
+    }
+}
+
+static void dsf(ctx_t *c)
+{
+    const uint8_t *h = get(c, 0, 72);
+
+    if (!h || memcmp(h, "DSD ", 4) || memcmp(h + 28, "fmt ", 4))
+        return;
+    if (le32(h + 56))
+        c->out->dur_ms = (uint32_t)(((uint64_t)le32(h + 68) << 32 | le32(h + 64)) * 1000u / le32(h + 56));
+    if (!le32(h + 24) && le32(h + 20) && le32(h + 20) < c->size)
+        id3v2(c, le32(h + 20), c->size, TAGS_SRC_ID3V2);
+}
+
+static void aiff(ctx_t *c)
+{
+    const uint8_t *b = get(c, 0, 12);
+    uint32_t p = 12, end;
+
+    if (!b || memcmp(b, "FORM", 4) || (memcmp(b + 8, "AIFF", 4) && memcmp(b + 8, "AIFC", 4)))
+        return;
+    end = be32(b + 4) <= c->size - 8u ? be32(b + 4) + 8u : c->size;
+    while (end - p >= 8u && (b = get(c, p, 8)) != 0) {
+        uint32_t n = be32(b + 4);
+
+        p += 8u;
+        if (n > end - p)
+            n = end - p;
+        if (!memcmp(b, "COMM", 4) && n >= 18u && (b = get(c, p, 18)) != 0) {
+            int sh = 16383 + 31 - (int)(be16(b + 8) & 0x7FFFu);
+            uint32_t rate = sh >= 0 && sh < 32 ? be32(b + 10) >> sh : 0u;
+
+            if (rate)
+                c->out->dur_ms = (uint32_t)((uint64_t)be32(b + 2) * 1000u / rate);
+        } else if (!memcmp(b, "ID3 ", 4) || !memcmp(b, "id3 ", 4)) {
+            id3v2(c, p, p + n, TAGS_SRC_ID3V2);
+        }
+        if (n + (n & 1u) >= end - p)
+            break;
+        p += n + (n & 1u);
+    }
+}
+
+static void wv_length(ctx_t *c, uint32_t pos)
+{
+    static const uint32_t k_rates[15] = { 6000, 8000, 9600, 11025, 12000, 16000, 22050, 24000, 32000, 44100,
+                                          48000, 64000, 88200, 96000, 192000 };
+    const uint8_t *b = get(c, pos, 32);
+    uint32_t r;
+
+    if (b && !memcmp(b, "wvpk", 4) && le32(b + 12) != 0xFFFFFFFFu && (r = le32(b + 24) >> 23 & 15u) < 15u)
+        c->out->dur_ms = (uint32_t)((uint64_t)le32(b + 12) * 1000u / k_rates[r]);
+}
+#endif
 
 int tags_read(tags_read_at_t rd, void *u, uint32_t size, int kind, tag_info_t *out)
 {
@@ -674,11 +1049,23 @@ int tags_read(tags_read_at_t rd, void *u, uint32_t size, int kind, tag_info_t *o
         mp4(&c);
     } else if (kind == TAGS_OGG) {
         ogg(&c);
+#ifdef TAGS_EXT
+    } else if (kind == TAGS_WMA) {
+        asf(&c);
+    } else if (kind == TAGS_DSF) {
+        dsf(&c);
+    } else if (kind == TAGS_AIFF) {
+        aiff(&c);
+#endif
     } else {
         uint32_t pos = 0, n;
 
         for (int i = 0; i < 8 && c.have != ALL && (n = id3v2(&c, pos, size, TAGS_SRC_ID3V2)) != 0 && n <= size - pos; i++)
             pos += n;                  /* taggers sometimes leave two */
+#ifdef TAGS_EXT
+        if (kind == TAGS_WV)
+            wv_length(&c, pos);
+#endif
         if (kind == TAGS_FLAC)
             flac(&c, pos);
         else if (c.have != ALL)

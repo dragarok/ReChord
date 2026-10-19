@@ -26,7 +26,7 @@
 
 #include <stdint.h>
 
-enum { OVL_NONE = 0, OVL_USBDAC, OVL_USBOUT, OVL_DEV, OVL_COUNT };
+enum { OVL_NONE = 0, OVL_USBDAC, OVL_USBOUT, OVL_DEV, OVL_LIB, OVL_COUNT };
 
 #define OVL_MAGIC 0x314C564Fu        /* "OVL1" */
 
@@ -47,6 +47,8 @@ typedef struct {
     const char *what;                /* for the refusal: "USB DAC" */
     void (*stop)(void);              /* leaves its mode before another overlay takes the window
                                       * (runs while it is still loaded); NULL: nothing to leave */
+    uint8_t win;                     /* 0: the modes' window (OVL_WIN); 1: the library's (OVL_LIB,
+                                      * firmware_ap.ld: its only overlay, loaded once, never replaced) */
 } ovl_desc_t;
 
 extern const ovl_desc_t ovl_desc[OVL_COUNT];
@@ -62,10 +64,11 @@ const void *ovl_get(unsigned id);
 const void *ovl_if(unsigned id);
 /* ovl_get() then entry n of an overlay whose api is a table of void (*)(void). */
 void ovl_run(unsigned id, unsigned n);
-unsigned ovl_current(void);          /* OVL_NONE or the overlay in the window */
+unsigned ovl_current(void);          /* OVL_NONE or the overlay in the modes' window */
 const char *ovl_why(unsigned id);    /* why ovl_get(id) last refused ("damaged (CRC)"), or NULL */
-/* +1 before a call into the window, -1 after it: while any runs, no other overlay is loaded
- * (the gates in startup/ap_ovl.c do it; ovl_run() too). */
+/* +1 before a call into the window, -1 after it: while any runs, no other overlay is loaded into
+ * the modes' window (the gates in startup/ap_ovl.c do it; ovl_run() too). The library's window
+ * has one overlay, never replaced: its calls need no hold. */
 void ovl_hold(int d);
 
 /* The CRC the headers carry: services/fw_update.c's (poly 0x04C10DB7, MSB first, init 0). */

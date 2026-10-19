@@ -29,6 +29,7 @@ static const char *const k_cpu[] = { "auto", "max" };
 static const char *const k_display[] = { "pio", "vop", "dma", "gpio", "auto" };
 static const char *const k_hifi[] = { "auto", "off", "verify" };      /* AS_HIFI_* */
 static const char *const k_cpu_b[] = { "96", "auto", "stock" };       /* CFG_CPU_B_* */
+static const char *const k_libdata[] = { "sd", "internal" };          /* LIB_DATA_* (library) */
 
 static uint32_t s_hash, s_save_at;
 static int s_idle_only;              /* the save waiting is the volume's alone: not while playing */
@@ -121,6 +122,8 @@ static void set(const char *k, const char *v)
         g_cfg.hifi = (uint8_t)i;
     else if (!strcmp(k, "cpu_b") && (i = pick(v, k_cpu_b, 3)) >= 0)
         g_cfg.cpu_b = (uint8_t)i;
+    else if (!strcmp(k, "libdata") && (i = pick(v, k_libdata, 2)) >= 0)    /* library */
+        g_cfg.libdata = (uint8_t)i;
     else if (!strcmp(k, "usb_out") && (i = pick(v, k_off_on, 2)) >= 0)
         g_cfg.usb_out = (uint8_t)i;
     else if (!strcmp(k, "usb_out_ma") && (i = atoi(v)) >= 100 && i <= 500)
@@ -286,6 +289,13 @@ static int text_of(char *t, unsigned long cap)
     }
     if (g_cfg.cpu_b && g_cfg.cpu_b < 3u) {          /* (written only when not 96) */
         int d = snprintf(t + n, cap - (unsigned long)n, "cpu_b=%s\n", k_cpu_b[g_cfg.cpu_b]);
+
+        if (d < 0 || (unsigned long)(n + d) >= cap)
+            return n + d;
+        n += d;
+    }
+    if (g_cfg.libdata == 1u) {                      /* library: written only when not sd */
+        int d = snprintf(t + n, cap - (unsigned long)n, "libdata=%s\n", k_libdata[1]);
 
         if (d < 0 || (unsigned long)(n + d) >= cap)
             return n + d;

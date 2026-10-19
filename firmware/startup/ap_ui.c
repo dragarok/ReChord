@@ -44,6 +44,9 @@ void bt_app_init(void);
 void bt_app_tick(void);
 void bt_app_external(int streaming);
 void ap_usb_dac(void);                /* ap_ovl.c: the USB DAC overlay's gate */
+#include "services/lib.h"              /* the library's gates (ap_ovl.c) */
+/* the card's block writer: drivers' sd_write when there is one (else the card stays read-only) */
+extern int sd_write(uint32_t lba, uint32_t count, const void *buf) __attribute__((weak));
 
 static int s_adc = 1023, s_adc2 = 1023, s_power, s_cable, s_phy_parked;
 static int s_power_press_ok;    /* the power key's current press began after boot's was released */
@@ -95,6 +98,7 @@ static void sd_probe(void)
     int r = sd_init();
 
     fs_target_unmount(1);
+    ap_lib_volume(1, LIB_EV_GONE);       /* (its handles went with the unmount) */
     if (r == -1) {
         snprintf(s_sd, sizeof s_sd, "no card");
         return;
@@ -103,7 +107,9 @@ static void sd_probe(void)
         snprintf(s_sd, sizeof s_sd, "init %d", r);
         return;
     }
-    r = fs_target_mount(1, "SD", sd_read, 0);
+    r = fs_target_mount_rw(1, "SD", sd_read, sd_write, 0);
+    if (!r)
+        ap_lib_volume(1, LIB_EV_MOUNTED);
     snprintf(s_sd, sizeof s_sd, "%uM %s %db %s", (unsigned)(sd_sectors() >> 11),
              sd_is_hc() ? "HC" : "SC", sd_bus_width(),
              r ? (r == -3 ? "rd err" : "no fs") : fs_target_type(1));
@@ -491,6 +497,7 @@ static void usb_session(void)
         return;
     }
     player_stop();                       /* the PC may rewrite the files we stream */
+    ap_lib_volume(0, LIB_EV_SUSPEND);    /* the library's files closed: the computer's now */
     save_state("usb");
     if (s_ui_up) {                       /* the disk session's page (the session holds the loop) */
         extern const page_t pg_usbdisk;
@@ -507,6 +514,7 @@ static void usb_session(void)
     if (s_ui_up)
         nav_pop();
     fs_target_mount_rw(0, "Internal", emmc_read, emmc_write_async, s_user);   /* host may have written */
+    ap_lib_volume(0, wr ? LIB_EV_WROTE : LIB_EV_RESUME);
     snprintf(s_usb, sizeof s_usb, "x%d r%uM w%uM", r, (unsigned)(rd >> 11), (unsigned)(wr >> 11));
     log_printf("usb: disk session ended: exit %d, read %u MB, written %u MB, cable %d", r,
                (unsigned)(rd >> 11), (unsigned)(wr >> 11), usb_cable());
@@ -1361,6 +1369,8 @@ void ap_ui_loop(void)
     audio_set_volume_db(g_cfg.volume == CFG_VOLUME_MUTE ? -90 : g_cfg.volume);
     log_printf("cfg: play %s, volume %d, resume %u", queue_mode_name(g_cfg.play), g_cfg.volume, g_cfg.resume);
     cpuclk_boot();               /* the CPU point record of this build's earlier boots (services/cpuclk.h) */
+    g_lib.data = g_cfg.libdata;
+    ap_lib_boot();               /* the library: Internal's index read, its refresh asked for if due */
     log_flush_async("boot");     /* (on the disk within a few passes: not ahead of the first frame) */
     bootcrumb(BC_POWER);
     power_init();
@@ -1515,6 +1525,7 @@ void ap_ui_loop(void)
         bootguard_poll();                /* a fault record is cleared after a minute of normal running */
         panel_io_poll();                 /* the VOP trial's marker cleared after 5 s of frames */
         ap_bg_poll();                    /* queued writes, the log, the settings: never waits (ap_bg.c) */
+        ap_lib_poll();                   /* the library's job: 3 ms, only with audio headroom (lib_job.c) */
         switch (power_poll(player_get_state() == PLAYER_PLAYING, 0)) {
         case POWER_OFF_IDLE:
             power_off(NULL);

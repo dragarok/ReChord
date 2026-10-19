@@ -106,6 +106,7 @@ extern int g_locked;
 void nav_toast(int icon, int tone, const char *fmt, ...);
 void nav_header(hdr_t *h);                /* the services' state into the header (screens.c) */
 extern const page_t pg_np, pg_home, pg_opts, pg_dac, pg_vols;
+extern const keydef_t k_list[], k_opts[], k_question[];   /* screens.c: lists, options, questions */
 void np_act(int act, int i);              /* Now Playing's keys (also with the screen off) */
 void np_seek_cancel(void);                /* a seek being held ends without going (the chord) */
 int np_loaded(void);

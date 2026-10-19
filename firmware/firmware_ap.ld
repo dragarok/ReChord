@@ -67,12 +67,15 @@ MEMORY
        clear of the loaded image (0x0304F490+). */
     FW_RAM  (rwx) : ORIGIN = 0x03004000, LENGTH = 0x0002C000   /* to 0x03030000 */
 
-    /* OVL_WIN: the overlay window. Core-A SRAM between the audio input ring (to 0x0303FFFF) and
-       the loaded image (0x0304F490): nothing of ours is there (the loader's data sits there
-       while it boots us, SDK BuildAll.sct LOADER_DATA_BASE 0x0304A000, docs/community.md 4.2,
-       and is dead once our code runs). 32 KiB; 0x03048000..0x0304F000 stays free for a second
-       window. Holds code and read-only data only: an overlay's .data and .bss are resident. */
-    OVL_WIN (rx)  : ORIGIN = 0x03040000, LENGTH = 0x00008000
+    /* OVL_WIN: the modes' overlay window, and OVL_LIB the library's. Core-A SRAM between the
+       audio input ring (to 0x0303FFFF) and the loaded image (0x0304F490): nothing of ours is there
+       (the loader's data sits there while it boots us, SDK BuildAll.sct LOADER_DATA_BASE
+       0x0304A000, docs/community.md 4.2, and is dead once our code runs). OVL_WIN 16 KiB (its
+       largest overlay is under 9 KiB), OVL_LIB the 44 KiB after it, to 0x0304F000: the music
+       library alone, so it never takes a window from the USB DAC or USB-C earphones. Code and
+       read-only data only: an overlay's .data and .bss are resident. */
+    OVL_WIN (rx)  : ORIGIN = 0x03040000, LENGTH = 0x00004000
+    OVL_LIB (rx)  : ORIGIN = 0x03044000, LENGTH = 0x0000B000
 
     /* OVL_STORE: the overlays' load addresses. Only in the full ELF: no such memory, nothing
        loads from it; the image carries each overlay as a module (Makefile: objcopy -R strips
@@ -138,6 +141,16 @@ SECTIONS
                      .text.te_probe_test*)
             . = ALIGN(4);
         }
+    }
+
+    /* the music library (services/lib.h, docs/LIBRARY.md): the index job, the views, the lists,
+       its screens -- the library's window, its only overlay (services/ovl.c) */
+    .ovl_lib ORIGIN(OVL_LIB) : AT (ORIGIN(OVL_STORE) + 0x80000)
+    {
+        KEEP(*(.ovl_hdr.lib))
+        *(.ovl.lib.*)
+        *lib_*.o(.text* .rodata*)
+        . = ALIGN(4);
     }
 
     /* ---- vector table FIRST at the entry base -------------------------
@@ -249,6 +262,14 @@ ASSERT(__fonts_ram_end - __fonts_ram_start >= 0x17000,
 NOCROSSREFS_TO(.ovl_usbdac .vectors .text .data)
 NOCROSSREFS_TO(.ovl_usbout .vectors .text .data)
 NOCROSSREFS_TO(.ovl_dev .vectors .text .data)
+NOCROSSREFS_TO(.ovl_lib .vectors .text .data)
+NOCROSSREFS(.ovl_lib .ovl_usbdac .ovl_usbout .ovl_dev)
+__ovl_lib_start = ORIGIN(OVL_LIB);
+__ovl_lib_end   = ORIGIN(OVL_LIB) + LENGTH(OVL_LIB);
+ASSERT(ORIGIN(OVL_LIB) >= ORIGIN(OVL_WIN) + LENGTH(OVL_WIN), "the library's window after the modes' window")
+ASSERT(__ovl_lib_end <= 0x0304F000, "the library's window must stay below the loaded image (0x0304F490)")
+ASSERT(ovl_hdr_lib == ORIGIN(OVL_LIB), "the library overlay's header must be first in its window")
+ASSERT(SIZEOF(.ovl_lib) <= LENGTH(OVL_LIB), "the library overlay is over its window")
 __ovl_win_start = ORIGIN(OVL_WIN);
 __ovl_win_end   = ORIGIN(OVL_WIN) + LENGTH(OVL_WIN);
 ASSERT(ORIGIN(OVL_WIN) >= 0x03040000, "the overlay window must stay above the audio input ring")

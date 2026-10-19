@@ -928,3 +928,43 @@ int emmc_layout(uint32_t *user_start)
     }
     return -1;
 }
+
+#ifdef LIB_SD_SHIM
+/* TEST BUILDS ONLY (make LIB_SD_SHIM=1): the card's block writer for the library's tests while the
+ * sd-rw branch's own sd_write is not merged. Same steps as raw_write() on the card's controller and
+ * its RCA; no write-behind queue. Conflict to resolve at merge: sd-rw's sd_write replaces this. */
+int sd_write(uint32_t lba, uint32_t count, const void *buf)
+{
+    int ret, r;
+
+    watchdog_feed();
+    if (count == 0u)
+        return 0;
+    if (!s_sd_sectors || lba + count < lba || lba + count > s_sd_sectors)
+        return -30;
+    select_mmc(1);
+    clk_gate(0x6B, 1);
+    if (count == 1u) {
+        ret = xfer_data(24, s_sd_hc ? lba : lba << 9, (uint32_t *)buf, 512, 1);
+    } else {
+        ret = xfer_data(25, s_sd_hc ? lba : lba << 9, (uint32_t *)buf, count << 9, 1);
+        r = send_cmd(12, s_sd_rca << 16, F_RESP | F_CRC | F_STOP, 1);
+        if (!ret)
+            ret = r;
+    }
+    for (uint32_t i = 0; i < 100000u; i++) {          /* programming done: tran */
+        if (send_cmd(13, s_sd_rca << 16, F_RESP | F_CRC, 0)) {
+            r = -1;
+            break;
+        }
+        r = ((MMC[RESP0] & 0x100u) && ((MMC[RESP0] & 0x1FFFu) >> 9) == 4u) ? 0 : -2;
+        if (!r)
+            break;
+        delay_us(10);
+    }
+    if (!ret && r)
+        ret = -31;
+    clk_gate(0x6B, 0);
+    return ret;
+}
+#endif

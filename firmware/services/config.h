@@ -45,6 +45,8 @@ typedef struct {
                                   * (audio_shared.h AS_HIFI_*, docs/HIFI.md); written when not auto */
     uint8_t cpu_b;               /* cpu_b=96|auto|stock: core B's clock while playing (services/cpuclk.h,
                                   * docs/CPU_CLOCK.md); written when not 96 */
+    uint8_t libdata;             /* libdata=sd|internal: where the library's lists and the card's index go
+                                  * (services/lib.h LIB_DATA_*); written when not sd */
 } config_t;
 enum { CFG_CPU_B_96 = 0, CFG_CPU_B_AUTO = 1, CFG_CPU_B_STOCK = 2 };
 #define CFG_DISPLAY_AUTO 4       /* = PANEL_PATH_AUTO (drivers/panel_io.h): the build's default path */
