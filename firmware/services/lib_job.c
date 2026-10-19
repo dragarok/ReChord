@@ -38,7 +38,7 @@ static int s_active = -1;            /* the volume being indexed, -1 */
 static uint8_t s_want[2];            /* 0, 1 refresh, 2 full */
 static uint8_t s_gone[2];            /* its volume went away under it */
 static uint32_t s_canary;
-static uint16_t s_clean;             /* files to remove when idle: bits 0..4 LIBT0..4.TMP, 8..11 the
+static uint16_t s_clean;             /* files to remove when idle: bits 0..5 LIBT0..5.TMP, 8..11 the
                                       * card's index at the other place */
 static char s_clean_dir[24];         /* where the temps are */
 static char s_dir[2][24];            /* data directory per volume, "" = not looked for yet */
@@ -233,7 +233,7 @@ static void committed(void)
     if (idx_load(j->vol))
         lib_log("lib: %s: the new index does not read back", vol_name(j->vol));
     snprintf(s_clean_dir, sizeof s_clean_dir, "%s", j->dir);
-    s_clean |= 0x1Fu;
+    s_clean |= 0x3Fu;                    /* (LIBT0..5.TMP) */
     if (j->vol == 1)
         s_clean |= 0xF00u;               /* (an index the card had at its other place is stale now) */
     (void)dir, (void)base, (void)p;

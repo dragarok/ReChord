@@ -67,7 +67,7 @@ static int trailer_of(fs_file_t *f, lib_trailer_t *t)
     if (size < (long)sizeof *t || fs_seek(f, size - (long)sizeof *t) < 0 ||
         fs_read(f, t, sizeof *t) != (long)sizeof *t)
         return -1;
-    if (t->magic != LIB_IDX_MAGIC || t->version != LIB_VERSION ||
+    if (t->magic != LIB_IDX_MAGIC || t->version - 1u > LIB_VERSION - 1u ||   /* (1 or 2: the same rows) */
         t->crc != lib_crc(0, t, (uint32_t)(sizeof *t - 4u)))
         return -2;
     return 0;
@@ -135,6 +135,11 @@ int idx_warm(int vol, uint64_t t_end)
     if (!g_lib_view[vol].ok || !s_f[vol])
         return 1;
     return lib_chain_places(s_f[vol], s_pl[vol], NPLACE, g_lib_view[vol].size / NPLACE + 1u, t_end) != 0;
+}
+
+fs_file_t *idx_file(int vol)          /* (the build's merge reads the previous index as streams) */
+{
+    return g_lib_view[vol].ok ? s_f[vol] : 0;
 }
 
 int idx_read(int vol, uint32_t off, void *dst, uint32_t len)
@@ -274,7 +279,7 @@ int idx_row(int vol, int sec, uint32_t i, lib_row_t *r, uint8_t *buf, uint32_t c
     end = buf + len;
     switch (sec) {
     case LS_ALBTRK:
-        r->kind = p[2];
+        r->kind = p[2] & R_KIND;
         r->disc = p[3];
         r->trk = (uint16_t)lib_le16(p + 4);
         r->dur = (uint16_t)lib_le16(p + 6);

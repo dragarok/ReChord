@@ -86,6 +86,7 @@ int ap_lib_tags(tags_read_at_t rd, void *u, uint32_t size, int kind, tag_info_t 
 int ap_lib_tags_ok(void);
 #define T_PARTIAL 1u                     /* a track record's byte 27: read with the basic reader */
 #define F_PARTIAL 0x80u                  /* a folder record's flags: it has such tracks */
+/* (F_CHANGED, lib_int.h: its tracks are not the previous walk's as they were: the build merges) */
 
 static uint32_t name_hash(const char *s, uint32_t n)
 {
@@ -138,7 +139,8 @@ static void write_folder(lib_job_t *j)
     lw_u32(&j->raw, c->ref.pclus);
     lw_u32(&j->raw, c->ref.psize);
     lw_u16(&j->raw, c->ref.slot);
-    lw_u8(&j->raw, (uint32_t)(c->ref.flags & ~F_PARTIAL) | (c->partial ? F_PARTIAL : 0u));
+    lw_u8(&j->raw, (uint32_t)(c->ref.flags & ~(F_PARTIAL | F_CHANGED)) | (c->partial ? F_PARTIAL : 0u) |
+                   (c->changed ? F_CHANGED : 0u));
     lw_u8(&j->raw, c->depth);
     lw_u32(&j->raw, c->sig);
     lw_u32(&j->raw, c->parent);
@@ -951,7 +953,9 @@ int scan_step(lib_job_t *j, uint64_t t_end)
                     j->pfx = j->pfx_end;
                     break;
                 }
-                lw_put(&j->raw, p, lib_le16(p + 2));
+                lw_put(&j->raw, p, 22);  /* (as it was, but not changed by this walk) */
+                lw_u8(&j->raw, p[22] & ~F_CHANGED);
+                lw_put(&j->raw, p + 23, lib_le16(p + 2) - 23u);
                 j->pfx = lr_tell(&j->old);
                 break;
             }
@@ -978,6 +982,7 @@ int scan_step(lib_job_t *j, uint64_t t_end)
             } else {
                 c->tcount = 0;
                 c->partial = 0;
+                c->changed = 1;
                 j->nmatch = 0;
                 memset(W_MATCH, 0, W_NMATCH * sizeof(lib_match_t));
                 c->last_slot = 0;
