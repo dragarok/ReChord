@@ -49,13 +49,19 @@ int emmc_layout(uint32_t *user_start);
 uint32_t emmc_fw_sectors(void);
 int emmc_fw_write(uint32_t rel, uint32_t count, const void *buf);
 
-/* microSD slot (second DW-MMC instance), read-only. sd_init(): 0 = ready,
- * -1 = no card, other negative = failing step. */
+/* microSD slot (second DW-MMC instance). sd_init(): 0 = ready, -1 = no card, other negative =
+ * failing step. sd_read / sd_write: card sectors (SDSC cards are byte addressed inside), 0 or a
+ * negative step; SD_ERR_NOCARD when the card-detect pin says the card is out (then nothing is sent).
+ * sd_written(): sectors written since boot (what a USB disk session wrote, by difference). */
+#define SD_ERR_NOCARD (-40)
 int sd_present(void);
 int sd_init(void);
 uint32_t sd_sectors(void);           /* 0 = not initialized */
 int sd_is_hc(void);
 int sd_bus_width(void);
 int sd_read(uint32_t lba, uint32_t count, void *buf);
+int sd_write(uint32_t lba, uint32_t count, const void *buf);
+uint32_t sd_written(void);
+int sd_bounced(void);                /* 1 once after sd_read/sd_write refused for SD_ERR_NOCARD */
 
 #endif
