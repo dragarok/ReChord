@@ -712,6 +712,8 @@ static void close_track(void)
 
 /* Open the next track the play queue hands out and queue it for B; a file that
  * does not open is skipped. */
+static uint8_t s_vol_bit = 3;            /* the last track's card, as emmc_busy() names it */
+
 static int open_next(void)
 {
     char name[FS_NAME_MAX];
@@ -728,6 +730,7 @@ static int open_next(void)
         if (fs_ref_name(&ref, name, sizeof name) != 0)
             strcpy(name, "?");
         s_file = fs_open_ref(&ref);
+        s_vol_bit = (uint8_t)(1u << ref.vol);   /* (emmc_busy: 1 Internal, 2 the card) */
         if (!s_file) {
             log_printf("audio: cannot open %s", name);
             continue;
@@ -1781,8 +1784,8 @@ void audio_poll(void)
         return;
     check_underrun();
     audio_tick();                            /* (also from SysTick: audio_tick) */
-    if (!emmc_busy())                        /* the card programs a queued write: a read would wait */
-        refill();
+    if (!(emmc_busy() & s_vol_bit))          /* the track's card programs a queued write: a read */
+        refill();                            /* would wait (the other card's: none) */
     /* start output once B has filled the ring (or the whole stream is shorter), the DAC up */
     if (!s_dma_on && !AS->cmd && !s_dac_phase &&
         (AS->pcm_wr >= AS_PCM_BLOCKS || (AS->pcm_end && AS->pcm_wr >= AS->pcm_end))) {

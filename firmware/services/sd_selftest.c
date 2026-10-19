@@ -22,6 +22,7 @@
 #include "scratch.h"
 #include "sdcard.h"
 #include "drivers/clock.h"
+#include "drivers/emmc.h"
 #include "ui/frame.h"
 #include "ui/nav.h"
 
@@ -137,6 +138,8 @@ void sd_selftest(void)
     if (!r) {
         step = "sync";
         r = fs_target_sync(1);
+        if (!r)
+            r = sd_sync();                   /* (the card's queued blocks on it: drivers/emmc.h) */
     }
     tx = time_ms() - t0;
     if (r) {

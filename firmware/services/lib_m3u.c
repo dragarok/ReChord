@@ -608,6 +608,8 @@ int m3u_create(const char *name)
 /* Every list in folder `from` merged into the lists folder: its entries that are not there
  * appended (a list missing there gets its file name), then the source removed -- only once every
  * one of its entries is in a target that closed whole. Lists moved, or < 0. */
+extern int emmc_sync(void) __attribute__((weak));   /* (drivers/emmc_rknanoc.c; none on the host) */
+
 int m3u_move_all(const char *from)
 {
     char files[M3U_LISTS][32];           /* (on the stack: this is rare) */
@@ -671,6 +673,10 @@ int m3u_move_all(const char *from)
                 break;
             }
         }
+        /* the card's writes are queued (drivers/emmc.h): on it before the source goes (the queue
+         * drained: emmc_sync; a card pulled or failed meanwhile, -32: the source kept) */
+        if (!bad && lib_lists_vol() == 1 && emmc_sync && emmc_sync())
+            bad = 1;
         if (!bad && fs_remove(src) == 0)
             moved++;
     }

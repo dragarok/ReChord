@@ -69,25 +69,33 @@ static void mount(int init)
         snprintf(s_text, sizeof s_text, r == -1 ? "" : "init %d", r);
         return;
     }
-    r = fs_target_mount_rw(1, "SD", sd_read, sd_write, 0);
+    r = fs_target_mount_rw(1, "SD", sd_read, sd_write_async, 0);   /* (written behind: drivers/emmc.h) */
     s_mounted = r == 0;
     s_serial = fs_target_serial(1);
     snprintf(s_text, sizeof s_text, "%uM %s %db %s", (unsigned)(sd_sectors() >> 11), sd_is_hc() ? "HC" : "SC",
              sd_bus_width(), r ? (r == FS_ERR_IO ? "rd err" : "no fs") : fs_target_type(1));
 }
 
+/* The card went, or failed (drivers/emmc.h, emmc_wq_stats()->sd_fail: a write that did not take, a card stuck
+ * busy; it stays unmounted until it is pushed in again). Its blocks still queued are dropped: the
+ * card keeps a prefix of what was written, which the file system's write order is made for. */
 static void gone(void)
 {
     int from_sd = queue_count() && queue_ref(0)->vol == 1;
     int stop = from_sd && player_get_state() != PLAYER_STOPPED;
+    const emmc_wq_stats_t *st = emmc_wq_stats();
+    int failed = st->sd_fail;
 
     if (stop)
         player_stop();
     if (from_sd)
         queue_clear();                   /* (refs into the card that went) */
     fs_target_unmount(1);
-    sd_init();                           /* (no card: sd_sectors() 0, the USB disk shows no medium) */
-    log_printf("sd: card removed%s", stop ? ": playback stopped" : "");
+    if (!failed)
+        sd_init();                       /* (no card: sd_sectors() 0, the USB disk shows no medium) */
+    /* (failed: a code in (SD_ERR_NOCARD, 0); SD_ERR_NOCARD, the card went while a wait held the loop) */
+    log_printf("sd: card %s%s (%u blocks lost)", (unsigned)(failed - SD_ERR_NOCARD - 1) < -SD_ERR_NOCARD - 1 ? "failed" : "removed",
+               stop ? ": playback stopped" : "", (unsigned)st->dropped);   /* (the code: "storage:" last_error) */
     s_text[0] = 0;
     if (s_mounted)
         post(SD_EV_REMOVED);
@@ -99,6 +107,8 @@ int sdcard_tick(void)
     uint32_t now = time_ms();
     int in;
 
+    if (s_mounted && emmc_wq_stats()->sd_fail)
+        goto lost;                       /* (failed: unmounted, stays so until it is pushed in again) */
     if (s_state != 0xFF && now - s_t < 100u)
         return 0;
     s_t = now;
@@ -116,6 +126,7 @@ int sdcard_tick(void)
     }
     s_state = s_last = (uint8_t)in;
     if (!in) {
+lost:
         if (s_mounted || sd_sectors())
             gone();
         return 1;
@@ -129,8 +140,10 @@ int sdcard_tick(void)
 
 void sdcard_usb_begin(void)
 {
-    if (s_mounted)
+    if (s_mounted) {
         fs_target_unmount(1);            /* (synced first: the PC sees the card whole) */
+        emmc_sync();                     /* (what that flushed, on the card before the PC reads it) */
+    }
     s_wr0 = sd_written();
 }
 
