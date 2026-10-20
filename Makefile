@@ -148,9 +148,9 @@ COREB_MODULES := $(foreach f,$(COREB_FAMILIES),--module b$(f)=$(COREB_DIR)/$(f).
 cfw-ap: $(CFW_ELF)
 	@echo "CFW AP ELF: $(CFW_ELF)"
 
-# BOARD is a compile flag the dependency files don't see: a stamp per board
-# makes switching it rebuild every object.
-CFW_BOARD_STAMP := $(CFW_BUILD_DIR)/.board-$(BOARD)
+# BOARD (and CPUCLK_FLAC, firmware/ap.mk) are compile flags the dependency files don't see: a
+# stamp per value makes switching one rebuild every object.
+CFW_BOARD_STAMP := $(CFW_BUILD_DIR)/.board-$(BOARD)-flac$(CPUCLK_FLAC)
 $(CFW_BOARD_STAMP):
 	@$(MKDIR_P) $(dir $@)
 	@rm -f $(CFW_BUILD_DIR)/.board-*
@@ -279,7 +279,7 @@ COMMON_FLAGS := $(ARCH_FLAGS) -Os -Wall -Wno-unused-parameter \
                 -ffunction-sections -fdata-sections -MMD -MP -fcommon \
                 -include firmware/rockchip/include/armcc_compat.h
 BB_CFLAGS    := $(COMMON_FLAGS) -DRECHORD_BB_BUILD -D_RK_EQ_ -Ifirmware $(addprefix -I,$(BB_INCLUDE_DIRS))
-AP_CFLAGS    := $(COMMON_FLAGS) -DRECHORD_AP_BUILD -DBOARD=$(BOARD_ID) -Ifirmware $(addprefix -I,$(AP_INCLUDE_DIRS))
+AP_CFLAGS    := $(COMMON_FLAGS) -DRECHORD_AP_BUILD -DBOARD=$(BOARD_ID) -DCPUCLK_FLAC=$(CPUCLK_FLAC) -Ifirmware $(addprefix -I,$(AP_INCLUDE_DIRS))
 
 BB_OBJS := $(foreach src,$(BB_SRCS),\
              $(BB_OBJ_DIR)/$(patsubst firmware/rockchip/%,%,$(src)).o)

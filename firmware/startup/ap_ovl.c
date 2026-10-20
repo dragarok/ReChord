@@ -235,17 +235,17 @@ void ap_eq(int a, int i)             /* the page's act; its draw with a = -1 */
 /* ---- dev: the Developer tests (Settings > Developer, ui/screens.c) ------------------------------ */
 
 enum { DEV_DAC_TEST, DEV_USB_CONSOLE, DEV_USB_PROBE, DEV_USB_DETECT, DEV_BT_LISTEN, DEV_TE_PROBE, DEV_HIFI_PROBE,
-       DEV_SD_TEST };
+       DEV_SD_TEST, DEV_BT_HUM };
 
 void dac_test_run(void), usb_console_run(void), usb_probe_menu(void), usb_detect_test(void),
-     bt_listen_test(void), te_probe_test(void);   /* startup/ap_ui.c */
+     bt_listen_test(void), te_probe_test(void), bt_hum_test(void);   /* startup/ap_ui.c */
 void hifi_probe_test(void);                       /* audio/hifi_probe.c */
 void sd_selftest(void);                           /* services/sd_selftest.c */
 
 static void (*const k_dev[])(void) OVL_API(dev) = {
     [DEV_DAC_TEST] = dac_test_run, [DEV_USB_CONSOLE] = usb_console_run, [DEV_USB_PROBE] = usb_probe_menu,
     [DEV_USB_DETECT] = usb_detect_test, [DEV_BT_LISTEN] = bt_listen_test, [DEV_TE_PROBE] = te_probe_test,
-    [DEV_HIFI_PROBE] = hifi_probe_test, [DEV_SD_TEST] = sd_selftest,
+    [DEV_HIFI_PROBE] = hifi_probe_test, [DEV_SD_TEST] = sd_selftest, [DEV_BT_HUM] = bt_hum_test,
 };
 OVL_HEADER(dev, OVL_DEV, k_dev);
 
@@ -266,6 +266,7 @@ void ap_bt_listen(void) { dev_run(DEV_BT_LISTEN); }
 void ap_te_probe(void) { dev_run(DEV_TE_PROBE); }
 void ap_hifi_probe(void) { dev_run(DEV_HIFI_PROBE); }
 void ap_sd_test(void) { dev_run(DEV_SD_TEST); }
+void ap_bt_hum(void) { dev_run(DEV_BT_HUM); }
 
 /* ---- fsw: the file-system writer's cold half (services/fs_write_ext.c), its own window ------ */
 

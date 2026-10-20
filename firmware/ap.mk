@@ -188,6 +188,11 @@ AP_ARCH_FLAGS := -mcpu=cortex-m3 -mthumb -mfloat-abi=soft
 BOARD ?= 512m
 BOARD_ID := $(if $(filter 8g,$(BOARD)),1,2)
 
+# Core B's FLAC point (services/cpuclk.c, docs/CPU_CLOCK.md): make CPUCLK_FLAC=1 builds the switch,
+# its self-test and the boot gating (cpu_b=auto|stock). Off (2026-10-20, the user): it hung this unit
+# at the first play in round 5, and FLAC/MP3/M4A play at 96 MHz; off, core B stays at the UI point.
+CPUCLK_FLAC ?= 0
+
 AP_CFLAGS := $(AP_ARCH_FLAGS) -Os -Wall \
   -Wno-unused-parameter -Wno-unused-variable \
   -Wno-implicit-function-declaration -Wno-implicit-int \

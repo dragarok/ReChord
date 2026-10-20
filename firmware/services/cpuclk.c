@@ -107,6 +107,30 @@ static uint32_t insn_per_frame(const as_track_t *t, uint32_t extra)
     }
 }
 
+#if !CPUCLK_FLAC
+/* ap.mk CPUCLK_FLAC=0: no FLAC point in this build. Core B stays at the UI point; the format's cost
+ * still goes to core B for its EQ room. Every other entry answers "the UI point" (cpuclk.h). */
+unsigned cpuclk_point_for(as_track_t *t, uint32_t extra, int usb_out)
+{
+    t->eq = insn_per_frame(t, extra);
+    return CLOCK_POINT_UI;
+}
+
+void cpuclk_boot(void)
+{
+    log_printf("cpuclk: cpu_b=96, the FLAC point not in this build (ap.mk CPUCLK_FLAC)%s",
+               g_cfg.cpu_b != CFG_CPU_B_96 ? ": cpu_b= ignored" : "");
+}
+
+int cpuclk_arm(void) { return -1; }
+int cpuclk_admitted(void) { return 0; }
+void cpuclk_b_loaded(uint32_t n) { (void)n; }
+void cpuclk_prepare(void) {}
+int cpuclk_may(unsigned want) { return want == CLOCK_POINT_UI; }
+int cpuclk_switch(unsigned want, int b_held) { (void)want; (void)b_held; return ST_OK; }
+void cpuclk_fail(unsigned stage) { (void)stage; }
+void cpuclk_poll(void) {}
+#else
 unsigned cpuclk_point_for(as_track_t *t, uint32_t extra, int usb_out)
 {
     /* the EQ's sections (coreb/eq.h: the presets' counts; Custom as all ten, its edits come later) */
@@ -539,3 +563,4 @@ void cpuclk_poll(void)
                        k_stage[s_failed < ST_N ? s_failed : 0]);
     }
 }
+#endif /* CPUCLK_FLAC */
