@@ -147,15 +147,20 @@ static void uart_close(void)
 #define T_RETRY_SLOW_MS   120000u
 #define RC_SLOW_AFTER     12u
 #define T_LOST_MS         2000u         /* a lost link: the first try 2 s later */
-#define T_CL_ECHO_MS      5000u         /* a CLOK this soon after our CL06 answers it, even linked */
+/* [ours] Only CQO says linked. The device (2026-10-20, log/device_2026-10-20_round7_session in the
+ * project): a CH06 echoed 20 s before the link came, then CHOK + CLOK as it came up, and the
+ * earphones' keys arriving while we called it closed; on 2026-10-17 CT00 was answered CKKK + CLOK.
+ * Unlinked, the module answers no CQ00 (no CQI/CQS/CQL in any device log); linked, it left at
+ * most 1 in a row unanswered (6 times). So a frame that says the link changed without saying how
+ * starts a check: CQ00 every second, nothing holding it back, until a CQO or 3 unanswered. */
+#define T_VERIFY_FIRST_MS 300u          /* the check's first CQ00 */
+#define T_VERIFY_POLL_MS  1000u         /* and the next ones */
+#define VERIFY_MISSES     3u            /* unanswered in a row: no link */
 #define T_STOP_MS         300u          /* a stop reaches the module once it lasted 300 ms: a USB host
                                          * flipped its alternate 4 times in 40 ms at a rate change */
 #define T_DISC_MS         3000u         /* our CT00 unanswered for 3 s: unrouted anyway */
 #define T_SERVED_MAX_MS   1000u         /* the idle time counts at most 1 s per tick: a USB disk
                                          * session that held the loop for 42 min idled it off at once */
-#define T_CH_CHECK_MS     10000u        /* a link only a CH frame announced: a CHER/CLER this soon
-                                         * undoes it. The device answered a CH06 with "CH36"+MAC+name,
-                                         * then CHER and CLER 70 ms later, and no link (97.5 s) */
 
 /* ---- state ---------------------------------------------------------------------- */
 static bt_state_t s_state;
@@ -166,15 +171,16 @@ static int s_avrcp;                     /* stock 0x0301D8AC: 0 none, 1 paused, 2
 static int s_rc;                        /* reconnecting to s_peer until it links */
 static unsigned s_rc_n;                 /* CL06 tries sent in this run */
 static uint32_t s_rc_t;                 /* the last try */
-static uint32_t s_cl_t;                 /* our last CL06 (0: none) */
 static int s_user_off;                  /* the user's Disconnect: no reconnect until a connect or a boot */
 static uint32_t s_disc_t;               /* our CT00 waiting for its answer (0: none) */
+static int s_disc_check;                /* after the user's Disconnect: a CQO means the link stayed */
+static int s_disc_cycled;               /* the module was switched off and on for that Disconnect */
+static uint32_t s_vf_t, s_vf_poll;      /* the link in question since, the check's last CQ00 (0: none) */
+static unsigned s_vf_n;                 /* the check's CQ00s unanswered */
 static uint32_t s_idle, s_last;         /* unconnected time served (ms); the last bt_poll (0: none yet) */
 static int s_want;                      /* the source plays (bt_set_playing), linked or not */
 static uint32_t s_stop_t;               /* the source stopped then, not yet sent (0: none) */
 static uint32_t s_q_t;                  /* our CQ00 while connected, unanswered (0: none) */
-static uint32_t s_ch_t;                 /* connected by a CH frame then, no CQO since (0: none) */
-static unsigned s_q_miss;               /* such polls in a row (measured: the device's answer set is open) */
 static uint32_t s_seq = 1, s_tx_fail;
 static bt_dev_t s_list[BT_SCAN_MAX], s_peer;
 static int s_n;
@@ -333,7 +339,7 @@ static void link_down(int lost)
     s_paired_wait = 0;
     s_disc_t = 0;
     s_q_t = 0;
-    s_ch_t = 0;
+    s_vf_t = 0;
     if (was) {
         log_printf("bt: disconnected");
         bt_event(BT_EV_DISCONNECTED, &s_peer);
@@ -354,6 +360,8 @@ int bt_power(int on)
         s_n = 0;
         s_idle = 0;
         s_last = 0;
+        s_vf_t = 0;
+        s_disc_check = 0;
         go(BT_STARTING);
         log_printf("bt: power on");
         return 0;
@@ -423,8 +431,9 @@ int bt_connect(const uint8_t mac[6], const char *name)
     s_paired_wait = 0;
     s_rc = 0;
     s_user_off = 0;
+    s_disc_check = 0;
+    s_vf_t = 0;
     go(BT_CONNECTING);
-    s_cl_t = time_stamp(time_ms());
     return tx_mac('L', mac);            /* CL06+MAC: seg84 0307aace */
 }
 
@@ -434,8 +443,58 @@ int bt_disconnect(void)
         return -1;
     s_user_off = 1;
     s_rc = 0;
+    s_disc_cycled = 0;
     s_disc_t = time_stamp(time_ms());
     return tx_cmd('T');                 /* CT00: seg84 0307ba00 (event 0xDF) */
+}
+
+static void connected(const bt_frame_t *f);
+
+/* ---- [ours] the link in question (T_VERIFY_*): asked, not guessed ---------------- *
+ * why: the frame that raised it ('L' CLOK, 'H' a CH frame or CHOK, 'T' our CT00 answered or not,
+ * 'K' an earphone key while unlinked, 'Q' a status poll unanswered while linked). */
+static void verify(uint32_t now, char why)
+{
+    if (!s_vf_t)
+        log_printf("bt: link? C%c", why);
+    s_vf_t = time_stamp(now);
+    s_vf_poll = time_stamp(now - T_VERIFY_POLL_MS + T_VERIFY_FIRST_MS);
+    s_vf_n = 0;
+}
+
+/* The check's end. linked: a CQO came; else no link (3 unanswered). After the
+ * user's Disconnect a CQO means the CT00 left the link up: the module off and on (as stock's
+ * screen entry does, seg84:0307a13e) ends it, once; no reconnect follows (s_user_off). */
+static void verify_end(int linked, const bt_frame_t *f)
+{
+    int disc = s_disc_check;
+
+    s_vf_t = 0;
+    s_disc_check = 0;
+    log_printf("bt: link? %s", linked ? "CQO" : "none");
+    if (disc && linked && !s_disc_cycled) {
+        s_disc_cycled = 1;
+        bt_power(0);
+        bt_power(1);
+    } else if (linked && !s_user_off) {
+        connected(f);
+    } else if (!linked && s_state == BT_CONNECTED) {
+        link_down(1);
+        go(BT_ON);
+    }
+}
+
+/* Our CT00 answered or not in 3 s: unrouted at once. sure: a CTOK; otherwise (CLOK, as on
+ * 2026-10-17, or nothing) the module is asked, and a CQO then means the link stayed. */
+static void disc_done(uint32_t now, int sure)
+{
+    s_disc_t = 0;
+    link_down(0);
+    go(BT_ON);
+    if (!sure) {
+        verify(now, 'T');
+        s_disc_check = 1;
+    }
 }
 
 /* ---- frames from the module ------------------------------------------------------ */
@@ -463,17 +522,11 @@ static void connected(const bt_frame_t *f)
         if (f->name[0])
             memcpy(s_peer.name, f->name, sizeof s_peer.name);
     }
-    if (f)
-        s_ch_t = 0;                     /* the CQO confirms it */
     s_q_t = 0;
-    if (s_q_miss) {
-        log_printf("bt: CQ00 answered again after %u unanswered", s_q_miss);
-        s_q_miss = 0;
-    }
+    s_vf_t = 0;
     if (s_state == BT_CONNECTED)
         return;
     s_rc = 0;
-    s_user_off = 0;
     s_disc_t = 0;
     s_paired_wait = 0;
     go(BT_CONNECTED);
@@ -484,12 +537,15 @@ static void connected(const bt_frame_t *f)
     bt_event(BT_EV_CONNECTED, &s_peer);
 }
 
-/* CH...: connected (stock), until a CQO confirms it or a CHER/CLER soon after undoes it */
-static void ch_linked(uint32_t now)
+/* CH... / CHOK (stock: connected = 1) and CLOK (stock: paired, connected = 0): the link changed,
+ * but these do not say how (T_VERIFY_*). A connect waits for the CQO (stock's state 0). */
+static void link_news(uint32_t now, char why)
 {
-    if (s_state != BT_CONNECTED)
-        s_ch_t = time_stamp(now);
-    connected(0);
+    if (s_state == BT_CONNECTING || (s_state == BT_ON && s_rc)) {
+        s_paired_wait = 1;
+        s_t = now;
+    }
+    verify(now, why);
 }
 
 static void frame(const bt_frame_t *f, uint32_t now)
@@ -528,55 +584,59 @@ static void frame(const bt_frame_t *f, uint32_t now)
             go(BT_ON);                  /* CSEN: state 0. (CSER: ignored by stock) */
         break;
     case BT_RX_OK:
-        if (f->cmd == 'L' && s_state == BT_CONNECTED && !(s_cl_t && now - s_cl_t < T_CL_ECHO_MS)) {
-            /* stock's screen parser: CLOK -> connected = 0 (08_bluetooth.md 2.3); the device
-             * answers our CT00 with CLOK, never CTOK (2026-10-17, six times) */
-            log_printf("bt: CLOK: the link closed");
-            link_down(1);
-            go(BT_ON);
-        } else if (f->cmd == 'L' && (s_state == BT_CONNECTING || s_rc)) {
-            log_printf("bt: paired '%s'", s_peer.name);    /* connected comes with CQO */
-            bt_event(BT_EV_PAIRED, &s_peer);
-            s_paired_wait = 1;
-            s_t = now;
-        } else if (f->cmd == 'H') {     /* CHOK: connected */
-            ch_linked(now);
+        if (f->cmd == 'L' && (s_disc_t || s_disc_check)) {
+            disc_done(now, 0);          /* the device answers our CT00 so (2026-10-17, six times) */
+        } else if (f->cmd == 'L') {     /* stock: paired, connected = 0 (08_bluetooth.md 2.3) */
+            if (s_state == BT_CONNECTING || (s_state == BT_ON && s_rc)) {
+                log_printf("bt: paired '%s'", s_peer.name);
+                bt_event(BT_EV_PAIRED, &s_peer);
+            }
+            link_news(now, 'L');
+        } else if (f->cmd == 'H') {     /* CHOK (stock: connected = 1) */
+            if (s_state != BT_CONNECTED)
+                link_news(now, 'H');
         } else if (f->cmd == 'T') {     /* CTOK (or the resident's CT): disconnected; the device
                                          * sends it unasked when the earphones go */
-            link_down(1);
-            go(BT_ON);
-        }
-        break;
-    case BT_RX_ERR:                     /* CLER / CHER */
-        if (s_state == BT_ON && s_rc) {
-            s_paired_wait = 0;
-            if (rc_logged())
-                log_printf("bt: reconnect refused (C%cER), try %u", f->cmd, s_rc_n);
-        } else if (s_state == BT_CONNECTING) {
-            log_printf("bt: connect failed (C%cER)", f->cmd);
-            go(BT_ON);
-            bt_event(BT_EV_CONNECT_FAILED, &s_peer);
-        } else if (s_state == BT_CONNECTED && s_ch_t && now - s_ch_t < T_CH_CHECK_MS) {
-            log_printf("bt: connect failed (C%cER after the CH answer)", f->cmd);
-            link_down(0);
-            go(BT_ON);
-            bt_event(BT_EV_CONNECT_FAILED, &s_peer);
-        }
-        break;
-    case BT_RX_LINKED:
-        ch_linked(now);
-        break;
-    case BT_RX_STATUS:
-        if (f->state == 'O') {
-            connected(f);
-        } else {
-            if (s_state == BT_CONNECTED) {      /* CQS/CQL/CQI: the resident sets connected = 0 */
+            if (s_disc_t || s_disc_check) {
+                disc_done(now, 1);
+            } else {
                 link_down(1);
                 go(BT_ON);
             }
         }
         break;
+    case BT_RX_ERR:                     /* CLER / CHER */
+        if (s_state == BT_ON && s_rc) {
+            s_paired_wait = 0;
+            s_vf_t = 0;
+            if (rc_logged())
+                log_printf("bt: reconnect refused (C%cER), try %u", f->cmd, s_rc_n);
+        } else if (s_state == BT_CONNECTING) {
+            log_printf("bt: connect failed (C%cER)", f->cmd);
+            s_paired_wait = 0;
+            s_vf_t = 0;
+            go(BT_ON);
+            bt_event(BT_EV_CONNECT_FAILED, &s_peer);
+        }
+        break;
+    case BT_RX_LINKED:                  /* CH06 echoed, CH36+MAC+name (stock: connected = 1) */
+        if (s_state != BT_CONNECTED)
+            link_news(now, 'H');
+        break;
+    case BT_RX_STATUS:
+        if (s_vf_t) {
+            if (f->state == 'O')        /* (CQS/CQL/CQI count as unanswered: a link may be coming) */
+                verify_end(1, f);
+        } else if (f->state == 'O' && !s_user_off)
+            connected(f);               /* (after the user's Disconnect a link is not taken) */
+        else if (f->state != 'O' && s_state == BT_CONNECTED) {  /* the resident: connected = 0 */
+            link_down(1);
+            go(BT_ON);
+        }
+        break;
     case BT_RX_KEY:
+        if (s_state != BT_CONNECTED && !s_user_off)
+            verify(now, 'K');
         if (f->cmd == 'P' || f->cmd == 'C') {
             s_hold = T_HOLD_POLLS;      /* (outside the screen) the next 10 polls skipped */
             s_avrcp = f->cmd == 'P' ? 1 : 2;   /* seg84 0307b67c: CP -> 1, CC -> 2 */
@@ -621,9 +681,8 @@ void bt_poll(void)
     if (s_disc_t && now - s_disc_t >= T_DISC_MS) {
         s_disc_t = 0;
         if (s_state == BT_CONNECTED || s_state == BT_CONNECTING) {
-            log_printf("bt: no answer to CT00 in 3 s: disconnected anyway");
-            link_down(0);
-            go(BT_ON);
+            log_printf("bt: CT00 unanswered");
+            disc_done(now, 0);
         }
     }
 
@@ -661,30 +720,41 @@ void bt_poll(void)
             log_printf("bt: connect timed out");
             go(BT_ON);
             bt_event(BT_EV_CONNECT_FAILED, &s_peer);
-        } else if (s_paired_wait && now - s_t >= T_PAIRED_MS) {
-            log_printf("bt: paired but no link in 30 s");
-            s_paired_wait = 0;
-            go(BT_ON);
         }
         break;
     default:
         break;
     }
 
-    if (s_state == BT_ON && s_paired_wait && now - s_t >= T_PAIRED_MS) {
+    if ((s_state == BT_ON || s_state == BT_CONNECTING) && s_paired_wait && now - s_t >= T_PAIRED_MS) {
         log_printf("bt: paired but no link in 30 s");
         s_paired_wait = 0;
+        go(BT_ON);
     }
 
     /* reconnect: stock's auto-reconnect (ram:03067692: CL06 + the remembered MAC twice, 3 s
      * apart), then [ours] 10, 20 and every 30 s, never while a CLOK waits for its link */
-    if (s_state == BT_ON && s_rc && now - s_rc_t >= rc_gap() && !(s_rc_n >= 2 && s_paired_wait)) {
+    if (s_state == BT_ON && s_rc && !s_vf_t && now - s_rc_t >= rc_gap() && !(s_rc_n >= 2 && s_paired_wait)) {
         s_rc_n++;
         s_rc_t = now;
         if (s_rc_n > 2 && rc_logged())
             log_printf("bt: reconnect try %u%s", s_rc_n, s_rc_n == RC_SLOW_AFTER ? " (every 2 min from now)" : "");
-        s_cl_t = time_stamp(now);
         tx_mac('L', s_peer.mac);
+    }
+
+    /* [ours] the link in question: CQ00 every second, whatever holds the polls below back */
+    if (s_vf_t && (s_state == BT_ON || s_state == BT_CONNECTING || s_state == BT_CONNECTED)) {
+        if (now - s_vf_poll >= T_VERIFY_POLL_MS) {
+            if (s_vf_n >= VERIFY_MISSES) {
+                verify_end(0, 0);
+            } else {
+                s_vf_n++;
+                s_vf_poll = time_stamp(now);
+                s_poll_t = now;         /* (the regular poll waits its own period from here) */
+                tx_cmd('Q');
+            }
+        }
+        return;
     }
 
     /* status poll: CQ00 every 3 s in the screen (seg84 0307b394), else every 5 s (resident
@@ -700,10 +770,9 @@ void bt_poll(void)
         else if (!(s_rc && s_rc_n < 2))
             q = 1;
         if (q && s_state == BT_CONNECTED) {
-            if (s_q_t) {                /* the last one unanswered: logged, not acted on */
-                s_q_miss++;
-                if (s_q_miss == 1 || s_q_miss == 3 || s_q_miss % 60 == 10)
-                    log_printf("bt: CQ00 unanswered while connected (%u in a row)", s_q_miss);
+            if (s_q_t) {                /* the last one unanswered: the link in question */
+                verify(now, 'Q');
+                return;
             }
             s_q_t = time_stamp(now);
         }
