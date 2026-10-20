@@ -158,7 +158,7 @@ static void uart_close(void)
 #define VERIFY_MISSES     3u            /* unanswered in a row: no link */
 #define T_STOP_MS         300u          /* a stop reaches the module once it lasted 300 ms: a USB host
                                          * flipped its alternate 4 times in 40 ms at a rate change */
-#define T_C86_AFTER_CP_MS 1000u         /* the earphones' CP to our C\x86, at least (870 ms worked) */
+#define T_PLAY_AFTER_CP_MS 1000u        /* the earphones' CP to our CY0 30 + C\x86, at least (870 ms worked) */
 #define T_ACK_MS          200u          /* a frame's CKKK awaited at most (137 ms the slowest seen) */
 #define T_PROBE_ECHO_MS   500u          /* the module's C?OK to a probe frame (110 ms on the device) */
 #define T_DISC_MS         3000u         /* our CT00 unanswered for 3 s: unrouted anyway */
@@ -172,7 +172,7 @@ static uint32_t s_poll_t, s_hold, s_sub_t;
 static int s_ver = -1, s_ui, s_playing = -1, s_routed, s_ch_sent, s_paired_wait;
 static char s_probe_cmd;                /* the resume probe's last frame, its answer awaited */
 static uint32_t s_probe_t;
-static uint32_t s_c86_due;              /* the C\x86 that restarts it goes out then (0: none) */
+static uint32_t s_play_due;             /* the deferred CY0 30 + C\x86 go out then (0: none) */
 static uint32_t s_mod_cp;               /* [ours] the earphones' CP that stopped the module's stream
                                          * (0: none since their CC): the device, 2026-10-20, stayed
                                          * silent through the player's plays until the earphones'
@@ -596,7 +596,7 @@ static void connected(const bt_frame_t *f)
     route(1);
     s_playing = -1;                     /* bt_set_playing() sends CY0 for the current state */
     s_mod_cp = 0;
-    s_c86_due = 0;
+    s_play_due = 0;
     bt_event(BT_EV_CONNECTED, &s_peer);
 }
 
@@ -712,7 +712,7 @@ static void frame(const bt_frame_t *f, uint32_t now)
         if (f->cmd == 'P' || f->cmd == 'C') {
             s_hold = T_HOLD_POLLS;      /* (outside the screen) the next 10 polls skipped */
             s_mod_cp = f->cmd == 'P' ? time_stamp(now) : 0;   /* the stream stopped / running */
-            s_c86_due = 0;
+            s_play_due = 0;
         }
         /* (stock seg84 0307b736 sends CY0+30 again on a CC while playing: here that CC pauses,
          * startup/ap_bt.c, so the pause's CY0 0 is the only frame) */
@@ -766,6 +766,17 @@ static void raw_dropped(void)
 }
 
 /* ---- the tick ------------------------------------------------------------------- */
+/* The player plays into a stream the earphones' CP stopped: the level, then a C\x86 (bt_set_playing). */
+static void play_restart(void)
+{
+    uint8_t b[BT_TX_MAX];
+
+    s_mod_cp = 0;
+    tx(b, bt_enc_level(b, 0x1Eu));
+    if (s_ver == 5)
+        tx_cmd((char)0x86);
+}
+
 void bt_poll(void)
 {
     uint32_t now = time_ms();
@@ -791,13 +802,10 @@ void bt_poll(void)
     if (bt_rx_idle(&s_rx, now, &f))
         frame(&f, now);
     raw_dropped();
-    if (s_c86_due && (int32_t)(now - s_c86_due) >= 0) {
-        s_c86_due = 0;
-        if (s_state == BT_CONNECTED && s_playing == 1 && s_mod_cp) {
-            s_mod_cp = 0;
-            if (s_ver == 5)
-                tx_cmd((char)0x86);
-        }
+    if (s_play_due && (int32_t)(now - s_play_due) >= 0) {
+        s_play_due = 0;
+        if (s_state == BT_CONNECTED && s_playing == 1 && s_mod_cp)
+            play_restart();
     }
     txq_drain(now);
 
@@ -943,31 +951,37 @@ void bt_set_playing(int playing, int debounce)
             return;
     }
     s_stop_t = 0;
-    tx(b, bt_enc_level(b, playing ? 0x1Eu : 0u));   /* CY0+30 / CY0+0 */
     /* [ours] The module's stream is the one latch the earphones see: their CP stops it, their CC
      * restarts it, and so does a C\x86 or C\x87 that reaches it (stock's status frames, seg27
      * 0307de7e..0307e102, sent on every play and pause). Ours were lost while they went out in
      * the same ms as the CY0 (one CKKK for two frames); once delivered (4288fa4) they stopped the
-     * running stream at a track's start and flipped it at each pause: no music at boot until the
-     * earphones' key (log/device_2026-10-20_txgate_session 90.96 s, 92.7 s). So the player never
-     * touches the stream but for one case: it plays while the earphones' CP has the stream
-     * stopped, and a C\x86 alone restarts it (the resume probe, 136.3 s). Sent only into a
-     * stopped stream, it restarts it whether it means "play" or "toggle". Version 5 only (stock's
-     * gate ram:0306765c). */
+     * running stream at a track's start and flipped it at each pause (log/device_2026-10-20_
+     * txgate_session 90.96 s, 92.7 s). So the player never touches the stream but for one case:
+     * it plays while the earphones' CP has the stream stopped. Then the level and a C\x86 go out
+     * together, CY0 30 first, and not before T_PLAY_AFTER_CP_MS after their CP: the module, still
+     * stopping, ignores what comes sooner. The device: CY0 30 + C\x86 870, 960, 1290 and 2060 ms
+     * after the CP brought the music back (onelatch session); a CY0 30 10 ms and a C\x86 120 ms
+     * after it, silent 4 times; a CY0 30 10 ms and a C\x86 1000 ms after it, silent until the
+     * level was sent again (c86delay session 202.1 s, the probe's step 3). Version 5 only for
+     * the C\x86 (stock's gate ram:0306765c). bt_poll sends a deferred one. */
     if (playing && s_mod_cp) {
         uint32_t now = time_ms();
 
-        /* [ours] not before T_C86_AFTER_CP_MS after their CP: the module is still stopping its
-         * stream, and a C\x86 then sets its state (their next key was CP again) but the stream
-         * stays stopped: the player on playing, the earphones silent, every key after it in step
-         * with that (log/device_2026-10-20_onelatch_session: 120 ms after the CP silent 4 times,
-         * 870, 960, 1290, 2060 ms after it the music back). bt_poll sends it. */
-        s_c86_due = time_stamp(now - s_mod_cp >= T_C86_AFTER_CP_MS ? now : s_mod_cp + T_C86_AFTER_CP_MS);
-        log_printf("bt: playing after the earphones' pause (CP at %lu ms): C\\x86 at %lu ms restarts the module's stream",
-                   (unsigned long)s_mod_cp, (unsigned long)s_c86_due);
-    } else if (!playing) {
-        s_c86_due = 0;                  /* (paused again before it: the stream stays stopped) */
+        if (now - s_mod_cp < T_PLAY_AFTER_CP_MS) {
+            s_play_due = time_stamp(s_mod_cp + T_PLAY_AFTER_CP_MS);
+            log_printf("bt: playing after the earphones' pause (CP at %lu ms): CY0 30 and C\\x86 at %lu ms",
+                       (unsigned long)s_mod_cp, (unsigned long)s_play_due);
+            s_playing = playing;
+            return;
+        }
+        log_printf("bt: playing after the earphones' pause (CP at %lu ms): CY0 30 and C\\x86",
+                   (unsigned long)s_mod_cp);
+        play_restart();
+        s_playing = playing;
+        return;
     }
+    s_play_due = 0;                     /* (paused again before it: the stream stays stopped) */
+    tx(b, bt_enc_level(b, playing ? 0x1Eu : 0u));   /* CY0+30 / CY0+0 */
     s_playing = playing;
 }
 
