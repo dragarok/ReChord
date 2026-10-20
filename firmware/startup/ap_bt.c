@@ -290,9 +290,13 @@ void bt_app_external(int streaming)
     s_ext = streaming;
 }
 
-/* Earphone keys (services/bt_keys.h): stock's gates -- pause only while playing,
- * play only while paused (seg84 0307b67c), previous/next with a track open. In a USB DAC
- * session they are the host's media keys. */
+/* Earphone keys (services/bt_keys.h): play and pause each toggle the player, previous/next with
+ * a track open. In a USB DAC session they are the host's media keys. [ours] stock gates pause to
+ * playing and play to paused (seg84 0307b67c). The earphones' key reports the opposite of the
+ * module's stream (CC when it is stopped, CP when it runs: the device's AirPods, 2026-10-20), not
+ * of the player, so under stock's gates a press after the player's own pause did nothing. One
+ * latch: every press flips the player, and drivers/bt_jieli.c restarts the module's stream with a
+ * C\x86 when a CP stopped it and the player plays. */
 void bt_keys_action(int action, uint32_t t_ms)
 {
     int st = player_get_state();
@@ -308,11 +312,10 @@ void bt_keys_action(int action, uint32_t t_ms)
     }
     switch (action) {
     case BT_KEY_PAUSE:
+    case BT_KEY_PLAY:
         if (st == PLAYER_PLAYING)
             player_pause();
-        break;
-    case BT_KEY_PLAY:
-        if (st == PLAYER_PAUSED)
+        else if (st == PLAYER_PAUSED)
             player_play();
         break;
     case BT_KEY_PREV:

@@ -169,7 +169,6 @@ static bt_state_t s_state;
 static uint32_t s_t;                    /* time the current state (or step) began */
 static uint32_t s_poll_t, s_hold, s_sub_t;
 static int s_ver = -1, s_ui, s_playing = -1, s_routed, s_ch_sent, s_paired_wait;
-static int s_avrcp;                     /* stock 0x0301D8AC: 0 none, 1 paused, 2 playing */
 static char s_probe_cmd;                /* the resume probe's last frame, its answer awaited */
 static uint32_t s_probe_t;
 static uint32_t s_mod_cp;               /* [ours] the earphones' CP that stopped the module's stream
@@ -594,7 +593,6 @@ static void connected(const bt_frame_t *f)
     log_printf("bt: connected to '%s'", s_peer.name);
     route(1);
     s_playing = -1;                     /* bt_set_playing() sends CY0 for the current state */
-    s_avrcp = 0;
     s_mod_cp = 0;
     bt_event(BT_EV_CONNECTED, &s_peer);
 }
@@ -710,14 +708,10 @@ static void frame(const bt_frame_t *f, uint32_t now)
         }
         if (f->cmd == 'P' || f->cmd == 'C') {
             s_hold = T_HOLD_POLLS;      /* (outside the screen) the next 10 polls skipped */
-            s_avrcp = f->cmd == 'P' ? 1 : 2;   /* seg84 0307b67c: CP -> 1, CC -> 2 */
-            s_mod_cp = f->cmd == 'P' ? time_stamp(now) : 0;
+            s_mod_cp = f->cmd == 'P' ? time_stamp(now) : 0;   /* the stream stopped / running */
         }
-        if (f->cmd == 'C' && s_state == BT_CONNECTED && s_playing == 1) {
-            uint8_t b[BT_TX_MAX];       /* seg84 0307b736: CC while not paused -> 0x1D5: CY0+30 again */
-
-            tx(b, bt_enc_level(b, 0x1Eu));
-        }
+        /* (stock seg84 0307b736 sends CY0+30 again on a CC while playing: here that CC pauses,
+         * startup/ap_bt.c, so the pause's CY0 0 is the only frame) */
         bt_keys_event((uint8_t)f->cmd, now);
         break;
     default:
@@ -938,25 +932,22 @@ void bt_set_playing(int playing, int debounce)
     }
     s_stop_t = 0;
     tx(b, bt_enc_level(b, playing ? 0x1Eu : 0u));   /* CY0+30 / CY0+0 */
-    if (playing && s_mod_cp) {          /* (the C\x86 below restarts it: the device's probe, 136.3 s) */
+    /* [ours] The module's stream is the one latch the earphones see: their CP stops it, their CC
+     * restarts it, and so does a C\x86 or C\x87 that reaches it (stock's status frames, seg27
+     * 0307de7e..0307e102, sent on every play and pause). Ours were lost while they went out in
+     * the same ms as the CY0 (one CKKK for two frames); once delivered (4288fa4) they stopped the
+     * running stream at a track's start and flipped it at each pause: no music at boot until the
+     * earphones' key (log/device_2026-10-20_txgate_session 90.96 s, 92.7 s). So the player never
+     * touches the stream but for one case: it plays while the earphones' CP has the stream
+     * stopped, and a C\x86 alone restarts it (the resume probe, 136.3 s). Sent only into a
+     * stopped stream, it restarts it whether it means "play" or "toggle". Version 5 only (stock's
+     * gate ram:0306765c). */
+    if (playing && s_mod_cp) {
         log_printf("bt: playing after the earphones' pause (CP at %lu ms): C\\x86 restarts the module's stream",
                    (unsigned long)s_mod_cp);
         s_mod_cp = 0;
-    }
-    /* the AVRCP-like status (seg27 0307de7e..0307e102, state 0x0301D8AC): a play/pause here (not
-     * the connect itself) tells the module when its state differs: resume while it is < 2 ->
-     * C\x86 and 2; pause or the end while it is 0 or 2 -> C\x87 and 1. CP/CC from the module set
-     * it to 1/2 (so its own keys are not echoed). Only to a version-5 module (gate ram:0306765c). */
-    if (s_playing >= 0) {
-        if (playing && s_avrcp < 2) {
-            if (s_ver == 5)
-                tx_cmd((char)0x86);
-            s_avrcp = 2;
-        } else if (!playing && s_avrcp != 1) {
-            if (s_ver == 5)
-                tx_cmd((char)0x87);
-            s_avrcp = 1;
-        }
+        if (s_ver == 5)
+            tx_cmd((char)0x86);
     }
     s_playing = playing;
 }
