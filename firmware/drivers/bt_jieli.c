@@ -158,6 +158,7 @@ static void uart_close(void)
 #define VERIFY_MISSES     3u            /* unanswered in a row: no link */
 #define T_STOP_MS         300u          /* a stop reaches the module once it lasted 300 ms: a USB host
                                          * flipped its alternate 4 times in 40 ms at a rate change */
+#define T_PROBE_ECHO_MS   500u          /* the module's C?OK to a probe frame (110 ms on the device) */
 #define T_DISC_MS         3000u         /* our CT00 unanswered for 3 s: unrouted anyway */
 #define T_SERVED_MAX_MS   1000u         /* the idle time counts at most 1 s per tick: a USB disk
                                          * session that held the loop for 42 min idled it off at once */
@@ -168,6 +169,12 @@ static uint32_t s_t;                    /* time the current state (or step) bega
 static uint32_t s_poll_t, s_hold, s_sub_t;
 static int s_ver = -1, s_ui, s_playing = -1, s_routed, s_ch_sent, s_paired_wait;
 static int s_avrcp;                     /* stock 0x0301D8AC: 0 none, 1 paused, 2 playing */
+static char s_probe_cmd;                /* the resume probe's last frame, its answer awaited */
+static uint32_t s_probe_t;
+static uint32_t s_mod_cp;               /* [ours] the earphones' CP that stopped the module's stream
+                                         * (0: none since their CC): the device, 2026-10-20, stayed
+                                         * silent through the player's plays until the earphones'
+                                         * own play (log/device_2026-10-20_ppsync_session 312.8 s) */
 static int s_rc;                        /* reconnecting to s_peer until it links */
 static unsigned s_rc_n;                 /* CL06 tries sent in this run */
 static uint32_t s_rc_t;                 /* the last try */
@@ -534,6 +541,7 @@ static void connected(const bt_frame_t *f)
     route(1);
     s_playing = -1;                     /* bt_set_playing() sends CY0 for the current state */
     s_avrcp = 0;
+    s_mod_cp = 0;
     bt_event(BT_EV_CONNECTED, &s_peer);
 }
 
@@ -637,9 +645,16 @@ static void frame(const bt_frame_t *f, uint32_t now)
     case BT_RX_KEY:
         if (s_state != BT_CONNECTED && !s_user_off)
             verify(now, 'K');
+        if (s_probe_cmd && f->cmd == s_probe_cmd && now - s_probe_t < T_PROBE_ECHO_MS) {
+            s_probe_cmd = 0;            /* [ours] the module's answer to the resume probe's frame
+                                         * (CD00 -> CDOK, the device 2026-10-20), not a key */
+            log_printf("bt: C%cOK: the answer to the probe's C%c00", f->cmd, f->cmd);
+            break;
+        }
         if (f->cmd == 'P' || f->cmd == 'C') {
             s_hold = T_HOLD_POLLS;      /* (outside the screen) the next 10 polls skipped */
             s_avrcp = f->cmd == 'P' ? 1 : 2;   /* seg84 0307b67c: CP -> 1, CC -> 2 */
+            s_mod_cp = f->cmd == 'P' ? time_stamp(now) : 0;
         }
         if (f->cmd == 'C' && s_state == BT_CONNECTED && s_playing == 1) {
             uint8_t b[BT_TX_MAX];       /* seg84 0307b736: CC while not paused -> 0x1D5: CY0+30 again */
@@ -653,15 +668,20 @@ static void frame(const bt_frame_t *f, uint32_t now)
     }
 }
 
-/* [ours] Developer > BT volume probe (test), in the dev overlay: one frame of stock's short form
- * 'C' cmd '0' v 0x00 (ram:0306763c builds CY0 so), with values stock never sends: CY0 1..29 (the
- * JieLi SDKs' system volume runs 0..30; stock sends 30 on play, 0 on pause), CD00/CU00 (the
- * earphones' volume frames, which stock only receives). Only while linked. */
+/* [ours] Developer > BT resume probe (test), in the dev overlay: one frame of stock's short form
+ * 'C' cmd '0' v 0x00 (ram:0306763c builds CY0 so), some of them frames stock never sends: CC00
+ * (the earphones' play frame, which stock only receives). (The BT volume probe before it sent
+ * CY0 1..29 and CD00/CU00: CY0 sets a level, CD/CU are answered CDOK/CUOK and change nothing,
+ * the device 2026-10-20.) Only while linked. */
 int bt_probe_send(char cmd, uint8_t v)
 {
     uint8_t b[5] = { 'C', (uint8_t)cmd, '0', v, 0 };
 
-    return s_state == BT_CONNECTED ? tx(b, 5) : -1;
+    if (s_state != BT_CONNECTED)
+        return -1;
+    s_probe_cmd = cmd;
+    s_probe_t = time_ms();
+    return tx(b, 5);
 }
 
 /* [ours] What the framer threw away, with the bytes around it: a frame of a form nobody has seen
@@ -860,6 +880,9 @@ void bt_set_playing(int playing, int debounce)
     }
     s_stop_t = 0;
     tx(b, bt_enc_level(b, playing ? 0x1Eu : 0u));   /* CY0+30 / CY0+0 */
+    if (playing && s_mod_cp)
+        log_printf("bt: playing, but the earphones' pause (CP at %lu ms) stopped the module's stream: "
+                   "silent until their play", (unsigned long)s_mod_cp);
     /* the AVRCP-like status (seg27 0307de7e..0307e102, state 0x0301D8AC): a play/pause here (not
      * the connect itself) tells the module when its state differs: resume while it is < 2 ->
      * C\x86 and 2; pause or the end while it is 0 or 2 -> C\x87 and 1. CP/CC from the module set

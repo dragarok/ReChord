@@ -446,26 +446,32 @@ void bt_listen_test(void)   /* in the Developer tests overlay (startup/ap_ovl.c)
     ui_invalidate_all();
 }
 
-/* [ours] Developer > BT volume probe (test): can the player set the earphones' volume through the
- * module? (the user, 2026-10-20: one volume for the AirPods' swipe and the player's keys; a strong
- * signal into the module keeps its hiss far below the music). While a track plays to the module,
- * 8 steps of 5 s, each on the screen and in the log ("btvol:"), the music going on (pump); the user
- * says what the volume did at each. The end puts CY0 30 back (stock's level while playing). */
-#define VOLP_MS 5000u
+/* [ours] Developer > BT resume probe (test): can the player restart the module's stream? The
+ * device, 2026-10-20: the earphones' pause (CP) stops the module's stream and only their play (CC)
+ * restarts it; the player's own play (CY0 30, C\x86) left the earphones silent with the screen on
+ * playing (log/device_2026-10-20_ppsync_session 312.8 s). The user makes that state (the
+ * earphones' pause, then PLAY on the player) and runs this: 4 steps of 5 s, each on the screen and
+ * in the log ("btres:", the module's answers after it), the music going on (pump); the user says
+ * at which step the music came back. (The BT volume probe it replaces: CY0 1..29 sets a level,
+ * CD00/CU00 are answered and change nothing.) */
+#define RESP_MS 5000u
 
-void bt_vol_probe_test(void)    /* in the Developer tests overlay (startup/ap_ovl.c) */
+void bt_res_probe_test(void)    /* in the Developer tests overlay (startup/ap_ovl.c) */
 {
-    static const struct { char cmd; uint8_t v, n; const char *what; } k_step[] = {
-        { 'Y', 30, 1, "CY0 30 (stock, playing)" }, { 'Y', 20, 1, "CY0 20" }, { 'Y', 10, 1, "CY0 10" },
-        { 'Y', 5, 1, "CY0 5" }, { 'Y', 30, 1, "CY0 30 again" }, { 'D', '0', 3, "CD00 x3 (volume down?)" },
-        { 'U', '0', 3, "CU00 x3 (volume up?)" }, { 'Y', 30, 1, "CY0 30: done" },
+    static const struct { char cmd[2]; uint8_t v[2]; const char *what; } k_step[] = {
+        { { (char)0x86, 0 }, { '0', 0 }, "C\\x86 00 (playing status)" },
+        { { 'C', 0 }, { '0', 0 }, "CC00 (earphones' play)" },
+        { { 'Y', 'Y' }, { 0, 30 }, "CY0 0, then CY0 30" },
+        { { 'P', 'C' }, { '0', '0' }, "CP00, then CC00" },
     };
     char buf[48];
 
     if (!bt_routed() || player_get_state() != PLAYER_PLAYING) {
-        screen("BT volume probe (test)");
-        line(1, "play a track on Bluetooth first");
-        line(3, "any key");
+        screen("BT resume probe (test)");
+        line(1, "play on Bluetooth first;");
+        line(2, "pause on the earphones,");
+        line(3, "then PLAY on the player");
+        line(5, "any key");
         display_flush_rows(0, DISPLAY_H - 1);
         ask(1);
         ui_invalidate_all();
@@ -475,16 +481,16 @@ void bt_vol_probe_test(void)    /* in the Developer tests overlay (startup/ap_ov
         uint32_t t0 = time_ms();
         unsigned sent = 0;
 
-        screen("BT volume probe: listen");
-        snprintf(buf, sizeof buf, "%u of 8: %s", s + 1u, k_step[s].what);
+        screen("BT resume probe: listen");
+        snprintf(buf, sizeof buf, "%u of 4: %s", s + 1u, k_step[s].what);
         line(2, buf);
-        line(4, "what did the volume do?");
+        line(4, "did the music come back?");
         display_flush_rows(0, DISPLAY_H - 1);
-        log_printf("btvol: %u %s", s + 1u, k_step[s].what);
-        while (time_ms() - t0 < VOLP_MS) {
-            if (sent < k_step[s].n && time_ms() - t0 >= sent * 1000u) {
-                if (bt_probe_send(k_step[s].cmd, k_step[s].v) != 0)
-                    log_printf("btvol: not sent (no link)");
+        log_printf("btres: %u %s", s + 1u, k_step[s].what);
+        while (time_ms() - t0 < RESP_MS) {
+            if (sent < 2u && k_step[s].cmd[sent] && time_ms() - t0 >= sent * 1000u) {
+                if (bt_probe_send(k_step[s].cmd[sent], k_step[s].v[sent]) != 0)
+                    log_printf("btres: not sent (no link)");
                 sent++;
             }
             pump();                     /* the music, the storage, the module's answers */
@@ -492,10 +498,10 @@ void bt_vol_probe_test(void)    /* in the Developer tests overlay (startup/ap_ov
             cpu_wait_tick();
         }
     }
-    log_printf("btvol: done");
-    log_flush("btvol");
-    screen("BT volume probe: done");
-    line(2, "which steps changed the volume?");
+    log_printf("btres: done");
+    log_flush("btres");
+    screen("BT resume probe: done");
+    line(2, "at which step did it come back?");
     line(4, "any key");
     display_flush_rows(0, DISPLAY_H - 1);
     ask(1);
