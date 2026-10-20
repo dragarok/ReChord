@@ -55,6 +55,7 @@ void bt_keys_poll(uint32_t t_ms);
 void bt_keys_action(int action, uint32_t t_ms);
 /* Events seen and actions run (for the screen and the log). */
 uint32_t bt_keys_events(void);
+uint8_t bt_keys_last(void);            /* the last key's letter (Developer > BT lab) */
 const char *bt_keys_name(int action);
 
 #endif

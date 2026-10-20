@@ -238,14 +238,14 @@ enum { DEV_DAC_TEST, DEV_USB_CONSOLE, DEV_USB_PROBE, DEV_USB_DETECT, DEV_BT_LIST
        DEV_SD_TEST, DEV_BT_RES };
 
 void dac_test_run(void), usb_console_run(void), usb_probe_menu(void), usb_detect_test(void),
-     bt_listen_test(void), te_probe_test(void), bt_res_probe_test(void);   /* startup/ap_ui.c */
+     bt_listen_test(void), te_probe_test(void), bt_lab_test(void);   /* startup/ap_ui.c */
 void hifi_probe_test(void);                       /* audio/hifi_probe.c */
 void sd_selftest(void);                           /* services/sd_selftest.c */
 
 static void (*const k_dev[])(void) OVL_API(dev) = {
     [DEV_DAC_TEST] = dac_test_run, [DEV_USB_CONSOLE] = usb_console_run, [DEV_USB_PROBE] = usb_probe_menu,
     [DEV_USB_DETECT] = usb_detect_test, [DEV_BT_LISTEN] = bt_listen_test, [DEV_TE_PROBE] = te_probe_test,
-    [DEV_HIFI_PROBE] = hifi_probe_test, [DEV_SD_TEST] = sd_selftest, [DEV_BT_RES] = bt_res_probe_test,
+    [DEV_HIFI_PROBE] = hifi_probe_test, [DEV_SD_TEST] = sd_selftest, [DEV_BT_RES] = bt_lab_test,
 };
 OVL_HEADER(dev, OVL_DEV, k_dev);
 

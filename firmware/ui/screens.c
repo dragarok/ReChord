@@ -1700,7 +1700,7 @@ static const set_t g_dev[] = {
     { ICON_USBC, S_DO, 0, 0, "USB-C probe", 0, 0, ap_usb_probe },
     { ICON_USB, S_DO, 0, 0, "USB detect", 0, 0, ap_usb_detect },
     { ICON_BT, S_DO, 0, 0, "BT listen (test)", 0, 0, ap_bt_listen },
-    { ICON_BT, S_DO, 0, 0, "BT resume probe (test)", 0, 0, ap_bt_res },
+    { ICON_BT, S_DO, 0, 0, "BT lab (test)", 0, 0, ap_bt_res },
     { ICON_CHIP, S_INFO, 0, 0, "Keys" },
     { ICON_INFO, S_CYCLE, 2, 0, "Debug strip", &g_cfg.strip, n_offon },
     { ICON_SD, S_DO, 0, 0, "SD card test", 0, 0, ap_sd_test },   /* (above HIFI probe: m40, m32 count up) */

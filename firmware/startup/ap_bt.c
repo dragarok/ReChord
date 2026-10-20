@@ -303,6 +303,10 @@ void bt_keys_action(int action, uint32_t t_ms)
 
     (void)t_ms;
     power_activity();
+    if (bt_lab_on()) {                  /* (Developer > BT lab: the module acts on its own keys) */
+        log_printf("bt: key %s: the lab's, no player action", bt_keys_name(action));
+        return;
+    }
     if (s_ext >= 0 && action >= BT_KEY_PAUSE && action <= BT_KEY_NEXT) {
         if (action == BT_KEY_PAUSE || action == BT_KEY_PLAY)
             usb_uac_key(USB_UAC_PLAY_PAUSE);

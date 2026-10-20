@@ -446,62 +446,197 @@ void bt_listen_test(void)   /* in the Developer tests overlay (startup/ap_ovl.c)
     ui_invalidate_all();
 }
 
-/* [ours] Developer > BT resume probe (test): can the player restart the module's stream? The
- * device, 2026-10-20: the earphones' pause (CP) stops the module's stream and only their play (CC)
- * restarts it; the player's own play (CY0 30, C\x86) left the earphones silent with the screen on
- * playing (log/device_2026-10-20_ppsync_session 312.8 s). The user makes that state (the
- * earphones' pause, then PLAY on the player) and runs this: 4 steps of 5 s, each on the screen and
- * in the log ("btres:", the module's answers after it), the music going on (pump); the user says
- * at which step the music came back. (The BT volume probe it replaces: CY0 1..29 sets a level,
- * CD00/CU00 are answered and change nothing.) */
-#define RESP_MS 5000u
+/* [ours] Developer > BT lab (test): which frames bring the earphones' music back, from which
+ * state, after how long (the user, 2026-10-20: "no way we can resolve this without a proper lab").
+ * Each fix built on a reading of one log broke on the next: the module keeps its own stream and
+ * level, reports neither, and ignores frames for a while after a change. Here every trial starts
+ * from music the user hears, makes one state, waits, sends one sequence, and the user answers
+ * PLAY (music) or BACK (silence); all of it in the log ("btlab:"). While it runs the player sends
+ * the module nothing (bt_lab), and the earphones' keys move no player (startup/ap_bt.c).
+ * States: B the earphones' pause (CP), then the player's CY0 0; C the player's pause (CY0 0), then
+ * one earphone key (CP or CC, logged); A the module restarted and relinked (a boot), CY0 0.
+ * Sequences (the player's play): 1 CY0 30; 2 CY0 30 + C\x86 in the same ms; 3 CY0 30, C\x86 after
+ * its CKKK; 4 C\x86, CY0 30 after its CKKK; 5 CY0 0, 1 s, CY0 30; 6 C\x86; 7 sequence 5, then C\x86. */
+static const struct { char st; uint8_t seq; uint16_t ms; } k_lab[] = {
+    { 'B', 1, 1000 }, { 'B', 2, 1000 }, { 'B', 3, 1000 }, { 'B', 4, 1000 }, { 'B', 5, 1000 }, { 'B', 6, 1000 },
+    { 'B', 7, 1000 }, { 'B', 3, 10 },   { 'B', 5, 10 },   { 'B', 3, 3000 },
+    { 'C', 1, 1000 }, { 'C', 2, 1000 }, { 'C', 3, 1000 }, { 'C', 4, 1000 }, { 'C', 5, 1000 }, { 'C', 6, 1000 },
+    { 'C', 7, 1000 }, { 'C', 3, 10 },   { 'C', 5, 3000 }, { 'C', 3, 3000 },
+    { 'A', 1, 0 },    { 'A', 2, 0 },    { 'A', 3, 0 },    { 'A', 4, 0 },
+};
+static const char *const k_lab_seq[] = { "", "CY0 30", "CY0 30 + C86 same ms", "CY0 30, C86", "C86, CY0 30",
+                                         "CY0 0, 1 s, CY0 30", "C86", "CY0 0, 1 s, CY0 30, C86" };
 
-void bt_res_probe_test(void)    /* in the Developer tests overlay (startup/ap_ovl.c) */
+static void lab_wait(uint32_t ms)
 {
-    static const struct { char cmd[2]; uint8_t v[2]; const char *what; } k_step[] = {
-        { { (char)0x86, 0 }, { '0', 0 }, "C\\x86 00 (playing status)" },
-        { { 'C', 0 }, { '0', 0 }, "CC00 (earphones' play)" },
-        { { 'Y', 'Y' }, { 0, 30 }, "CY0 0, then CY0 30" },
-        { { 'P', 'C' }, { '0', '0' }, "CP00, then CC00" },
-    };
-    char buf[48];
+    uint32_t t0 = time_ms();
+
+    while (time_ms() - t0 < ms) {
+        pump();                         /* the music, the storage, the module's answers */
+        watchdog_feed();
+        cpu_wait_tick();
+    }
+}
+
+static void lab_drain(void)             /* (keys pressed meanwhile are not answers) */
+{
+    input_event_t ev;
+
+    input_scan(keys_adc(), keys_power());
+    while (input_poll(&ev) > 0) {
+    }
+}
+
+static void lab_seq(unsigned seq)
+{
+    if (seq == 2) {
+        bt_lab_send('Y', 30, 1);
+        bt_lab_send((char)0x86, '0', 1);
+        return;
+    }
+    if (seq == 5 || seq == 7) {
+        bt_lab_send('Y', 0, 0);
+        lab_wait(1000);
+    }
+    if (seq == 4 || seq == 6)
+        bt_lab_send((char)0x86, '0', 0);
+    if (seq != 6)
+        bt_lab_send('Y', 30, 0);
+    if (seq == 3 || seq == 7)
+        bt_lab_send((char)0x86, '0', 0);
+}
+
+/* An earphone key within 30 s (its letter), 0 for none; want: 'P' only, or 0 any. */
+static uint8_t lab_key(uint8_t want, const char *what)
+{
+    uint32_t n = bt_keys_events(), t0 = time_ms();
+
+    screen("BT lab");
+    line(2, what);
+    line(5, "(30 s; then skipped)");
+    display_flush_rows(0, DISPLAY_H - 1);
+    while (time_ms() - t0 < 30000u) {
+        lab_wait(10);
+        if (bt_keys_events() != n) {
+            uint8_t k = bt_keys_last();
+
+            n = bt_keys_events();
+            if (k == 'P' || (!want && k == 'C'))
+                return k;
+            if (k == 'C') {
+                log_printf("btlab: the earphones sent play; asked again");
+                line(4, "that was play: again");
+                display_flush_rows(0, DISPLAY_H - 1);
+            }
+        }
+    }
+    return 0;
+}
+
+static int lab_ask(const char *q)
+{
+    screen("BT lab");
+    line(2, q);
+    line(4, "PLAY = yes");
+    line(5, "BACK = no");
+    display_flush_rows(0, DISPLAY_H - 1);
+    lab_drain();
+    return ask(0);
+}
+
+void bt_lab_test(void)          /* in the Developer tests overlay (startup/ap_ovl.c) */
+{
+    unsigned n = sizeof k_lab / sizeof k_lab[0];
+    char buf[48], res[sizeof k_lab / sizeof k_lab[0] + 1];
 
     if (!bt_routed() || player_get_state() != PLAYER_PLAYING) {
-        screen("BT resume probe (test)");
-        line(1, "play on Bluetooth first;");
-        line(2, "pause on the earphones,");
-        line(3, "then PLAY on the player");
-        line(5, "any key");
+        screen("BT lab (test)");
+        line(1, "play on Bluetooth first");
+        line(3, "any key");
         display_flush_rows(0, DISPLAY_H - 1);
         ask(1);
         ui_invalidate_all();
         return;
     }
-    for (unsigned s = 0; s < sizeof k_step / sizeof k_step[0]; s++) {
-        uint32_t t0 = time_ms();
-        unsigned sent = 0;
+    bt_lab(1);
+    log_printf("btlab: %u trials", n);
+    for (unsigned i = 0; i < n; i++) {
+        unsigned seq = k_lab[i].seq;
+        char st = k_lab[i].st;
+        uint8_t k = 0;
 
-        screen("BT resume probe: listen");
-        snprintf(buf, sizeof buf, "%u of 4: %s", s + 1u, k_step[s].what);
-        line(2, buf);
-        line(4, "did the music come back?");
-        display_flush_rows(0, DISPLAY_H - 1);
-        log_printf("btres: %u %s", s + 1u, k_step[s].what);
-        while (time_ms() - t0 < RESP_MS) {
-            if (sent < 2u && k_step[s].cmd[sent] && time_ms() - t0 >= sent * 1000u) {
-                if (bt_probe_send(k_step[s].cmd[sent], k_step[s].v[sent]) != 0)
-                    log_printf("btres: not sent (no link)");
-                sent++;
+        res[i] = '-';
+        snprintf(buf, sizeof buf, "%u of %u: %c%u", i + 1u, n, st, seq);
+        log_printf("btlab: %u %c seq %u (%s), %u ms", i + 1u, st, seq, k_lab_seq[seq], (unsigned)k_lab[i].ms);
+        if (st == 'A') {
+            uint32_t t0;
+
+            screen("BT lab");
+            line(1, buf);
+            line(3, "restarting the module");
+            display_flush_rows(0, DISPLAY_H - 1);
+            bt_power(0);
+            lab_wait(600);
+            bt_autostart(g_cfg.bt_paired ? g_cfg.bt_mac : 0, g_cfg.bt_name);
+            t0 = time_ms();
+            while (!(bt_state() == BT_CONNECTED && bt_routed()) && time_ms() - t0 < 40000u)
+                lab_wait(50);
+            if (!(bt_state() == BT_CONNECTED && bt_routed())) {
+                log_printf("btlab: %u: no link in 40 s, skipped", i + 1u);
+                continue;
             }
-            pump();                     /* the music, the storage, the module's answers */
-            watchdog_feed();
-            cpu_wait_tick();
+            lab_wait(1500);
+            bt_lab_send('Y', 0, 0);     /* (the player's at a link) */
+            lab_wait(3000);
+        } else {
+            bt_lab_send('Y', 30, 0);
+            screen("BT lab");
+            line(1, buf);
+            line(3, "press the AirPods");
+            line(4, "until music plays,");
+            line(5, "then PLAY (BACK: skip)");
+            display_flush_rows(0, DISPLAY_H - 1);
+            lab_drain();
+            if (!ask(0)) {
+                log_printf("btlab: %u: no music to start from, skipped", i + 1u);
+                continue;
+            }
+            if (st == 'B') {
+                k = lab_key('P', "AirPods: PAUSE once");
+                if (!k) {
+                    log_printf("btlab: %u: no CP in 30 s, skipped", i + 1u);
+                    continue;
+                }
+                lab_wait(10);
+                bt_lab_send('Y', 0, 0);   /* (the player's pause) */
+            } else {
+                bt_lab_send('Y', 0, 0);   /* (the player's pause) */
+                lab_wait(2000);
+                k = lab_key(0, "AirPods: press once");
+                if (!k) {
+                    log_printf("btlab: %u: no key in 30 s, skipped", i + 1u);
+                    continue;
+                }
+                log_printf("btlab: %u: the earphones sent C%c", i + 1u, k);
+            }
+            lab_wait(k_lab[i].ms);
         }
+        screen("BT lab");
+        line(1, buf);
+        line(3, "listen...");
+        display_flush_rows(0, DISPLAY_H - 1);
+        lab_seq(seq);
+        lab_wait(4000);
+        res[i] = lab_ask("music now?") ? 'y' : 'n';
+        log_printf("btlab: %u %c seq %u %u ms%s: music %s", i + 1u, st, seq, (unsigned)k_lab[i].ms,
+                   st == 'C' ? (k == 'P' ? " (CP)" : " (CC)") : "", res[i] == 'y' ? "YES" : "no");
     }
-    log_printf("btres: done");
-    log_flush("btres");
-    screen("BT resume probe: done");
-    line(2, "at which step did it come back?");
+    res[n] = 0;
+    log_printf("btlab: done: %s", res);
+    log_flush("btlab");
+    bt_lab(0);
+    screen("BT lab: done");
+    line(2, res);
     line(4, "any key");
     display_flush_rows(0, DISPLAY_H - 1);
     ask(1);

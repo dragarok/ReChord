@@ -923,6 +923,31 @@ void bt_poll(void)
     }
 }
 
+/* [ours] Developer > BT lab (test): while on, the lab's frames are the only play/pause frames the
+ * module gets (bt_set_playing sends none, the earphones' keys move no player: startup/ap_bt.c).
+ * Off: s_playing = -1, so the next bt_set_playing sends the player's state again. */
+static int s_lab;
+
+void bt_lab(int on)
+{
+    s_lab = on;
+    s_play_due = 0;
+    if (!on)
+        s_playing = -1;
+}
+
+int bt_lab_on(void) { return s_lab; }
+
+/* One frame 'C' cmd '0' v 0x00 at once, past the one-at-a-time queue (a lab burst), or queued. */
+int bt_lab_send(char cmd, uint8_t v, int burst)
+{
+    uint8_t b[5] = { 'C', (uint8_t)cmd, '0', v, 0 };
+
+    if (s_state != BT_CONNECTED)
+        return -1;
+    return burst ? tx_now(b, 5) : tx(b, 5);
+}
+
 void bt_set_playing(int playing, int debounce)
 {
     uint8_t b[BT_TX_MAX];
@@ -931,6 +956,11 @@ void bt_set_playing(int playing, int debounce)
     s_want = playing;
     if (s_state != BT_CONNECTED) {
         s_playing = -1;
+        s_stop_t = 0;
+        return;
+    }
+    if (s_lab) {
+        s_playing = playing;
         s_stop_t = 0;
         return;
     }

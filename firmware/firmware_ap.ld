@@ -160,7 +160,7 @@ SECTIONS
                      .rodata.usb_probe_screen.* .text.usb_detect_test* .rodata.usb_detect_test.*
                      .text.detect_wait* .rodata.detect_wait.* .text.bt_listen_test*
                      .rodata.bt_listen_test.* .text.listen_save* .rodata.listen_save.*
-                     .text.te_probe_test* .text.bt_res_probe_test* .rodata.bt_res_probe_test.*)
+                     .text.te_probe_test* .text.bt_lab_test* .rodata.bt_lab_test.* .text.lab_* .rodata.lab_* .rodata.k_lab*)
             . = ALIGN(4);
         }
     }

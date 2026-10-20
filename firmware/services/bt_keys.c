@@ -18,6 +18,7 @@ static const keyseq_rule_t k_rules[] = {
 
 static keyseq_t s_seq;
 static uint32_t s_events;
+static uint8_t s_last;
 
 __attribute__((weak)) void bt_keys_action(int action, uint32_t t_ms)
 {
@@ -54,6 +55,7 @@ void bt_keys_event(uint8_t code, uint32_t t_ms)
     if (!s_seq.rules)
         bt_keys_init();
     s_events++;
+    s_last = code;
     a = keyseq_feed(&s_seq, code, t_ms);
     log_printf("bt: key C%c at %lu ms", code >= 0x20 && code < 0x7f ? code : '?', (unsigned long)t_ms);
     run(a, t_ms);
@@ -66,3 +68,4 @@ void bt_keys_poll(uint32_t t_ms)
 }
 
 uint32_t bt_keys_events(void) { return s_events; }
+uint8_t bt_keys_last(void) { return s_last; }

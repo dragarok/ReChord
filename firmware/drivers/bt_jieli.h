@@ -82,6 +82,12 @@ void bt_ui_active(int on);
 void bt_set_playing(int playing, int debounce);
 /* [ours] Developer > BT resume probe (test): 'C' cmd '0' v 0x00 to the module, only while linked. */
 int bt_probe_send(char cmd, uint8_t v);
+/* [ours] Developer > BT lab (test): on = no play/pause frames but the lab's, the earphones' keys
+ * logged only (startup/ap_bt.c); bt_lab_send: 'C' cmd '0' v 0x00, burst = at once (past the
+ * one-at-a-time queue) */
+void bt_lab(int on);
+int bt_lab_on(void);
+int bt_lab_send(char cmd, uint8_t v, int burst);
 
 /* The power-on hook for the boot auto-on (stock seg21 0307a4d2 when the
  * setting is on): power on and reconnect to (mac): stock's two tries 3 s apart,
