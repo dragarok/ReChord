@@ -290,12 +290,9 @@ void bt_app_external(int streaming)
     s_ext = streaming;
 }
 
-/* Earphone keys (services/bt_keys.h): play and pause each toggle, previous/next with a track
- * open. In a USB DAC session they are the host's media keys. [ours] stock gates pause to
- * playing and play to paused (seg84 0307b67c); the device's AirPods (2026-10-20) send CC and CP
- * by turns from their own memory, whatever C\x86/C\x87 told them (CC while playing at 20.1 s
- * and 77.1 s, CP 1 s after the player's pause at 59.8 s and 78.6 s): each was ignored and the
- * press after it acted, so a pause on the player made the next earphone press do nothing. */
+/* Earphone keys (services/bt_keys.h): stock's gates -- pause only while playing,
+ * play only while paused (seg84 0307b67c), previous/next with a track open. In a USB DAC
+ * session they are the host's media keys. */
 void bt_keys_action(int action, uint32_t t_ms)
 {
     int st = player_get_state();
@@ -311,10 +308,11 @@ void bt_keys_action(int action, uint32_t t_ms)
     }
     switch (action) {
     case BT_KEY_PAUSE:
-    case BT_KEY_PLAY:
         if (st == PLAYER_PLAYING)
             player_pause();
-        else if (st == PLAYER_PAUSED)
+        break;
+    case BT_KEY_PLAY:
+        if (st == PLAYER_PAUSED)
             player_play();
         break;
     case BT_KEY_PREV:

@@ -13,9 +13,6 @@
  *   CA -> BT_KEY_PREV    (stock: 0x1B6; seg33 restarts the track after 3 s)
  *   CB -> BT_KEY_NEXT    (stock: 0x1B5)
  *   CD, CU, CM           recognised and ignored by stock: logged, no action
- * [ours] the UI glue toggles on both CP and CC: earphones that send them by turns from their
- * own memory (the device's AirPods, 2026-10-20) otherwise lose a press after each pause or
- * play on the player.
  * Settings ride on sequences of next/previous (keyseq.h KEYSEQ_ALSO rules: each
  * key still skips at once, as stock; the setting comes in addition when the
  * sequence completes). Each is 4 presses with at most BT_SEQ_GAP_MS between
