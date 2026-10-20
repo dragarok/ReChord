@@ -641,11 +641,8 @@ static void frame(const bt_frame_t *f, uint32_t now)
             s_hold = T_HOLD_POLLS;      /* (outside the screen) the next 10 polls skipped */
             s_avrcp = f->cmd == 'P' ? 1 : 2;   /* seg84 0307b67c: CP -> 1, CC -> 2 */
         }
-        if (f->cmd == 'C' && s_state == BT_CONNECTED && s_playing == 1) {
-            uint8_t b[BT_TX_MAX];       /* seg84 0307b736: CC while not paused -> 0x1D5: CY0+30 again */
-
-            tx(b, bt_enc_level(b, 0x1Eu));
-        }
+        /* (stock seg84 0307b736 sends CY0+30 again on a CC while playing: here that CC pauses,
+         * startup/ap_bt.c, so the pause's CY0 0 is the only frame) */
         bt_keys_event((uint8_t)f->cmd, now);
         break;
     default:
