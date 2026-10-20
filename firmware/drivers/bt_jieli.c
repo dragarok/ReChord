@@ -158,6 +158,7 @@ static void uart_close(void)
 #define VERIFY_MISSES     3u            /* unanswered in a row: no link */
 #define T_STOP_MS         300u          /* a stop reaches the module once it lasted 300 ms: a USB host
                                          * flipped its alternate 4 times in 40 ms at a rate change */
+#define T_ACK_MS          200u          /* a frame's CKKK awaited at most (137 ms the slowest seen) */
 #define T_PROBE_ECHO_MS   500u          /* the module's C?OK to a probe frame (110 ms on the device) */
 #define T_DISC_MS         3000u         /* our CT00 unanswered for 3 s: unrouted anyway */
 #define T_SERVED_MAX_MS   1000u         /* the idle time counts at most 1 s per tick: a USB disk
@@ -214,13 +215,29 @@ static int powered(void)
            (s_state != BT_STARTING || (GPIO2_DR & (1u << PIN_POWER)));
 }
 
+/* [ours] One frame at a time: the module answers each frame CKKK (52-137 ms later on the device)
+ * and loses one that comes before that answer. The device, 2026-10-20: CY0 30 and C\x86 sent in
+ * the same ms got one CKKK, the C\x86 was lost and the earphones stayed silent after their own
+ * pause; the probe's C\x86 alone got its CKKK and brought the music back
+ * (log/device_2026-10-20_resprobe_session 31.4 s, 136.3 s). A frame waits in s_txq until the
+ * previous one's CKKK, or T_ACK_MS without it (a module that does not answer). */
+#define TXQ 4
+static struct { uint8_t b[BT_TX_MAX]; uint8_t n; } s_txq[TXQ];
+static unsigned s_txq_head, s_txq_n;
+static uint32_t s_ack_t;                /* our last frame, its CKKK not yet in (0: none awaited) */
+
+static void txq_clear(void)
+{
+    s_txq_n = 0;
+    s_ack_t = 0;
+}
+
 /* Polled TX, one byte per USR.TFNF (stock ram:03056de0), with a timeout stock lacks. */
-static int tx(const uint8_t *p, int n)
+static int tx_now(const uint8_t *p, int n)
 {
     char t[3 * BT_TX_MAX + 8];
 
-    if (!powered())
-        return -1;
+    s_ack_t = time_stamp(time_ms());
     for (int i = 0; i < n; i++) {
         uint32_t t0 = time_ms();
 
@@ -237,6 +254,42 @@ static int tx(const uint8_t *p, int n)
         bt_frame_text(p, n, t, sizeof t);
         log_printf("bt: tx %s", t);
     }
+    return 0;
+}
+
+static int txq_open(uint32_t now)
+{
+    return !s_ack_t || now - s_ack_t >= T_ACK_MS;
+}
+
+/* The frames held back, one per answer (bt_poll, after the frames received). */
+static void txq_drain(uint32_t now)
+{
+    if (s_txq_n && txq_open(now) && powered()) {
+        unsigned i = s_txq_head;
+
+        s_txq_head = (s_txq_head + 1u) % TXQ;
+        s_txq_n--;
+        (void)tx_now(s_txq[i].b, s_txq[i].n);
+    }
+}
+
+static int tx(const uint8_t *p, int n)
+{
+    unsigned i;
+
+    if (!powered())
+        return -1;
+    if (!s_txq_n && txq_open(time_ms()))
+        return tx_now(p, n);
+    if (s_txq_n == TXQ) {
+        log_printf("bt: tx queue full: the oldest frame dropped");
+        s_txq_head = (s_txq_head + 1u) % TXQ;
+        s_txq_n--;
+    }
+    i = (s_txq_head + s_txq_n++) % TXQ;
+    memcpy(s_txq[i].b, p, (size_t)n);
+    s_txq[i].n = (uint8_t)n;
     return 0;
 }
 
@@ -269,6 +322,7 @@ static void route(int bt)
 /* Off: GPIO2.7 = 0 and the UART pins GPIO outputs at 0 (seg84:0307a0d6 and every off site). */
 static void module_off(void)
 {
+    txq_clear();
     uart_close();
     pin_out(PIN_POWER, 0);
     pin_out(PIN_RX, 0);
@@ -568,6 +622,8 @@ static void frame(const bt_frame_t *f, uint32_t now)
     }
     if (f->kind == BT_RX_STATUS)
         s_last_q = f->state;
+    if (f->kind == BT_RX_SKIP)
+        s_ack_t = 0;                    /* the answer to our last frame: the next may go */
     switch (f->kind) {
     case BT_RX_HELLO:
         if (s_state == BT_STARTING) {
@@ -647,8 +703,9 @@ static void frame(const bt_frame_t *f, uint32_t now)
             verify(now, 'K');
         if (s_probe_cmd && f->cmd == s_probe_cmd && now - s_probe_t < T_PROBE_ECHO_MS) {
             s_probe_cmd = 0;            /* [ours] the module's answer to the resume probe's frame
-                                         * (CD00 -> CDOK, the device 2026-10-20), not a key */
-            log_printf("bt: C%cOK: the answer to the probe's C%c00", f->cmd, f->cmd);
+                                         * (CD00 -> CDOK, CP00 -> CPER: the device 2026-10-20), not a key */
+            bt_frame_text(f->raw, f->raw_len, t, sizeof t);
+            log_printf("bt: %s: the answer to the probe's C%c00", t, f->cmd);
             break;
         }
         if (f->cmd == 'P' || f->cmd == 'C') {
@@ -736,6 +793,7 @@ void bt_poll(void)
     if (bt_rx_idle(&s_rx, now, &f))
         frame(&f, now);
     raw_dropped();
+    txq_drain(now);
 
     if (s_disc_t && now - s_disc_t >= T_DISC_MS) {
         s_disc_t = 0;
@@ -880,9 +938,11 @@ void bt_set_playing(int playing, int debounce)
     }
     s_stop_t = 0;
     tx(b, bt_enc_level(b, playing ? 0x1Eu : 0u));   /* CY0+30 / CY0+0 */
-    if (playing && s_mod_cp)
-        log_printf("bt: playing, but the earphones' pause (CP at %lu ms) stopped the module's stream: "
-                   "silent until their play", (unsigned long)s_mod_cp);
+    if (playing && s_mod_cp) {          /* (the C\x86 below restarts it: the device's probe, 136.3 s) */
+        log_printf("bt: playing after the earphones' pause (CP at %lu ms): C\\x86 restarts the module's stream",
+                   (unsigned long)s_mod_cp);
+        s_mod_cp = 0;
+    }
     /* the AVRCP-like status (seg27 0307de7e..0307e102, state 0x0301D8AC): a play/pause here (not
      * the connect itself) tells the module when its state differs: resume while it is < 2 ->
      * C\x86 and 2; pause or the end while it is 0 or 2 -> C\x87 and 1. CP/CC from the module set
