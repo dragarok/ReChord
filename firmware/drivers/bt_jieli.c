@@ -792,7 +792,7 @@ void bt_poll(void)
     }
 }
 
-void bt_set_playing(int playing)
+void bt_set_playing(int playing, int debounce)
 {
     uint8_t b[BT_TX_MAX];
 
@@ -807,8 +807,9 @@ void bt_set_playing(int playing)
         s_stop_t = 0;
         return;
     }
-    if (!playing && s_playing == 1) {   /* [ours] a stop once it lasted T_STOP_MS (stock sends one
-                                         * frame per action; a USB host flips within ms) */
+    if (!playing && s_playing == 1 && debounce) {   /* [ours] a stop once it lasted T_STOP_MS
+                                         * (stock sends one frame per action; a USB host flips
+                                         * within ms); the player's pause at once (bt_jieli.h) */
         uint32_t now = time_ms();
 
         if (!s_stop_t) {

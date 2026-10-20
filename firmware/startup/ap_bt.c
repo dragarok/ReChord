@@ -405,7 +405,7 @@ void bt_app_tick(void)
     }
     s_live = 1;
     bt_ui_active(in_screen);
-    bt_set_playing(s_ext >= 0 ? s_ext : player_get_state() == PLAYER_PLAYING);
+    bt_set_playing(s_ext >= 0 ? s_ext : player_get_state() == PLAYER_PLAYING, s_ext >= 0);
     bt_poll();
     bt_keys_poll(time_ms());
     volume_follow();

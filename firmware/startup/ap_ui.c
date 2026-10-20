@@ -507,7 +507,7 @@ void bt_hum_test(void)      /* in the Developer tests overlay (startup/ap_ovl.c)
         default: break;
         }
         while (time_ms() - t0 < HUM_MS) {
-            bt_set_playing(0);                  /* (silent: CY0 0, as a pause sends) */
+            bt_set_playing(0, 0);               /* (silent: CY0 0, as a pause sends) */
             bt_poll();
             watchdog_feed();
             if (s == 5)

@@ -75,8 +75,11 @@ int  bt_routed(void);                  /* GPIO2.0 = 1 / GPIO2.14 = 0 now */
 void bt_ui_active(int on);
 /* The player's state, every tick: on a change while connected stock sends
  * CY0+30 (playing) / CY0+0 (paused) (0x1D5/0x1D4, ram:03067b5a/03067bcc), and
- * to a version-5 module C\x86 / C\x87 (seg27 0307dec8 / 0307de7e, gate ram:0306765c). */
-void bt_set_playing(int playing);
+ * to a version-5 module C\x86 / C\x87 (seg27 0307dec8 / 0307de7e, gate ram:0306765c).
+ * debounce: a stop goes out only once it lasted 300 ms (a USB host's flips); 0 for the
+ * player's own pause, which stops the music at once (the module's stream, its noise floor
+ * alone, would be heard for those 300 ms: the user, 2026-10-20). */
+void bt_set_playing(int playing, int debounce);
 
 /* The power-on hook for the boot auto-on (stock seg21 0307a4d2 when the
  * setting is on): power on and reconnect to (mac): stock's two tries 3 s apart,
