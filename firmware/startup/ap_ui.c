@@ -446,87 +446,56 @@ void bt_listen_test(void)   /* in the Developer tests overlay (startup/ap_ovl.c)
     ui_invalidate_all();
 }
 
-/* [ours] Developer > BT hum (test): where the undertone on Bluetooth comes from (the user,
- * 2026-10-20: a low hum in silence at any BT volume, none on wired earphones). Linked and
- * silent, it steps through 9 states of 8 s, each on the screen and in the log ("bthum:"); the
- * user notes which are silent. Every state is put back after it. The hum is added after our
- * volume, in the module's branch: the DAC's output open on its line (we stop the I2S at a pause,
- * the DAC stays unmuted), pickup on that line (backlight PWM at 10 kHz, the CPU's current), or
- * the module itself (then no state here changes it). */
-#define HUM_PWM   ((volatile uint32_t *)0x400F0000u)   /* PWM0: CNT, PERIOD, DUTY, CTRL (panel_io_rknanoc.c) */
-#define HUM_GPIO2 (*(volatile uint32_t *)0x50030000u)  /* GPIO2.0 = 1 / 2.14 = 0: the module's path (bt_jieli.c) */
-#define HUM_MS    8000u
+/* [ours] Developer > BT volume probe (test): can the player set the earphones' volume through the
+ * module? (the user, 2026-10-20: one volume for the AirPods' swipe and the player's keys; a strong
+ * signal into the module keeps its hiss far below the music). While a track plays to the module,
+ * 8 steps of 5 s, each on the screen and in the log ("btvol:"), the music going on (pump); the user
+ * says what the volume did at each. The end puts CY0 30 back (stock's level while playing). */
+#define VOLP_MS 5000u
 
-void bt_hum_test(void)      /* in the Developer tests overlay (startup/ap_ovl.c) */
+void bt_vol_probe_test(void)    /* in the Developer tests overlay (startup/ap_ovl.c) */
 {
-    static const char *const k_name[] = {
-        "as now", "DAC muted", "backlight full (no PWM)", "backlight off", "backlight PWM 25 kHz",
-        "CPU busy", "CPU idle (WFI)", "line to the jack", "as now again",
+    static const struct { char cmd; uint8_t v, n; const char *what; } k_step[] = {
+        { 'Y', 30, 1, "CY0 30 (stock, playing)" }, { 'Y', 20, 1, "CY0 20" }, { 'Y', 10, 1, "CY0 10" },
+        { 'Y', 5, 1, "CY0 5" }, { 'Y', 30, 1, "CY0 30 again" }, { 'D', '0', 3, "CD00 x3 (volume down?)" },
+        { 'U', '0', 3, "CU00 x3 (volume up?)" }, { 'Y', 30, 1, "CY0 30: done" },
     };
-    uint8_t mute[2] = { 0, 0 };
-    uint32_t per = HUM_PWM[1], duty = HUM_PWM[2], ctrl = HUM_PWM[3];
     char buf[48];
 
-    usb_out_off();
-    player_stop();
-    if (!bt_routed()) {
-        screen("BT hum (test)");
-        line(1, "connect Bluetooth first; any key");
+    if (!bt_routed() || player_get_state() != PLAYER_PLAYING) {
+        screen("BT volume probe (test)");
+        line(1, "play a track on Bluetooth first");
+        line(3, "any key");
         display_flush_rows(0, DISPLAY_H - 1);
         ask(1);
         ui_invalidate_all();
         return;
     }
-    dac_read_reg(0, 0x00010009, &mute[0]);
-    dac_read_reg(1, 0x00010009, &mute[1]);
-    log_printf("bthum: start: DAC mute %02x %02x, PWM period %u duty %u ctrl %x, pclk %u", mute[0], mute[1],
-               (unsigned)per, (unsigned)duty, (unsigned)ctrl, (unsigned)clock_pclk_hz());
-    for (unsigned s = 0; s < sizeof k_name / sizeof k_name[0]; s++) {
+    for (unsigned s = 0; s < sizeof k_step / sizeof k_step[0]; s++) {
         uint32_t t0 = time_ms();
+        unsigned sent = 0;
 
-        screen("BT hum (test): listen");
-        snprintf(buf, sizeof buf, "%u of 9: %s", s + 1u, k_name[s]);
+        screen("BT volume probe: listen");
+        snprintf(buf, sizeof buf, "%u of 8: %s", s + 1u, k_step[s].what);
         line(2, buf);
+        line(4, "what did the volume do?");
         display_flush_rows(0, DISPLAY_H - 1);
-        log_printf("bthum: %u %s", s + 1u, k_name[s]);
-        switch (s) {
-        case 1: dac_write_reg(0, 0x00010009, 0xFF); dac_write_reg(1, 0x00010009, 0xFF); break;
-        case 2: backlight_set(100); break;
-        case 3: backlight_set(0); break;
-        case 4:
-            if ((ctrl & 1u) && per) {           /* the same duty at 25 kHz (above hearing) */
-                uint32_t np = clock_pclk_hz() / 25000u;
-
-                HUM_PWM[2] = (uint32_t)((uint64_t)duty * np / per);
-                HUM_PWM[1] = np;
-            } else {
-                log_printf("bthum: no PWM at this brightness: state 5 as state 1");
+        log_printf("btvol: %u %s", s + 1u, k_step[s].what);
+        while (time_ms() - t0 < VOLP_MS) {
+            if (sent < k_step[s].n && time_ms() - t0 >= sent * 1000u) {
+                if (bt_probe_send(k_step[s].cmd, k_step[s].v) != 0)
+                    log_printf("btvol: not sent (no link)");
+                sent++;
             }
-            break;
-        case 7: HUM_GPIO2 = (HUM_GPIO2 & ~1u) | 1u << 14; break;
-        default: break;
-        }
-        while (time_ms() - t0 < HUM_MS) {
-            bt_set_playing(0, 0);               /* (silent: CY0 0, as a pause sends) */
-            bt_poll();
+            pump();                     /* the music, the storage, the module's answers */
             watchdog_feed();
-            if (s == 5)
-                memset(g_scratch, (int)time_ms(), 4096);   /* (current drawn without a pause) */
-            else
-                cpu_wait_tick();
-        }
-        switch (s) {                            /* put back */
-        case 1: dac_write_reg(0, 0x00010009, mute[0]); dac_write_reg(1, 0x00010009, mute[1]); break;
-        case 2: case 3: power_brightness_changed(); break;
-        case 4: if ((ctrl & 1u) && per) { HUM_PWM[2] = duty; HUM_PWM[1] = per; } break;
-        case 7: HUM_GPIO2 = (HUM_GPIO2 | 1u) & ~(1u << 14); break;
-        default: break;
+            cpu_wait_tick();
         }
     }
-    log_printf("bthum: done, all put back");
-    log_flush("bthum");
-    screen("BT hum (test): done");
-    line(2, "which numbers were silent?");
+    log_printf("btvol: done");
+    log_flush("btvol");
+    screen("BT volume probe: done");
+    line(2, "which steps changed the volume?");
     line(4, "any key");
     display_flush_rows(0, DISPLAY_H - 1);
     ask(1);

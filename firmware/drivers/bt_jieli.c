@@ -653,6 +653,43 @@ static void frame(const bt_frame_t *f, uint32_t now)
     }
 }
 
+/* [ours] Developer > BT volume probe (test), in the dev overlay: one frame of stock's short form
+ * 'C' cmd '0' v 0x00 (ram:0306763c builds CY0 so), with values stock never sends: CY0 1..29 (the
+ * JieLi SDKs' system volume runs 0..30; stock sends 30 on play, 0 on pause), CD00/CU00 (the
+ * earphones' volume frames, which stock only receives). Only while linked. */
+int bt_probe_send(char cmd, uint8_t v)
+{
+    uint8_t b[5] = { 'C', (uint8_t)cmd, '0', v, 0 };
+
+    return s_state == BT_CONNECTED ? tx(b, 5) : -1;
+}
+
+/* [ours] What the framer threw away, with the bytes around it: a frame of a form nobody has seen
+ * (the earphones' volume, 2026-10-20: none of the known forms came for a swipe) is in the log so,
+ * not lost. At most 64 lines a boot (a line with garbage replies would flood it). */
+static uint8_t s_raw[16];               /* the last bytes received, a ring */
+static unsigned s_raw_n;
+static uint32_t s_drop_seen;
+static unsigned s_drop_lines;
+
+static void raw_dropped(void)
+{
+    uint8_t b[sizeof s_raw];
+    char t[3 * sizeof s_raw + 8];
+    unsigned n = s_raw_n < sizeof s_raw ? s_raw_n : sizeof s_raw;
+
+    if (s_rx.dropped == s_drop_seen)
+        return;
+    s_drop_seen = s_rx.dropped;
+    if (s_drop_lines >= 64u)
+        return;
+    s_drop_lines++;
+    for (unsigned i = 0; i < n; i++)
+        b[i] = s_raw[(s_raw_n - n + i) % sizeof s_raw];
+    bt_frame_text(b, (int)n, t, sizeof t);
+    log_printf("bt: rx dropped (%u in all), the last bytes: %s", (unsigned)s_rx.dropped, t);
+}
+
 /* ---- the tick ------------------------------------------------------------------- */
 void bt_poll(void)
 {
@@ -672,11 +709,13 @@ void bt_poll(void)
         uint8_t b = s_ring[s_tail % RING];
 
         s_tail++;
+        s_raw[s_raw_n++ % sizeof s_raw] = b;
         if (bt_rx_byte(&s_rx, b, now, &f))
             frame(&f, now);
     }
     if (bt_rx_idle(&s_rx, now, &f))
         frame(&f, now);
+    raw_dropped();
 
     if (s_disc_t && now - s_disc_t >= T_DISC_MS) {
         s_disc_t = 0;

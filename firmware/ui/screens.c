@@ -33,7 +33,7 @@
 void ap_later(void (*fn)(void));
 int ap_cable(void);
 void ap_usb_disk(void), ap_usb_dac(void), ap_dac_test(void), ap_usb_console(void), ap_usb_probe(void);
-void ap_usb_detect(void), ap_bt_listen(void), ap_bt_hum(void), ap_te_probe(void), ap_hifi_probe(void), ap_update(void), ap_power_off(void), ap_screen(int on);
+void ap_usb_detect(void), ap_bt_listen(void), ap_bt_vol(void), ap_te_probe(void), ap_hifi_probe(void), ap_update(void), ap_power_off(void), ap_screen(int on);
 void ap_sd_test(void);
 void ap_cable_choice(int c);
 const char *ap_keys_text(void);
@@ -1700,7 +1700,7 @@ static const set_t g_dev[] = {
     { ICON_USBC, S_DO, 0, 0, "USB-C probe", 0, 0, ap_usb_probe },
     { ICON_USB, S_DO, 0, 0, "USB detect", 0, 0, ap_usb_detect },
     { ICON_BT, S_DO, 0, 0, "BT listen (test)", 0, 0, ap_bt_listen },
-    { ICON_BT, S_DO, 0, 0, "BT hum (test)", 0, 0, ap_bt_hum },
+    { ICON_BT, S_DO, 0, 0, "BT volume probe (test)", 0, 0, ap_bt_vol },
     { ICON_CHIP, S_INFO, 0, 0, "Keys" },
     { ICON_INFO, S_CYCLE, 2, 0, "Debug strip", &g_cfg.strip, n_offon },
     { ICON_SD, S_DO, 0, 0, "SD card test", 0, 0, ap_sd_test },   /* (above HIFI probe: m40, m32 count up) */

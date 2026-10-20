@@ -80,6 +80,8 @@ void bt_ui_active(int on);
  * player's own pause, which stops the music at once (the module's stream, its noise floor
  * alone, would be heard for those 300 ms: the user, 2026-10-20). */
 void bt_set_playing(int playing, int debounce);
+/* [ours] Developer > BT volume probe (test): 'C' cmd '0' v 0x00 to the module, only while linked. */
+int bt_probe_send(char cmd, uint8_t v);
 
 /* The power-on hook for the boot auto-on (stock seg21 0307a4d2 when the
  * setting is on): power on and reconnect to (mac): stock's two tries 3 s apart,
