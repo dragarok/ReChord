@@ -12,6 +12,8 @@
  *
  * Usage: test_text <golden dir> <deva_hb.txt> [out dir for the rendered PPMs]
  */
+#define _POSIX_C_SOURCE 200809L  /* clock_gettime() under -std=c99 on glibc (Linux/WSL); a no-op elsewhere */
+
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>

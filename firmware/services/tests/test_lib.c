@@ -16,6 +16,8 @@
  * written before). --io-busy K: lib_io_ok() says no in every K-th pass (audio without headroom), and
  * lib_io_dirty() ends a loop every 7th test (a slice that queued blocks).
  */
+#define _POSIX_C_SOURCE 200809L  /* clock_gettime() under -std=c99 on glibc (Linux/WSL); a no-op elsewhere */
+
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>

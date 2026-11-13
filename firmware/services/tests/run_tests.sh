@@ -24,5 +24,5 @@ $CC $CFLAGS -I.. -o .work/test_keyseq  test_keyseq.c  ../keyseq.c ../bt_keys.c
 .work/test_fs
 .work/test_bt_proto
 .work/test_keyseq
-./run_tags.sh
+sh ./run_tags.sh
 echo "ALL SERVICES TESTS PASSED"

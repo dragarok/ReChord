@@ -10,6 +10,8 @@
  *    (and sometimes cut short); the reader must stay inside the file and its
  *    buffers, ask for no more than its window, and return valid UTF-8.
  */
+#define _POSIX_C_SOURCE 200809L  /* strnlen() under -std=c99 on glibc (Linux/WSL); a no-op elsewhere */
+
 #include "tags.h"
 
 #include <stdio.h>

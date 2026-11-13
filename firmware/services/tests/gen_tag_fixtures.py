@@ -279,9 +279,13 @@ run("ffmpeg", "-y", "-i", path("_base.wav"), "-f", "lavfi", "-i", "color=c=red:s
 run("ffmpeg", "-y", "-i", path("_base.wav"), "-ac", "2", "-c:a", "vorbis", "-strict", "-2",
     "-metadata", "title=Ogg Títle", "-metadata", "artist=Ogg Artist", "-metadata", "album=Ogg Album",
     "-metadata", "track=5", path("vorbis.ogg"))
-run("ffmpeg", "-y", "-i", path("_base.wav"), "-c:a", "libopus",                      # the packet spans pages
-    "-metadata", "LYRICS=" + "lyrics " * 20000, "-metadata", "title=Opus Títle",
-    "-metadata", "artist=Opus Artist", "-metadata", "track=2", path("opus_long.opus"))
+# The 140 KB tag goes through an ffmetadata file: Linux caps one command-line argument at 128 KiB.
+write("_long_meta.txt", (";FFMETADATA1\nLYRICS=" + "lyrics " * 20000 + "\ntitle=Opus Títle\n"
+                         "artist=Opus Artist\ntrack=2\n").encode("utf-8"))
+run("ffmpeg", "-y", "-i", path("_base.wav"), "-f", "ffmetadata", "-i", path("_long_meta.txt"),
+    "-map", "0:a", "-map_metadata", "1", "-c:a", "libopus",                            # the packet spans pages
+    path("opus_long.opus"))
+os.remove(path("_long_meta.txt"))
 run("ffmpeg", "-y", "-i", path("_base.wav"), "-c:a", "libopus", "-map_metadata", "-1",
     "-fflags", "+bitexact", path("ogg_none.ogg"))
 write("bad_mp4.m4a", struct.pack(">I", 0xFFFFFFF0) + b"moov" + bytes(64))
